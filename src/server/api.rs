@@ -4,22 +4,39 @@ use crate::supervisor::process::ProcessSupervisor;
 use axum::extract::{Path, State};
 use axum::http::{Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Json};
-use axum::routing::{any, get, patch, post};
+use axum::routing::{any, delete, get, patch, post};
 use axum::Router;
+use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::Mutex;
 use tower_http::cors::CorsLayer;
 use tracing::info;
 
 const Z8S_PORT: u16 = 6443;
 
+type NamespaceStore = Arc<Mutex<HashMap<String, serde_json::Value>>>;
+
 #[derive(Clone)]
 pub struct AppState {
     pub store: Arc<ResourceStore>,
     pub supervisor: Arc<ProcessSupervisor>,
+    pub namespaces: NamespaceStore,
 }
 
 pub async fn run_server(store: Arc<ResourceStore>, supervisor: Arc<ProcessSupervisor>) {
-    let state = AppState { store, supervisor: supervisor.clone() };
+    let namespaces = Arc::new(Mutex::new(HashMap::new()));
+    {
+        let mut ns = namespaces.lock().await;
+        ns.insert("default".into(), serde_json::json!({
+            "metadata": {
+                "name": "default",
+                "uid": "ns-default",
+                "creationTimestamp": "2024-01-01T00:00:00Z"
+            },
+            "status": { "phase": "Active" }
+        }));
+    }
+    let state = AppState { store, supervisor: supervisor.clone(), namespaces };
     let cors = CorsLayer::permissive();
 
     let app = Router::new()
@@ -38,7 +55,8 @@ pub async fn run_server(store: Arc<ResourceStore>, supervisor: Arc<ProcessSuperv
         .route("/apis/apps/v1/namespaces/{namespace}/deployments", get(list_deployments))
         .route("/apis/apps/v1/namespaces/{namespace}/deployments/{name}", get(get_deployment))
         .route("/apis/apps/v1/namespaces/{namespace}/deployments/{name}/scale", patch(patch_deployment_scale))
-        .route("/api/v1/namespaces", get(list_namespaces))
+        .route("/api/v1/namespaces", get(list_namespaces).post(create_namespace))
+        .route("/api/v1/namespaces/{name}", get(get_namespace).delete(delete_namespace))
         .route("/api/v1/nodes", get(list_nodes))
         .route("/openapi/v2", get(openapi_v2))
         .route("/version", get(version_handler))
@@ -498,21 +516,95 @@ fn resource_to_deploy_json(resource: &AnyResource) -> serde_json::Value {
     })
 }
 
-async fn list_namespaces() -> Json<serde_json::Value> {
+async fn list_namespaces(
+    State(state): State<AppState>,
+) -> Json<serde_json::Value> {
+    let ns = state.namespaces.lock().await;
+    let items: Vec<serde_json::Value> = ns.values().cloned().collect();
     Json(serde_json::json!({
         "kind": "NamespaceList",
         "apiVersion": "v1",
-        "items": [
-            {
-                "metadata": {
-                    "name": "default",
-                    "uid": "ns-default",
-                    "creationTimestamp": "2024-01-01T00:00:00Z"
-                },
-                "status": {"phase": "Active"}
-            }
-        ]
+        "items": items
     }))
+}
+
+async fn get_namespace(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let ns = state.namespaces.lock().await;
+    match ns.get(&name) {
+        Some(n) => Ok(Json(n.clone())),
+        None => Err(ApiError::NotFound(format!("namespace \"{}\" not found", name))),
+    }
+}
+
+async fn create_namespace(
+    State(state): State<AppState>,
+    body: axum::body::Bytes,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    // Try to extract name from JSON body, or parse from protobuf wrapper
+    let name = if let Ok(s) = std::str::from_utf8(&body) {
+        // Direct JSON
+        serde_json::from_str::<serde_json::Value>(s).ok()
+            .and_then(|v| v.get("metadata")?.get("name")?.as_str().map(|n| n.to_string()))
+    } else if body.starts_with(b"k8s\x00") && body.len() > 10 {
+        // Protobuf wrapper: search for JSON inside (the embedded JSON starts with '{')
+        body[4..].windows(2).position(|w| w == b"{\"")
+            .and_then(|pos| {
+                let json_bytes = &body[4 + pos..];
+                let s = std::str::from_utf8(json_bytes).ok()?;
+                serde_json::from_str::<serde_json::Value>(s).ok()
+            })
+            .and_then(|v| v.get("metadata")?.get("name")?.as_str().map(|n| n.to_string()))
+    } else {
+        None
+    }
+    .unwrap_or_else(|| format!("ns-{}", uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("x")));
+
+    let mut ns = state.namespaces.lock().await;
+    if ns.contains_key(&name) {
+        return Err(ApiError::BadRequest(format!("namespace \"{}\" already exists", name)));
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let entry = serde_json::json!({
+        "kind": "Namespace",
+        "apiVersion": "v1",
+        "metadata": {
+            "name": name,
+            "uid": format!("ns-{}", name),
+            "creationTimestamp": now,
+        },
+        "status": { "phase": "Active" }
+    });
+
+    info!("Created namespace: {}", name);
+    ns.insert(name.to_string(), entry.clone());
+    Ok(Json(entry))
+}
+
+async fn delete_namespace(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if name == "default" {
+        return Err(ApiError::BadRequest("cannot delete default namespace".into()));
+    }
+    let mut ns = state.namespaces.lock().await;
+    match ns.remove(&name) {
+        Some(_) => {
+            info!("Deleted namespace: {}", name);
+            Ok(Json(serde_json::json!({
+                "kind": "Status",
+                "apiVersion": "v1",
+                "metadata": {},
+                "status": "Success",
+                "code": 200
+            })))
+        }
+        None => Err(ApiError::NotFound(format!("namespace \"{}\" not found", name))),
+    }
 }
 
 async fn list_nodes() -> Json<serde_json::Value> {
@@ -640,6 +732,9 @@ impl ApiError {
     }
     fn MethodNotAllowed(msg: String) -> Self {
         Self { status: StatusCode::METHOD_NOT_ALLOWED, message: msg }
+    }
+    fn UnsupportedMediaType(msg: String) -> Self {
+        Self { status: StatusCode::UNSUPPORTED_MEDIA_TYPE, message: msg }
     }
 }
 
