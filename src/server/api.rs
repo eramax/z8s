@@ -67,8 +67,8 @@ pub async fn run_server(store: Arc<ResourceStore>, supervisor: Arc<ProcessSuperv
         .route("/api/v1/namespaces/{namespace}/pods/{name}/log", get(get_pod_log))
         .route("/api/v1/namespaces/{namespace}/pods/{name}/exec", get(crate::server::exec::exec_handler).post(crate::server::exec::exec_post_handler))
 
-        .route("/apis/apps/v1/deployments", get(list_deployments_all).post(create_deployment))
-        .route("/apis/apps/v1/namespaces/{namespace}/deployments", get(list_deployments))
+        .route("/apis/apps/v1/deployments", get(list_deployments_all))
+        .route("/apis/apps/v1/namespaces/{namespace}/deployments", get(list_deployments).post(create_deployment))
         .route("/apis/apps/v1/namespaces/{namespace}/deployments/{name}", get(get_deployment))
         .route("/apis/apps/v1/namespaces/{namespace}/deployments/{name}/scale", patch(patch_deployment_scale))
         .route("/api/v1/namespaces", get(list_namespaces).post(create_namespace))
@@ -125,6 +125,20 @@ async fn api_v1_resources() -> Json<serde_json::Value> {
                 "verbs": ["get", "list", "watch", "create", "update", "delete"],
                 "shortNames": ["po"],
                 "categories": ["all"]
+            },
+            {
+                "name": "pods/exec",
+                "singularName": "",
+                "namespaced": true,
+                "kind": "PodExecOptions",
+                "verbs": ["create", "get"]
+            },
+            {
+                "name": "pods/log",
+                "singularName": "",
+                "namespaced": true,
+                "kind": "Pod",
+                "verbs": ["get"]
             },
             {
                 "name": "namespaces",
@@ -216,23 +230,101 @@ async fn api_apps_v1_resources() -> Json<serde_json::Value> {
     }))
 }
 
+fn accepts_table(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get("accept")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.contains("as=Table"))
+        .unwrap_or(false)
+}
+
+fn age_from_timestamp(ts: &str) -> String {
+    if let Ok(created) = chrono::DateTime::parse_from_rfc3339(ts) {
+        let age = chrono::Utc::now().signed_duration_since(created);
+        let secs = age.num_seconds().max(0);
+        if secs < 60 {
+            format!("{}s", secs)
+        } else if secs < 3600 {
+            format!("{}m", secs / 60)
+        } else if secs < 86400 {
+            format!("{}h", secs / 3600)
+        } else {
+            format!("{}d", secs / 86400)
+        }
+    } else {
+        "<unknown>".into()
+    }
+}
+
+fn make_table(
+    columns: serde_json::Value,
+    rows: Vec<serde_json::Value>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "Table",
+        "apiVersion": "meta.k8s.io/v1",
+        "columnDefinitions": columns,
+        "rows": rows,
+    })
+}
+
+fn pod_list_to_table(items: &[serde_json::Value]) -> serde_json::Value {
+    let columns = serde_json::json!([
+        {"name": "Name", "type": "string", "format": "name", "description": "Pod name", "priority": 0},
+        {"name": "Ready", "type": "string", "description": "Ready containers", "priority": 0},
+        {"name": "Status", "type": "string", "description": "Pod status", "priority": 0},
+        {"name": "Restarts", "type": "string", "description": "Restart count", "priority": 0},
+        {"name": "Age", "type": "string", "description": "Creation age", "priority": 0},
+    ]);
+    let rows: Vec<serde_json::Value> = items.iter().map(|item| {
+        let meta = &item["metadata"];
+        let status = &item["status"];
+        let name = meta["name"].as_str().unwrap_or("");
+        let phase = status["phase"].as_str().unwrap_or("Unknown");
+        let creation = meta["creationTimestamp"].as_str().unwrap_or("");
+        let age = age_from_timestamp(creation);
+
+        let (ready_count, total, restarts) = status["containerStatuses"].as_array().map(|cs| {
+            let ready = cs.iter().filter(|c| c["ready"].as_bool().unwrap_or(false)).count();
+            let restarts: i32 = cs.iter().map(|c| c["restartCount"].as_i64().unwrap_or(0) as i32).sum();
+            (ready, cs.len(), restarts)
+        }).unwrap_or((0, 0, 0));
+
+        serde_json::json!({
+            "cells": [
+                name,
+                format!("{}/{}", ready_count, total),
+                phase,
+                format!("{}", restarts),
+                age,
+            ],
+            "object": item,
+        })
+    }).collect();
+
+    make_table(columns, rows)
+}
+
 async fn list_pods_all(
     State(state): State<AppState>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    list_pods_in_namespace(state, None).await
+    headers: axum::http::HeaderMap,
+) -> Result<axum::response::Response, ApiError> {
+    list_pods_in_namespace(state, None, headers).await
 }
 
 async fn list_pods(
     State(state): State<AppState>,
     Path(namespace): Path<String>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    list_pods_in_namespace(state, Some(namespace)).await
+    headers: axum::http::HeaderMap,
+) -> Result<axum::response::Response, ApiError> {
+    list_pods_in_namespace(state, Some(namespace), headers).await
 }
 
 async fn list_pods_in_namespace(
     state: AppState,
     namespace: Option<String>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+    headers: axum::http::HeaderMap,
+) -> Result<axum::response::Response, ApiError> {
     let trackers = state.store.get_by_kind("Pod").await;
     let mut items = Vec::new();
     for t in &trackers {
@@ -242,12 +334,17 @@ async fn list_pods_in_namespace(
         }
     }
 
+    if accepts_table(&headers) {
+        let table = pod_list_to_table(&items);
+        return Ok((StatusCode::OK, Json(table)).into_response());
+    }
+
     Ok(Json(serde_json::json!({
         "kind": "PodList",
         "apiVersion": "v1",
         "metadata": { "resourceVersion": "1" },
         "items": items
-    })))
+    })).into_response())
 }
 
 async fn get_pod(
@@ -283,99 +380,158 @@ async fn get_pod_log(
 }
 
 fn resource_to_pod_json(resource: &AnyResource) -> serde_json::Value {
-    let is_ready = true; // default to true when supervisor not available
-    resource_to_pod_json_with_status(resource, is_ready)
+    resource_to_pod_json_with_status(resource, true)
+}
+
+fn now_time() -> k8s_openapi::apimachinery::pkg::apis::meta::v1::Time {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+        k8s_openapi::jiff::Timestamp::from_second(secs).unwrap_or(
+            k8s_openapi::jiff::Timestamp::from_second(0).unwrap(),
+        ),
+    )
+}
+
+fn fill_pod_metadata(pod: &mut k8s_openapi::api::core::v1::Pod) {
+    let meta = &mut pod.metadata;
+    if meta.creation_timestamp.is_none() {
+        meta.creation_timestamp = Some(now_time());
+    }
+    if meta.resource_version.is_none() {
+        meta.resource_version = Some("1".into());
+    }
+    if meta.uid.is_none() {
+        meta.uid = Some(format!("Pod/{}", meta.name.as_deref().unwrap_or("unknown")));
+    }
 }
 
 fn resource_to_pod_json_with_status(resource: &AnyResource, is_ready: bool) -> serde_json::Value {
+    use k8s_openapi::api::core::v1::{
+        ContainerState, ContainerStateRunning, ContainerStatus, HostIP, PodCondition, PodIP, PodStatus,
+    };
+
     let pod = match resource {
         AnyResource::Pod(p) => p,
         _ => return serde_json::Value::Null,
     };
 
-    let now = chrono::Utc::now().to_rfc3339();
+    let time = now_time();
 
     let ready_status = if is_ready { "True" } else { "False" };
 
-    serde_json::json!({
-        "kind": "Pod",
-        "apiVersion": "v1",
-        "metadata": {
-            "name": pod.metadata.name,
-            "namespace": pod.metadata.namespace,
-            "uid": resource.uid(),
-            "labels": pod.metadata.labels,
-            "creationTimestamp": now,
-            "resourceVersion": "1"
-        },
-        "spec": {
-            "containers": pod.spec.as_ref().map(|s| {
-                s.containers.iter().map(|c| {
-                    serde_json::json!({
-                        "name": c.name,
-                        "image": c.image,
-                        "ports": c.ports,
-                        "resources": c.resources,
-                        "imagePullPolicy": c.image_pull_policy,
-                        "terminationMessagePolicy": c.termination_message_policy,
-                        "terminationMessagePath": c.termination_message_path
-                    })
-                }).collect::<Vec<_>>()
-            }),
-            "nodeName": "z8s-node",
-            "restartPolicy": pod.spec.as_ref().and_then(|s| s.restart_policy.as_ref()),
-            "dnsPolicy": pod.spec.as_ref().and_then(|s| s.dns_policy.as_ref()),
-            "securityContext": pod.spec.as_ref().and_then(|s| s.security_context.as_ref()),
-        },
-        "status": {
-            "phase": if is_ready { "Running" } else { "Running" },
-            "hostIP": "10.0.0.1",
-            "podIP": "10.42.0.1",
-            "podIPs": [{"ip": "10.42.0.1"}],
-            "startTime": now,
-            "conditions": [
-                {"type": "Initialized", "status": "True", "lastTransitionTime": now},
-                {"type": "Ready", "status": ready_status, "lastTransitionTime": now},
-                {"type": "ContainersReady", "status": ready_status, "lastTransitionTime": now},
-                {"type": "PodScheduled", "status": "True", "lastTransitionTime": now}
-            ],
-            "containerStatuses": pod.spec.as_ref().map(|s| {
-                s.containers.iter().map(|c| {
-                    serde_json::json!({
-                        "name": c.name,
-                        "state": {"running": {"startedAt": now}},
-                        "lastState": {},
-                        "ready": true,
-                        "restartCount": 0,
-                        "image": c.image,
-                        "imageID": c.image.as_ref().map(|i| format!("z8s://{}", i)),
-                        "containerID": format!("z8s://{}", c.name),
-                        "started": true
-                    })
-                }).collect::<Vec<_>>()
-            }),
-            "qosClass": "Burstable"
-        }
-    })
+    let status = PodStatus {
+        phase: Some("Running".into()),
+        host_ip: Some("10.0.0.1".into()),
+        host_ips: Some(vec![HostIP { ip: "10.0.0.1".into() }]),
+        pod_ip: Some("10.42.0.1".into()),
+        pod_ips: Some(vec![PodIP { ip: "10.42.0.1".into() }]),
+        start_time: Some(time.clone()),
+        conditions: Some(vec![
+            PodCondition {
+                type_: "Initialized".into(),
+                status: "True".into(),
+                last_transition_time: Some(time.clone()),
+                ..Default::default()
+            },
+            PodCondition {
+                type_: "Ready".into(),
+                status: ready_status.into(),
+                last_transition_time: Some(time.clone()),
+                ..Default::default()
+            },
+            PodCondition {
+                type_: "ContainersReady".into(),
+                status: ready_status.into(),
+                last_transition_time: Some(time.clone()),
+                ..Default::default()
+            },
+            PodCondition {
+                type_: "PodScheduled".into(),
+                status: "True".into(),
+                last_transition_time: Some(time.clone()),
+                ..Default::default()
+            },
+        ]),
+        container_statuses: pod.spec.as_ref().map(|s| {
+            s.containers.iter().map(|c| {
+                ContainerStatus {
+                    name: c.name.clone(),
+                    image: c.image.clone().unwrap_or_default(),
+                    image_id: c.image.clone().map(|i| format!("z8s://{}", i)).unwrap_or_default(),
+                    ready: true,
+                    restart_count: 0,
+                    container_id: Some(format!("z8s://{}", c.name)),
+                    state: Some(ContainerState {
+                        running: Some(ContainerStateRunning {
+                            started_at: Some(time.clone()),
+                        }),
+                        ..Default::default()
+                    }),
+                    started: Some(true),
+                    ..Default::default()
+                }
+            }).collect()
+        }),
+        qos_class: Some("Burstable".into()),
+        ..Default::default()
+    };
+
+    let mut pod = pod.clone();
+    fill_pod_metadata(&mut pod);
+    pod.status = Some(status);
+    serde_json::to_value(&pod).unwrap_or_default()
+}
+
+fn deployment_list_to_table(items: &[serde_json::Value]) -> serde_json::Value {
+    let columns = serde_json::json!([
+        {"name": "Name", "type": "string", "format": "name", "description": "Deployment name", "priority": 0},
+        {"name": "Ready", "type": "string", "description": "Ready replicas", "priority": 0},
+        {"name": "Up-to-date", "type": "string", "description": "Up-to-date replicas", "priority": 0},
+        {"name": "Available", "type": "string", "description": "Available replicas", "priority": 0},
+        {"name": "Age", "type": "string", "description": "Creation age", "priority": 0},
+    ]);
+    let rows: Vec<serde_json::Value> = items.iter().map(|item| {
+        let meta = &item["metadata"];
+        let status = &item["status"];
+        let name = meta["name"].as_str().unwrap_or("");
+        let creation = meta["creationTimestamp"].as_str().unwrap_or("");
+        let age = age_from_timestamp(creation);
+        let ready = status["readyReplicas"].as_i64().unwrap_or(0);
+        let up_to_date = status["updatedReplicas"].as_i64().unwrap_or(0);
+        let available = status["availableReplicas"].as_i64().unwrap_or(0);
+
+        serde_json::json!({
+            "cells": [name, format!("{}/{}", ready, status["replicas"].as_i64().unwrap_or(0)), up_to_date, available, age],
+            "object": item,
+        })
+    }).collect();
+
+    make_table(columns, rows)
 }
 
 async fn list_deployments_all(
     State(state): State<AppState>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    list_deployments_in_namespace(state, None).await
+    headers: axum::http::HeaderMap,
+) -> Result<axum::response::Response, ApiError> {
+    list_deployments_in_namespace(state, None, headers).await
 }
 
 async fn list_deployments(
     State(state): State<AppState>,
     Path(namespace): Path<String>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    list_deployments_in_namespace(state, Some(namespace)).await
+    headers: axum::http::HeaderMap,
+) -> Result<axum::response::Response, ApiError> {
+    list_deployments_in_namespace(state, Some(namespace), headers).await
 }
 
 async fn list_deployments_in_namespace(
     state: AppState,
     namespace: Option<String>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+    headers: axum::http::HeaderMap,
+) -> Result<axum::response::Response, ApiError> {
     let trackers = state.store.get_by_kind("Deployment").await;
     let items: Vec<serde_json::Value> = trackers
         .iter()
@@ -385,12 +541,16 @@ async fn list_deployments_in_namespace(
         .map(|t| resource_to_deploy_json(&t.resource))
         .collect();
 
+    if accepts_table(&headers) {
+        return Ok((StatusCode::OK, Json(deployment_list_to_table(&items))).into_response());
+    }
+
     Ok(Json(serde_json::json!({
         "kind": "DeploymentList",
         "apiVersion": "apps/v1",
         "metadata": { "resourceVersion": "1" },
         "items": items
-    })))
+    })).into_response())
 }
 
 async fn get_deployment(
@@ -438,22 +598,15 @@ async fn create_pod(
     if kind != "Pod" {
         return Err(ApiError::BadRequest(format!("expected Pod, got {}", kind)));
     }
-    let pod: k8s_openapi::api::core::v1::Pod = serde_json::from_value(body)
+    let mut pod: k8s_openapi::api::core::v1::Pod = serde_json::from_value(body)
         .map_err(|e| ApiError::BadRequest(format!("invalid Pod: {}", e)))?;
+    fill_pod_metadata(&mut pod);
     let resource = AnyResource::Pod(pod);
     state.store.apply(resource.clone()).await.map_err(|e| ApiError::BadRequest(e.to_string()))?;
     state.supervisor.start_pod(&resource).await.map_err(|e| ApiError::BadRequest(e.to_string()))?;
-    Ok(Json(serde_json::json!({
-        "kind": "Pod",
-        "apiVersion": "v1",
-        "metadata": {
-            "name": resource.name(),
-            "namespace": resource.namespace(),
-            "uid": resource.uid(),
-            "creationTimestamp": chrono::Utc::now().to_rfc3339(),
-        },
-        "status": { "phase": "Pending" }
-    })))
+    let mut value = serde_json::to_value(&resource).unwrap_or_default();
+    value["status"] = serde_json::json!({ "phase": "Pending" });
+    Ok(Json(value))
 }
 
 async fn create_deployment(
@@ -465,21 +618,14 @@ async fn create_deployment(
     if kind != "Deployment" {
         return Err(ApiError::BadRequest(format!("expected Deployment, got {}", kind)));
     }
-    let deploy: k8s_openapi::api::apps::v1::Deployment = serde_json::from_value(body)
+    let mut deploy: k8s_openapi::api::apps::v1::Deployment = serde_json::from_value(body)
         .map_err(|e| ApiError::BadRequest(format!("invalid Deployment: {}", e)))?;
+    fill_deployment_metadata(&mut deploy);
     let resource = AnyResource::Deployment(deploy);
     state.store.apply(resource.clone()).await.map_err(|e| ApiError::BadRequest(e.to_string()))?;
-    Ok(Json(serde_json::json!({
-        "kind": "Deployment",
-        "apiVersion": "apps/v1",
-        "metadata": {
-            "name": resource.name(),
-            "namespace": resource.namespace(),
-            "uid": resource.uid(),
-            "creationTimestamp": chrono::Utc::now().to_rfc3339(),
-        },
-        "status": { "replicas": 0 }
-    })))
+    let mut value = serde_json::to_value(&resource).unwrap_or_default();
+    value["status"] = serde_json::json!({ "replicas": 0 });
+    Ok(Json(value))
 }
 
 async fn pod_handler(
@@ -522,47 +668,60 @@ async fn delete_pod(
     Err(ApiError::NotFound(format!("pod \"{}\" not found", name)))
 }
 
+fn fill_deployment_metadata(deploy: &mut k8s_openapi::api::apps::v1::Deployment) {
+    let meta = &mut deploy.metadata;
+    if meta.creation_timestamp.is_none() {
+        meta.creation_timestamp = Some(now_time());
+    }
+    if meta.resource_version.is_none() {
+        meta.resource_version = Some("1".into());
+    }
+    if meta.uid.is_none() {
+        meta.uid = Some(format!("Deployment/{}", meta.name.as_deref().unwrap_or("unknown")));
+    }
+}
+
 fn resource_to_deploy_json(resource: &AnyResource) -> serde_json::Value {
+    use k8s_openapi::api::apps::v1::{DeploymentCondition, DeploymentStatus};
+
     let deploy = match resource {
         AnyResource::Deployment(d) => d,
         _ => return serde_json::Value::Null,
     };
 
-    let now = chrono::Utc::now().to_rfc3339();
-    let spec = deploy.spec.as_ref();
-    let replicas = spec.map(|s| s.replicas.unwrap_or(1));
+    let time = now_time();
+    let replicas = deploy.spec.as_ref().and_then(|s| s.replicas);
 
-    serde_json::json!({
-        "kind": "Deployment",
-        "apiVersion": "apps/v1",
-        "metadata": {
-            "name": deploy.metadata.name,
-            "namespace": deploy.metadata.namespace,
-            "uid": resource.uid(),
-            "labels": deploy.metadata.labels,
-            "creationTimestamp": now,
-            "resourceVersion": "1"
-        },
-        "spec": {
-            "replicas": replicas,
-            "selector": spec.map(|s| {
-                serde_json::json!({
-                    "matchLabels": s.selector.match_labels
-                })
-            }),
-            "template": spec.map(|s| s.template.clone())
-        },
-        "status": {
-            "replicas": replicas,
-            "readyReplicas": replicas,
-            "availableReplicas": replicas,
-            "updatedReplicas": replicas,
-            "conditions": [
-                {"type": "Available", "status": "True", "lastUpdateTime": now, "lastTransitionTime": now, "reason": "MinimumReplicasAvailable", "message": "Deployment has minimum availability."},
-                {"type": "Progressing", "status": "True", "lastUpdateTime": now, "lastTransitionTime": now, "reason": "NewReplicaSetAvailable", "message": "ReplicaSet has successfully progressed."}
-            ]
-        }
-    })
+    let status = DeploymentStatus {
+        replicas,
+        ready_replicas: replicas,
+        available_replicas: replicas,
+        updated_replicas: replicas,
+        conditions: Some(vec![
+            DeploymentCondition {
+                type_: "Available".into(),
+                status: "True".into(),
+                last_update_time: Some(time.clone()),
+                last_transition_time: Some(time.clone()),
+                reason: Some("MinimumReplicasAvailable".into()),
+                message: Some("Deployment has minimum availability.".into()),
+            },
+            DeploymentCondition {
+                type_: "Progressing".into(),
+                status: "True".into(),
+                last_update_time: Some(time.clone()),
+                last_transition_time: Some(time.clone()),
+                reason: Some("NewReplicaSetAvailable".into()),
+                message: Some("ReplicaSet has successfully progressed.".into()),
+            },
+        ]),
+        ..Default::default()
+    };
+
+    let mut deploy = deploy.clone();
+    fill_deployment_metadata(&mut deploy);
+    deploy.status = Some(status);
+    serde_json::to_value(&deploy).unwrap_or_default()
 }
 
 async fn list_namespaces(

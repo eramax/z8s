@@ -42,6 +42,23 @@ impl ImageManager {
     }
 
     pub async fn unpack_image(&self, image_ref: &str, container_id: &str) -> Result<String> {
+        let container_rootfs = format!("{}/{}", self.rootfs_dir, container_id);
+
+        if container_rootfs.as_str() == "/" {
+            anyhow::bail!("Refusing to unpack to root filesystem");
+        }
+
+        // Reuse cached rootfs if it exists for this image ref
+        let meta_path = format!("{}/.z8s-image-ref", container_rootfs);
+        if Path::new(&container_rootfs).exists() && Path::new(&meta_path).exists() {
+            if let Ok(cached_ref) = std::fs::read_to_string(&meta_path) {
+                if cached_ref.trim() == image_ref {
+                    info!("Reusing cached rootfs for {} at {}", image_ref, container_rootfs);
+                    return Ok(container_rootfs);
+                }
+            }
+        }
+
         let reference: Reference = image_ref.parse().context("Invalid image reference")?;
         let auth = RegistryAuth::Anonymous;
 
@@ -58,12 +75,6 @@ impl ImageManager {
             }
         };
 
-        let container_rootfs = format!("{}/{}", self.rootfs_dir, container_id);
-
-        if container_rootfs.as_str() == "/" {
-            anyhow::bail!("Refusing to unpack to root filesystem");
-        }
-
         if Path::new(&container_rootfs).exists() {
             std::fs::remove_dir_all(&container_rootfs)?;
         }
@@ -76,8 +87,7 @@ impl ImageManager {
             self.unpack_layer(layer, &container_rootfs, i)?;
         }
 
-        let meta = format!("{}", image_ref);
-        std::fs::write(format!("{}/.z8s-image-ref", container_rootfs), &meta)?;
+        std::fs::write(&meta_path, image_ref)?;
 
         info!("Image {} unpacked to {}", image_ref, container_rootfs);
         Ok(container_rootfs)

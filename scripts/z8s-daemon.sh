@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -e
 
-BINARY="/usr/local/bin/z8s"
+BINARY="/home/abb/dev/z8s/target/debug/z8s"
 PIDFILE="/var/run/z8s.pid"
 LOGFILE="/var/log/z8s/z8s.log"
 
