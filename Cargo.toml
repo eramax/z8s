@@ -21,10 +21,11 @@ anyhow = { version = "1", features = ["backtrace"] }
 uuid = { version = "1", features = ["v4"] }
 chrono = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["native-tls"] }
-axum = { version = "0.8", default-features = false, features = ["json", "tokio", "http1"] }
+axum = { version = "0.8", default-features = false, features = ["json", "tokio", "http1", "ws", "query"] }
 tower-http = { version = "0.6", features = ["cors"] }
 hyper = { version = "1", features = ["full"] }
 http = "1"
+futures = "0.3"
 
 [profile.release]
 opt-level = "z"

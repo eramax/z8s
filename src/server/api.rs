@@ -4,7 +4,7 @@ use crate::supervisor::process::ProcessSupervisor;
 use axum::extract::{Path, State};
 use axum::http::{Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Json};
-use axum::routing::{any, get, patch};
+use axum::routing::{any, get, patch, post};
 use axum::Router;
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
@@ -32,6 +32,7 @@ pub async fn run_server(store: Arc<ResourceStore>, supervisor: Arc<ProcessSuperv
         .route("/api/v1/namespaces/{namespace}/pods", get(list_pods))
         .route("/api/v1/namespaces/{namespace}/pods/{name}", any(pod_handler))
         .route("/api/v1/namespaces/{namespace}/pods/{name}/log", get(get_pod_log))
+        .route("/api/v1/namespaces/{namespace}/pods/{name}/exec", get(crate::server::exec::exec_handler).post(crate::server::exec::exec_post_handler))
 
         .route("/apis/apps/v1/deployments", get(list_deployments_all))
         .route("/apis/apps/v1/namespaces/{namespace}/deployments", get(list_deployments))
