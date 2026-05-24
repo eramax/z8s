@@ -59,6 +59,7 @@ pub async fn run_server(store: Arc<ResourceStore>, supervisor: Arc<ProcessSuperv
         .route("/api/v1/namespaces/{name}", get(get_namespace).delete(delete_namespace))
         .route("/api/v1/nodes", get(list_nodes))
         .route("/openapi/v2", get(openapi_v2))
+        .route("/openapi/v3", get(openapi_v3))
         .route("/version", get(version_handler))
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
@@ -553,22 +554,60 @@ async fn create_namespace(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     // Try to extract name from JSON body, or parse from protobuf wrapper
     let name = if let Ok(s) = std::str::from_utf8(&body) {
-        // Direct JSON
         serde_json::from_str::<serde_json::Value>(s).ok()
-            .and_then(|v| v.get("metadata")?.get("name")?.as_str().map(|n| n.to_string()))
-    } else if body.starts_with(b"k8s\x00") && body.len() > 10 {
-        // Protobuf wrapper: search for JSON inside (the embedded JSON starts with '{')
-        body[4..].windows(2).position(|w| w == b"{\"")
-            .and_then(|pos| {
-                let json_bytes = &body[4 + pos..];
-                let s = std::str::from_utf8(json_bytes).ok()?;
-                serde_json::from_str::<serde_json::Value>(s).ok()
-            })
             .and_then(|v| v.get("metadata")?.get("name")?.as_str().map(|n| n.to_string()))
     } else {
         None
-    }
+    };
+
+    // Handle protobuf-wrapped JSON (k8s\x00 + protobuf(GroupVersion, JSON))
+    let name = name.or_else(|| {
+        if body.starts_with(b"k8s\x00") && body.len() > 8 {
+            let payload = &body[4..];
+            // Parse protobuf: skip field 1 (GroupVersion), extract field 2 (Object/JSON)
+            let mut pos = 0;
+            // Field 1: tag byte + varint length + data
+            if pos < payload.len() && payload[pos] == 0x0a {
+                pos += 1;
+                if let Some(len1) = decode_varint(payload, &mut pos) {
+                    pos += len1 as usize; // skip field 1 data
+                }
+            }
+            // Field 2: tag byte + varint length + JSON data
+            if pos < payload.len() && payload[pos] == 0x12 {
+                pos += 1;
+                if let Some(json_len) = decode_varint(payload, &mut pos) {
+                    let end = pos + json_len as usize;
+                    if end <= payload.len() {
+                        let json_bytes = &payload[pos..end];
+                        if let Ok(s) = std::str::from_utf8(json_bytes) {
+                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(s) {
+                                return v.get("metadata")
+                                    .and_then(|m| m.get("name"))
+                                    .and_then(|n| n.as_str())
+                                    .map(|n| n.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    })
     .unwrap_or_else(|| format!("ns-{}", uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("x")));
+
+    fn decode_varint(data: &[u8], pos: &mut usize) -> Option<u64> {
+        let mut result = 0u64;
+        let mut shift = 0;
+        loop {
+            if *pos >= data.len() { return None; }
+            let byte = data[*pos] as u64;
+            *pos += 1;
+            result |= (byte & 0x7f) << shift;
+            if byte & 0x80 == 0 { return Some(result); }
+            shift += 7;
+        }
+    }
 
     let mut ns = state.namespaces.lock().await;
     if ns.contains_key(&name) {
@@ -670,8 +709,15 @@ async fn list_nodes() -> Json<serde_json::Value> {
     }))
 }
 
-async fn openapi_v2() -> Json<serde_json::Value> {
-    Json(serde_json::json!({
+async fn openapi_v2(
+    headers: axum::http::HeaderMap,
+) -> Result<axum::response::Response, ApiError> {
+    let accept = headers
+        .get("accept")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    let schema = serde_json::json!({
         "swagger": "2.0",
         "info": {"title": "z8s", "version": "0.1.0"},
         "paths": {
@@ -689,7 +735,21 @@ async fn openapi_v2() -> Json<serde_json::Value> {
             "io.k8s.api.core.v1.Namespace": {"properties": {}},
             "io.k8s.api.core.v1.Node": {"properties": {}}
         }
-    }))
+    });
+
+    Ok((
+        StatusCode::OK,
+        [("Content-Type", "application/json")],
+        Json(schema),
+    ).into_response())
+}
+
+async fn openapi_v3() -> impl IntoResponse {
+    (StatusCode::OK, Json(serde_json::json!({
+        "openapi": "3.0.0",
+        "info": {"title": "z8s", "version": "0.1.0"},
+        "paths": {}
+    })))
 }
 
 async fn version_handler() -> Json<serde_json::Value> {
@@ -743,6 +803,9 @@ impl ApiError {
     }
     fn UnsupportedMediaType(msg: String) -> Self {
         Self { status: StatusCode::UNSUPPORTED_MEDIA_TYPE, message: msg }
+    }
+    fn NotAcceptable(msg: String) -> Self {
+        Self { status: StatusCode::NOT_ACCEPTABLE, message: msg }
     }
 }
 
