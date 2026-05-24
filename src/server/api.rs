@@ -15,12 +15,14 @@ use tracing::info;
 const Z8S_PORT: u16 = 6443;
 
 type NamespaceStore = Arc<Mutex<HashMap<String, serde_json::Value>>>;
+type EventStore = Arc<Mutex<Vec<serde_json::Value>>>;
 
 #[derive(Clone)]
 pub struct AppState {
     pub store: Arc<ResourceStore>,
     pub supervisor: Arc<ProcessSupervisor>,
     pub namespaces: NamespaceStore,
+    pub events: EventStore,
 }
 
 pub async fn run_server(store: Arc<ResourceStore>, supervisor: Arc<ProcessSupervisor>) {
@@ -36,7 +38,21 @@ pub async fn run_server(store: Arc<ResourceStore>, supervisor: Arc<ProcessSuperv
             "status": { "phase": "Active" }
         }));
     }
-    let state = AppState { store, supervisor: supervisor.clone(), namespaces };
+    let events = Arc::new(Mutex::new(Vec::new()));
+    // Seed initial events
+    {
+        let mut ev = events.lock().await;
+        let now = chrono::Utc::now().to_rfc3339();
+        ev.push(serde_json::json!({
+            "metadata": {"name": "z8s-started", "namespace": "default", "creationTimestamp": now},
+            "involvedObject": {"kind": "Node", "name": "z8s-node", "uid": "z8s-node"},
+            "reason": "Started", "message": "z8s daemon started",
+            "type": "Normal", "count": 1,
+            "firstTimestamp": now, "lastTimestamp": now
+        }));
+    }
+
+    let state = AppState { store, supervisor: supervisor.clone(), namespaces, events };
     let cors = CorsLayer::permissive();
 
     let app = Router::new()
@@ -58,6 +74,8 @@ pub async fn run_server(store: Arc<ResourceStore>, supervisor: Arc<ProcessSuperv
         .route("/api/v1/namespaces", get(list_namespaces).post(create_namespace))
         .route("/api/v1/namespaces/{name}", get(get_namespace).delete(delete_namespace))
         .route("/api/v1/nodes", get(list_nodes))
+        .route("/api/v1/events", get(list_events_all))
+        .route("/api/v1/namespaces/{namespace}/events", get(list_events))
         .route("/openapi/v2", get(openapi_v2))
         .route("/openapi/v3", get(openapi_v3))
         .route("/version", get(version_handler))
@@ -140,6 +158,14 @@ async fn api_v1_resources() -> Json<serde_json::Value> {
                 "kind": "Secret",
                 "verbs": ["get", "list"],
                 "shortNames": []
+            },
+            {
+                "name": "events",
+                "singularName": "event",
+                "namespaced": true,
+                "kind": "Event",
+                "verbs": ["get", "list", "watch"],
+                "shortNames": ["ev"]
             }
         ]
     }))
@@ -652,6 +678,46 @@ async fn delete_namespace(
         }
         None => Err(ApiError::NotFound(format!("namespace \"{}\" not found", name))),
     }
+}
+
+async fn list_events_all(
+    State(state): State<AppState>,
+) -> Json<serde_json::Value> {
+    let ev = state.events.lock().await;
+    Json(serde_json::json!({
+        "kind": "EventList",
+        "apiVersion": "v1",
+        "items": *ev
+    }))
+}
+
+async fn list_events(
+    State(state): State<AppState>,
+    Path(namespace): Path<String>,
+) -> Json<serde_json::Value> {
+    let ev = state.events.lock().await;
+    let items: Vec<&serde_json::Value> = ev.iter().filter(|e| {
+        e.get("metadata").and_then(|m| m.get("namespace")).and_then(|n| n.as_str()) == Some(&namespace)
+    }).collect();
+    Json(serde_json::json!({
+        "kind": "EventList",
+        "apiVersion": "v1",
+        "items": items
+    }))
+}
+
+pub async fn add_event(state: &AppState, namespace: &str, name: &str, kind: &str, reason: &str, message: &str, event_type: &str) {
+    let mut ev = state.events.lock().await;
+    let now = chrono::Utc::now().to_rfc3339();
+    let uid = format!("{}-{}", name, ev.len());
+    ev.push(serde_json::json!({
+        "metadata": {"name": uid, "namespace": namespace, "creationTimestamp": now, "uid": uid},
+        "involvedObject": {"kind": kind, "name": name, "namespace": namespace},
+        "reason": reason, "message": message,
+        "type": event_type, "count": 1,
+        "firstTimestamp": now, "lastTimestamp": now
+    }));
+    if ev.len() > 100 { ev.remove(0); }
 }
 
 async fn list_nodes() -> Json<serde_json::Value> {
