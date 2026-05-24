@@ -29,12 +29,12 @@ pub async fn run_server(store: Arc<ResourceStore>, supervisor: Arc<ProcessSuperv
         .route("/apis", get(api_groups))
         .route("/apis/apps/v1", get(api_apps_v1_resources))
         .route("/api/v1/pods", get(list_pods_all))
-        .route("/api/v1/namespaces/{namespace}/pods", get(list_pods))
+        .route("/api/v1/namespaces/{namespace}/pods", get(list_pods).post(create_pod))
         .route("/api/v1/namespaces/{namespace}/pods/{name}", any(pod_handler))
         .route("/api/v1/namespaces/{namespace}/pods/{name}/log", get(get_pod_log))
         .route("/api/v1/namespaces/{namespace}/pods/{name}/exec", get(crate::server::exec::exec_handler).post(crate::server::exec::exec_post_handler))
 
-        .route("/apis/apps/v1/deployments", get(list_deployments_all))
+        .route("/apis/apps/v1/deployments", get(list_deployments_all).post(create_deployment))
         .route("/apis/apps/v1/namespaces/{namespace}/deployments", get(list_deployments))
         .route("/apis/apps/v1/namespaces/{namespace}/deployments/{name}", get(get_deployment))
         .route("/apis/apps/v1/namespaces/{namespace}/deployments/{name}/scale", patch(patch_deployment_scale))
@@ -360,6 +360,59 @@ async fn patch_deployment_scale(
         }
     }
     Err(ApiError::NotFound(format!("deployment \"{}\" not found", name)))
+}
+
+async fn create_pod(
+    State(state): State<AppState>,
+    Path(namespace): Path<String>,
+    axum::extract::Json(body): axum::extract::Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let kind = body.get("kind").and_then(|k| k.as_str()).unwrap_or("Pod");
+    if kind != "Pod" {
+        return Err(ApiError::BadRequest(format!("expected Pod, got {}", kind)));
+    }
+    let pod: k8s_openapi::api::core::v1::Pod = serde_json::from_value(body)
+        .map_err(|e| ApiError::BadRequest(format!("invalid Pod: {}", e)))?;
+    let resource = AnyResource::Pod(pod);
+    state.store.apply(resource.clone()).await.map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    state.supervisor.start_pod(&resource).await.map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    Ok(Json(serde_json::json!({
+        "kind": "Pod",
+        "apiVersion": "v1",
+        "metadata": {
+            "name": resource.name(),
+            "namespace": resource.namespace(),
+            "uid": resource.uid(),
+            "creationTimestamp": chrono::Utc::now().to_rfc3339(),
+        },
+        "status": { "phase": "Pending" }
+    })))
+}
+
+async fn create_deployment(
+    State(state): State<AppState>,
+    Path(namespace): Path<String>,
+    axum::extract::Json(body): axum::extract::Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let kind = body.get("kind").and_then(|k| k.as_str()).unwrap_or("");
+    if kind != "Deployment" {
+        return Err(ApiError::BadRequest(format!("expected Deployment, got {}", kind)));
+    }
+    let deploy: k8s_openapi::api::apps::v1::Deployment = serde_json::from_value(body)
+        .map_err(|e| ApiError::BadRequest(format!("invalid Deployment: {}", e)))?;
+    let resource = AnyResource::Deployment(deploy);
+    state.store.apply(resource.clone()).await.map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    Ok(Json(serde_json::json!({
+        "kind": "Deployment",
+        "apiVersion": "apps/v1",
+        "metadata": {
+            "name": resource.name(),
+            "namespace": resource.namespace(),
+            "uid": resource.uid(),
+            "creationTimestamp": chrono::Utc::now().to_rfc3339(),
+        },
+        "status": { "replicas": 0 }
+    })))
 }
 
 async fn pod_handler(
