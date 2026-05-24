@@ -82,9 +82,7 @@ async fn main() -> Result<()> {
         error!("Failed to load existing manifests: {}", e);
     }
 
-    supervisor.reconcile().await;
-    controller.reconcile_deployments().await;
-
+    // Start all background tasks BEFORE reconcile (so API server is up immediately)
     let watcher_clone = watcher.clone();
     tokio::spawn(async move {
         if let Err(e) = watcher_clone.start_watching().await {
@@ -97,18 +95,27 @@ async fn main() -> Result<()> {
         controller_clone.run().await;
     });
 
-    let supervisor_clone = supervisor.clone();
+    let s1 = supervisor.clone();
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(tokio::time::Duration::from_secs(10));
         loop {
             ticker.tick().await;
-            supervisor_clone.reconcile().await;
+            s1.reconcile().await;
         }
     });
 
     let store_clone = store.clone();
+    let s2 = supervisor.clone();
     tokio::spawn(async move {
-        server::run_server(store_clone).await;
+        server::run_server(store_clone, s2).await;
+    });
+
+    // Initial reconcile runs in background (don't block startup on slow image pulls)
+    let s3 = supervisor.clone();
+    let c1 = controller.clone();
+    tokio::spawn(async move {
+        s3.reconcile().await;
+        c1.reconcile_deployments().await;
     });
 
     info!("z8s is ready. Watching /etc/z8s/manifests/ for manifests.");

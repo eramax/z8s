@@ -1,9 +1,10 @@
 use crate::api::types::ResourceStore;
 use crate::api::AnyResource;
+use crate::supervisor::process::ProcessSupervisor;
 use axum::extract::{Path, State};
-use axum::http::{StatusCode, Uri};
+use axum::http::{Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Json};
-use axum::routing::get;
+use axum::routing::{any, get, patch};
 use axum::Router;
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
@@ -14,10 +15,11 @@ const Z8S_PORT: u16 = 6443;
 #[derive(Clone)]
 pub struct AppState {
     pub store: Arc<ResourceStore>,
+    pub supervisor: Arc<ProcessSupervisor>,
 }
 
-pub async fn run_server(store: Arc<ResourceStore>) {
-    let state = AppState { store };
+pub async fn run_server(store: Arc<ResourceStore>, supervisor: Arc<ProcessSupervisor>) {
+    let state = AppState { store, supervisor: supervisor.clone() };
     let cors = CorsLayer::permissive();
 
     let app = Router::new()
@@ -28,10 +30,13 @@ pub async fn run_server(store: Arc<ResourceStore>) {
         .route("/apis/apps/v1", get(api_apps_v1_resources))
         .route("/api/v1/pods", get(list_pods_all))
         .route("/api/v1/namespaces/{namespace}/pods", get(list_pods))
-        .route("/api/v1/namespaces/{namespace}/pods/{name}", get(get_pod))
+        .route("/api/v1/namespaces/{namespace}/pods/{name}", any(pod_handler))
+        .route("/api/v1/namespaces/{namespace}/pods/{name}/log", get(get_pod_log))
+
         .route("/apis/apps/v1/deployments", get(list_deployments_all))
         .route("/apis/apps/v1/namespaces/{namespace}/deployments", get(list_deployments))
         .route("/apis/apps/v1/namespaces/{namespace}/deployments/{name}", get(get_deployment))
+        .route("/apis/apps/v1/namespaces/{namespace}/deployments/{name}/scale", patch(patch_deployment_scale))
         .route("/api/v1/namespaces", get(list_namespaces))
         .route("/api/v1/nodes", get(list_nodes))
         .route("/openapi/v2", get(openapi_v2))
@@ -198,6 +203,24 @@ async fn get_pod(
     Err(ApiError::NotFound(format!("pod \"{}\" not found", name)))
 }
 
+async fn get_pod_log(
+    State(state): State<AppState>,
+    Path((namespace, name)): Path<(String, String)>,
+) -> Result<String, ApiError> {
+    let trackers = state.store.get_by_kind("Pod").await;
+    for t in &trackers {
+        if t.resource.namespace() == namespace && t.resource.name() == name {
+            let containers = crate::api::types::extract_containers(&t.resource);
+            if let Some(container) = containers.first() {
+                let logs = state.supervisor.get_container_logs(&name, &container.name).await;
+                return Ok(logs.join("\n"));
+            }
+            return Err(ApiError::BadRequest("no containers in pod".into()));
+        }
+    }
+    Err(ApiError::NotFound(format!("pod \"{}\" not found", name)))
+}
+
 fn resource_to_pod_json(resource: &AnyResource) -> serde_json::Value {
     let pod = match resource {
         AnyResource::Pod(p) => p,
@@ -313,6 +336,69 @@ async fn get_deployment(
         }
     }
     Err(ApiError::NotFound(format!("deployment \"{}\" not found", name)))
+}
+
+async fn patch_deployment_scale(
+    State(state): State<AppState>,
+    Path((namespace, name)): Path<(String, String)>,
+    body: axum::extract::Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let trackers = state.store.get_by_kind("Deployment").await;
+    for t in &trackers {
+        if t.resource.name() == name && t.resource.namespace() == namespace {
+            if let AnyResource::Deployment(ref mut deploy) = t.resource.clone() {
+                if let Some(spec) = deploy.spec.as_mut() {
+                    if let Some(replicas) = body.get("spec").and_then(|s| s.get("replicas")).and_then(|r| r.as_i64()) {
+                        spec.replicas = Some(replicas as i32);
+                        info!("Scaled deployment {}/{} to {} replicas", namespace, name, replicas);
+                        state.store.apply(AnyResource::Deployment(deploy.clone())).await.ok();
+                        return Ok(Json(resource_to_deploy_json(&AnyResource::Deployment(deploy.clone()))));
+                    }
+                }
+            }
+        }
+    }
+    Err(ApiError::NotFound(format!("deployment \"{}\" not found", name)))
+}
+
+async fn pod_handler(
+    method: axum::http::Method,
+    State(state): State<AppState>,
+    Path((namespace, name)): Path<(String, String)>,
+) -> Result<axum::response::Response, ApiError> {
+    match method {
+        Method::GET => {
+            let r = get_pod(State(state.clone()), Path((namespace, name))).await?;
+            Ok(r.into_response())
+        }
+        Method::DELETE => {
+            let r = delete_pod(State(state.clone()), Path((namespace, name))).await?;
+            Ok(r.into_response())
+        }
+        _ => Err(ApiError::MethodNotAllowed("method not allowed".into())),
+    }
+}
+
+async fn delete_pod(
+    State(state): State<AppState>,
+    Path((namespace, name)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let trackers = state.store.get_by_kind("Pod").await;
+    for t in &trackers {
+        if t.resource.name() == name && t.resource.namespace() == namespace {
+            state.supervisor.stop_pod(&t.resource).await;
+            state.store.delete(&t.resource).await.ok();
+            info!("Deleted pod {}/{}", namespace, name);
+            return Ok(Json(serde_json::json!({
+                "kind": "Status",
+                "apiVersion": "v1",
+                "metadata": {},
+                "status": "Success",
+                "code": 200
+            })));
+        }
+    }
+    Err(ApiError::NotFound(format!("pod \"{}\" not found", name)))
 }
 
 fn resource_to_deploy_json(resource: &AnyResource) -> serde_json::Value {
@@ -494,6 +580,12 @@ impl ApiError {
     #[allow(non_snake_case)]
     fn NotFound(msg: String) -> Self {
         Self { status: StatusCode::NOT_FOUND, message: msg }
+    }
+    fn BadRequest(msg: String) -> Self {
+        Self { status: StatusCode::BAD_REQUEST, message: msg }
+    }
+    fn MethodNotAllowed(msg: String) -> Self {
+        Self { status: StatusCode::METHOD_NOT_ALLOWED, message: msg }
     }
 }
 

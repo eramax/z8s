@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
@@ -31,6 +32,7 @@ pub struct RunningContainer {
     pub child: Option<Child>,
     pub instance: ContainerInstance,
     pub restart_count: u32,
+    pub log_buffer: Arc<Mutex<Vec<String>>>,
 }
 
 pub struct ProcessSupervisor {
@@ -159,7 +161,7 @@ impl ProcessSupervisor {
             })
             .unwrap_or_default();
 
-        let child = Command::new(&entrypoint)
+        let mut child = Command::new(&entrypoint)
             .args(&cmd_args)
             .env_clear()
             .envs(env_vars)
@@ -176,6 +178,36 @@ impl ProcessSupervisor {
 
         self.cgroup_manager.add_pid_to_cgroup(pod_uid, pid)?;
 
+        let log_buffer = Arc::new(Mutex::new(Vec::new()));
+
+        // Capture stdout
+        if let Some(stdout) = child.stdout.take() {
+            let buf = log_buffer.clone();
+            let cid = container_id.to_string();
+            tokio::spawn(async move {
+                let mut reader = BufReader::new(stdout).lines();
+                while let Ok(Some(line)) = reader.next_line().await {
+                    let mut log = buf.lock().await;
+                    log.push(format!("[stdout] {}", line));
+                    if log.len() > 1000 { log.remove(0); }
+                }
+            });
+        }
+
+        // Capture stderr
+        if let Some(stderr) = child.stderr.take() {
+            let buf = log_buffer.clone();
+            let cid = container_id.to_string();
+            tokio::spawn(async move {
+                let mut reader = BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = reader.next_line().await {
+                    let mut log = buf.lock().await;
+                    log.push(format!("[stderr] {}", line));
+                    if log.len() > 1000 { log.remove(0); }
+                }
+            });
+        }
+
         let instance = ContainerInstance {
             container_id: container_id.to_string(),
             container_name: container.name.clone(),
@@ -189,6 +221,7 @@ impl ProcessSupervisor {
             child: Some(child),
             instance,
             restart_count: 0,
+            log_buffer,
         })
     }
 
@@ -233,7 +266,8 @@ impl ProcessSupervisor {
             if let Some(pid) = rc.instance.pid {
                 info!("Stopping container {} (PID {})", container_id, pid);
                 let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
-                tokio::time::sleep(Duration::from_secs(10)).await;
+                // Brief grace period then force kill
+                tokio::time::sleep(Duration::from_millis(500)).await;
                 let _ = kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
             }
         }
@@ -253,6 +287,15 @@ impl ProcessSupervisor {
         self.store
             .update_state(&pod_uid, ResourceState::Terminated)
             .await;
+    }
+
+    pub async fn get_container_logs(&self, pod_name: &str, container_name: &str) -> Vec<String> {
+        let container_id = format!("{}-{}", pod_name, container_name);
+        let running = self.running.lock().await;
+        if let Some(rc) = running.get(&container_id) {
+            return rc.log_buffer.lock().await.clone();
+        }
+        Vec::new()
     }
 
     pub async fn reconcile(&self) {
