@@ -2,7 +2,7 @@ use crate::api::types::{extract_containers, ResourceState, ResourceStore};
 use crate::api::AnyResource;
 use crate::container::image::ImageManager;
 use crate::supervisor::cgroup::CgroupManager;
-use crate::supervisor::health::HealthChecker;
+use crate::supervisor::health::{HealthChecker, HealthStatus, ProbeAction, ProbeConfig};
 use anyhow::{Context, Result};
 use k8s_openapi::api::core::v1::Container;
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
@@ -33,6 +33,8 @@ pub struct RunningContainer {
     pub instance: ContainerInstance,
     pub restart_count: u32,
     pub log_buffer: Arc<Mutex<Vec<String>>>,
+    pub ready: Arc<Mutex<bool>>,
+    pub healthy: Arc<Mutex<bool>>,
 }
 
 pub struct ProcessSupervisor {
@@ -217,11 +219,69 @@ impl ProcessSupervisor {
             started_at: Some(chrono::Utc::now()),
         };
 
+        let ready = Arc::new(Mutex::new(true));
+        let healthy = Arc::new(Mutex::new(true));
+
+        // Start health probes for this container
+        let hc = self.health_checker.clone();
+        let p_ready = ready.clone();
+        let p_healthy = healthy.clone();
+        let cid = container_id.to_string();
+        let container_cfg = container.clone();
+
+        // Only run probes if the container has any defined
+        if container.liveness_probe.is_some() || container.readiness_probe.is_some() || container.startup_probe.is_some() {
+            tokio::spawn(async move {
+                let checker = hc;
+                let probe_configs = vec![
+                    container_cfg.liveness_probe.as_ref().map(|p| ("liveness".to_string(), p)),
+                    container_cfg.readiness_probe.as_ref().map(|p| ("readiness".to_string(), p)),
+                    container_cfg.startup_probe.as_ref().map(|p| ("startup".to_string(), p)),
+                ].into_iter().flatten();
+
+                for (_name, probe) in probe_configs {
+                    if let Some(config) = ProbeConfig::from_probe(probe) {
+                        tokio::time::sleep(Duration::from_secs(config.initial_delay_seconds as u64)).await;
+                        loop {
+                            let status = match &config.action {
+                                ProbeAction::Exec(exec) => {
+                                    HealthChecker::check_exec(
+                                        exec.command.as_deref().unwrap_or(&[]),
+                                        config.timeout(),
+                                    ).await
+                                }
+                                ProbeAction::HTTPGet(http) => {
+                                    HealthChecker::check_http(http, config.timeout()).await
+                                }
+                                ProbeAction::TCPSocket(tcp) => {
+                                    HealthChecker::check_tcp(tcp, config.timeout()).await
+                                }
+                            };
+                            match status {
+                                HealthStatus::Healthy => {
+                                    *p_ready.lock().await = true;
+                                    *p_healthy.lock().await = true;
+                                }
+                                _ => {
+                                    *p_ready.lock().await = false;
+                                    *p_healthy.lock().await = false;
+                                    warn!("Probe for {} failed", cid);
+                                }
+                            }
+                            tokio::time::sleep(Duration::from_secs(config.period_seconds as u64)).await;
+                        }
+                    }
+                }
+            });
+        }
+
         Ok(RunningContainer {
             child: Some(child),
             instance,
             restart_count: 0,
             log_buffer,
+            ready,
+            healthy,
         })
     }
 
@@ -287,6 +347,25 @@ impl ProcessSupervisor {
         self.store
             .update_state(&pod_uid, ResourceState::Terminated)
             .await;
+    }
+
+    pub async fn is_pod_ready(&self, pod_name: &str) -> bool {
+        let running = self.running.lock().await;
+        for (_, rc) in running.iter() {
+            if rc.instance.container_id.starts_with(pod_name) {
+                return *rc.ready.lock().await;
+            }
+        }
+        false
+    }
+
+    pub async fn is_container_ready(&self, pod_name: &str, container_name: &str) -> bool {
+        let cid = format!("{}-{}", pod_name, container_name);
+        let running = self.running.lock().await;
+        if let Some(rc) = running.get(&cid) {
+            return *rc.ready.lock().await;
+        }
+        false
     }
 
     pub async fn get_container_logs(&self, pod_name: &str, container_name: &str) -> Vec<String> {

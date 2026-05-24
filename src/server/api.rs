@@ -193,13 +193,13 @@ async fn list_pods_in_namespace(
     namespace: Option<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let trackers = state.store.get_by_kind("Pod").await;
-    let items: Vec<serde_json::Value> = trackers
-        .iter()
-        .filter(|t| {
-            namespace.as_deref().map_or(true, |ns| t.resource.namespace() == ns)
-        })
-        .map(|t| resource_to_pod_json(&t.resource))
-        .collect();
+    let mut items = Vec::new();
+    for t in &trackers {
+        if namespace.as_deref().map_or(true, |ns| t.resource.namespace() == ns) {
+            let ready = state.supervisor.is_pod_ready(t.resource.name()).await;
+            items.push(resource_to_pod_json_with_status(&t.resource, ready));
+        }
+    }
 
     Ok(Json(serde_json::json!({
         "kind": "PodList",
@@ -216,7 +216,8 @@ async fn get_pod(
     let trackers = state.store.get_by_kind("Pod").await;
     for t in &trackers {
         if t.resource.namespace() == namespace && t.resource.name() == name {
-            return Ok(Json(resource_to_pod_json(&t.resource)));
+            let ready = state.supervisor.is_pod_ready(t.resource.name()).await;
+            return Ok(Json(resource_to_pod_json_with_status(&t.resource, ready)));
         }
     }
     Err(ApiError::NotFound(format!("pod \"{}\" not found", name)))
@@ -241,12 +242,19 @@ async fn get_pod_log(
 }
 
 fn resource_to_pod_json(resource: &AnyResource) -> serde_json::Value {
+    let is_ready = true; // default to true when supervisor not available
+    resource_to_pod_json_with_status(resource, is_ready)
+}
+
+fn resource_to_pod_json_with_status(resource: &AnyResource, is_ready: bool) -> serde_json::Value {
     let pod = match resource {
         AnyResource::Pod(p) => p,
         _ => return serde_json::Value::Null,
     };
 
     let now = chrono::Utc::now().to_rfc3339();
+
+    let ready_status = if is_ready { "True" } else { "False" };
 
     serde_json::json!({
         "kind": "Pod",
@@ -279,15 +287,15 @@ fn resource_to_pod_json(resource: &AnyResource) -> serde_json::Value {
             "securityContext": pod.spec.as_ref().and_then(|s| s.security_context.as_ref()),
         },
         "status": {
-            "phase": "Running",
+            "phase": if is_ready { "Running" } else { "Running" },
             "hostIP": "10.0.0.1",
             "podIP": "10.42.0.1",
             "podIPs": [{"ip": "10.42.0.1"}],
             "startTime": now,
             "conditions": [
                 {"type": "Initialized", "status": "True", "lastTransitionTime": now},
-                {"type": "Ready", "status": "True", "lastTransitionTime": now},
-                {"type": "ContainersReady", "status": "True", "lastTransitionTime": now},
+                {"type": "Ready", "status": ready_status, "lastTransitionTime": now},
+                {"type": "ContainersReady", "status": ready_status, "lastTransitionTime": now},
                 {"type": "PodScheduled", "status": "True", "lastTransitionTime": now}
             ],
             "containerStatuses": pod.spec.as_ref().map(|s| {
