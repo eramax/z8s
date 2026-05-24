@@ -105,6 +105,7 @@ async fn root_handler() -> Json<serde_json::Value> {
 
 async fn api_versions() -> Json<serde_json::Value> {
     Json(serde_json::json!({
+        "kind": "APIVersions",
         "versions": ["v1"],
         "serverAddressByClientCIDRs": null
     }))
@@ -112,6 +113,8 @@ async fn api_versions() -> Json<serde_json::Value> {
 
 async fn api_v1_resources() -> Json<serde_json::Value> {
     Json(serde_json::json!({
+        "kind": "APIResourceList",
+        "apiVersion": "v1",
         "groupVersion": "v1",
         "resources": [
             {
@@ -196,6 +199,8 @@ async fn api_groups() -> Json<serde_json::Value> {
 
 async fn api_apps_v1_resources() -> Json<serde_json::Value> {
     Json(serde_json::json!({
+        "kind": "APIResourceList",
+        "apiVersion": "v1",
         "groupVersion": "apps/v1",
         "resources": [
             {
@@ -568,6 +573,7 @@ async fn list_namespaces(
     Json(serde_json::json!({
         "kind": "NamespaceList",
         "apiVersion": "v1",
+        "metadata": { "resourceVersion": "1" },
         "items": items
     }))
 }
@@ -696,6 +702,7 @@ async fn list_events_all(
     Json(serde_json::json!({
         "kind": "EventList",
         "apiVersion": "v1",
+        "metadata": { "resourceVersion": "1" },
         "items": *ev
     }))
 }
@@ -711,6 +718,7 @@ async fn list_events(
     Json(serde_json::json!({
         "kind": "EventList",
         "apiVersion": "v1",
+        "metadata": { "resourceVersion": "1" },
         "items": items
     }))
 }
@@ -731,6 +739,8 @@ pub async fn add_event(state: &AppState, namespace: &str, name: &str, kind: &str
 
 async fn metrics_api_resources() -> Json<serde_json::Value> {
     Json(serde_json::json!({
+        "kind": "APIResourceList",
+        "apiVersion": "v1",
         "groupVersion": "metrics.k8s.io/v1beta1",
         "resources": [
             {"name": "pods", "singularName": "", "namespaced": true, "kind": "PodMetrics", "verbs": ["get", "list"]},
@@ -744,6 +754,7 @@ async fn metrics_top_nodes() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "kind": "NodeMetricsList",
         "apiVersion": "metrics.k8s.io/v1beta1",
+        "metadata": { "resourceVersion": "1" },
         "items": [{
             "metadata": {"name": "z8s-node", "creationTimestamp": now},
             "timestamp": now, "window": "1m0s",
@@ -821,6 +832,7 @@ async fn top_pods_in_namespace(
     Json(serde_json::json!({
         "kind": "PodMetricsList",
         "apiVersion": "metrics.k8s.io/v1beta1",
+        "metadata": { "resourceVersion": "1" },
         "items": items
     }))
 }
@@ -830,6 +842,7 @@ async fn list_nodes() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "kind": "NodeList",
         "apiVersion": "v1",
+        "metadata": { "resourceVersion": "1" },
         "items": [{
             "metadata": {
                 "name": "z8s-node",
@@ -982,13 +995,27 @@ impl ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
+        let reason = match self.status.as_u16() {
+            400 => "BadRequest",
+            401 => "Unauthorized",
+            403 => "Forbidden",
+            404 => "NotFound",
+            405 => "MethodNotAllowed",
+            406 => "NotAcceptable",
+            409 => "Conflict",
+            415 => "UnsupportedMediaType",
+            429 => "TooManyRequests",
+            500 => "InternalError",
+            503 => "ServiceUnavailable",
+            _ => "Unknown",
+        };
         let body = serde_json::json!({
             "kind": "Status",
             "apiVersion": "v1",
             "metadata": {},
             "status": "Failure",
             "message": self.message,
-            "reason": "NotFound",
+            "reason": reason,
             "code": self.status.as_u16()
         });
         (self.status, Json(body)).into_response()

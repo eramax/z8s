@@ -18,6 +18,7 @@ use crate::supervisor::process::ProcessSupervisor;
 use anyhow::Result;
 use std::sync::Arc;
 use tokio::signal;
+use tokio::signal::unix::{SignalKind, signal as unix_signal};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -122,8 +123,15 @@ async fn main() -> Result<()> {
     if pid == 1 {
         init_handler.run(&shutdown_tx).await.ok();
     } else {
-        signal::ctrl_c().await?;
-        info!("Received Ctrl+C, shutting down...");
+        let mut sigterm = unix_signal(SignalKind::terminate())?;
+        tokio::select! {
+            _ = signal::ctrl_c() => {
+                info!("Received Ctrl+C, shutting down...");
+            }
+            _ = sigterm.recv() => {
+                info!("Received SIGTERM, shutting down...");
+            }
+        }
         let _ = shutdown_tx.send(true);
     }
 
