@@ -74,6 +74,10 @@ pub async fn run_server(store: Arc<ResourceStore>, supervisor: Arc<ProcessSuperv
         .route("/api/v1/namespaces", get(list_namespaces).post(create_namespace))
         .route("/api/v1/namespaces/{name}", get(get_namespace).delete(delete_namespace))
         .route("/api/v1/nodes", get(list_nodes))
+        .route("/apis/metrics.k8s.io/v1beta1", get(metrics_api_resources))
+        .route("/apis/metrics.k8s.io/v1beta1/nodes", get(metrics_top_nodes))
+        .route("/apis/metrics.k8s.io/v1beta1/pods", get(top_pods_all))
+        .route("/apis/metrics.k8s.io/v1beta1/namespaces/{namespace}/pods", get(top_pods))
         .route("/api/v1/events", get(list_events_all))
         .route("/api/v1/namespaces/{namespace}/events", get(list_events))
         .route("/openapi/v2", get(openapi_v2))
@@ -180,6 +184,11 @@ async fn api_groups() -> Json<serde_json::Value> {
                 "name": "apps",
                 "versions": [{"groupVersion": "apps/v1", "version": "v1"}],
                 "preferredVersion": {"groupVersion": "apps/v1", "version": "v1"}
+            },
+            {
+                "name": "metrics.k8s.io",
+                "versions": [{"groupVersion": "metrics.k8s.io/v1beta1", "version": "v1beta1"}],
+                "preferredVersion": {"groupVersion": "metrics.k8s.io/v1beta1", "version": "v1beta1"}
             }
         ]
     }))
@@ -718,6 +727,102 @@ pub async fn add_event(state: &AppState, namespace: &str, name: &str, kind: &str
         "firstTimestamp": now, "lastTimestamp": now
     }));
     if ev.len() > 100 { ev.remove(0); }
+}
+
+async fn metrics_api_resources() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "groupVersion": "metrics.k8s.io/v1beta1",
+        "resources": [
+            {"name": "pods", "singularName": "", "namespaced": true, "kind": "PodMetrics", "verbs": ["get", "list"]},
+            {"name": "nodes", "singularName": "", "namespaced": false, "kind": "NodeMetrics", "verbs": ["get", "list"]}
+        ]
+    }))
+}
+
+async fn metrics_top_nodes() -> Json<serde_json::Value> {
+    let now = chrono::Utc::now().to_rfc3339();
+    Json(serde_json::json!({
+        "kind": "NodeMetricsList",
+        "apiVersion": "metrics.k8s.io/v1beta1",
+        "items": [{
+            "metadata": {"name": "z8s-node", "creationTimestamp": now},
+            "timestamp": now, "window": "1m0s",
+            "usage": {"cpu": "100m", "memory": "128Mi"}
+        }]
+    }))
+}
+
+async fn top_pods_all(
+    State(state): State<AppState>,
+) -> Json<serde_json::Value> {
+    top_pods_in_namespace(state, None).await
+}
+
+async fn top_pods(
+    State(state): State<AppState>,
+    Path(namespace): Path<String>,
+) -> Json<serde_json::Value> {
+    top_pods_in_namespace(state, Some(namespace)).await
+}
+
+async fn top_pods_in_namespace(
+    state: AppState,
+    namespace: Option<String>,
+) -> Json<serde_json::Value> {
+    let trackers = state.store.get_by_kind("Pod").await;
+    let mut items = Vec::new();
+    for t in &trackers {
+        if namespace.as_deref().map_or(true, |ns| t.resource.namespace() == ns) {
+            let pod_name = t.resource.name();
+            let pod_uid = t.resource.uid();
+            let mut pod_cpu: u64 = 0;
+            let mut pod_mem: u64 = 0;
+
+            // Try to read cgroup stats for this pod
+            let cg_base = "/sys/fs/cgroup/z8s";
+            let cg_name = pod_uid.replace('/', "_").replace('.', "_").replace(':', "_");
+            let cg_path = format!("{}/{}", cg_base, cg_name);
+
+            // Memory
+            if let Ok(mem) = std::fs::read_to_string(format!("{}/memory.current", cg_path)) {
+                pod_mem = mem.trim().parse::<u64>().unwrap_or(0);
+            }
+
+            // CPU (from cpu.stat: usage_usec)
+            if let Ok(cpu_stat) = std::fs::read_to_string(format!("{}/cpu.stat", cg_path)) {
+                for line in cpu_stat.lines() {
+                    if let Some(val) = line.strip_prefix("usage_usec ") {
+                        pod_cpu = val.trim().parse::<u64>().unwrap_or(0);
+                        break;
+                    }
+                }
+            }
+
+            let now = chrono::Utc::now().to_rfc3339();
+            items.push(serde_json::json!({
+                "metadata": {
+                    "name": pod_name,
+                    "namespace": t.resource.namespace(),
+                    "creationTimestamp": now,
+                },
+                "timestamp": now,
+                "window": "1m0s",
+                "containers": [{
+                    "name": pod_name,
+                    "usage": {
+                        "cpu": format!("{}n", pod_cpu * 1000),
+                        "memory": format!("{}Ki", pod_mem / 1024),
+                    }
+                }]
+            }));
+        }
+    }
+
+    Json(serde_json::json!({
+        "kind": "PodMetricsList",
+        "apiVersion": "metrics.k8s.io/v1beta1",
+        "items": items
+    }))
 }
 
 async fn list_nodes() -> Json<serde_json::Value> {
