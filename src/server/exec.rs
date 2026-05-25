@@ -316,19 +316,24 @@ fn build_command(cmd: &str, args: &[&str], rootfs_pid: Option<(&str, u32)>) -> C
         for a in args {
             c.arg(a);
         }
-        unsafe {
-            c.as_std_mut().pre_exec(move || {
-                if let Some((ref u_fd, ref m_fd)) = fds {
-                    nix::sched::setns(u_fd, CloneFlags::CLONE_NEWUSER)
-                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("setns(CLONE_NEWUSER): {}", e)))?;
-                    nix::sched::setns(m_fd, CloneFlags::CLONE_NEWNS)
-                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("setns(CLONE_NEWNS): {}", e)))?;
-                    nix::unistd::chdir("/")
-                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("chdir(/): {}", e)))?;
+        let rootfs_for_exec = rootfs_pid.map(|(r, _)| r.to_string());
+        unsafe { c.as_std_mut().pre_exec(move || {
+            if let Some((ref u_fd, ref m_fd)) = fds {
+                nix::sched::setns(u_fd, CloneFlags::CLONE_NEWUSER)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("setns(CLONE_NEWUSER): {e}")))?;
+                nix::sched::setns(m_fd, CloneFlags::CLONE_NEWNS)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("setns(CLONE_NEWNS): {e}")))?;
+                // After setns(NEWNS): "/" is the container root when pivot_root was used.
+                // When chroot fallback was used, "/" is still the host root — chroot
+                // into the rootfs path (which is visible from the host-root view).
+                if let Some(ref rfs) = rootfs_for_exec {
+                    let _ = nix::unistd::chroot(rfs.as_str());
                 }
-                Ok(())
-            });
-        }
+                nix::unistd::chdir("/")
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("chdir(/): {e}")))?;
+            }
+            Ok(())
+        }); }
         c
     } else if let Some(root) = rootfs_pid.map(|(r, _)| r) {
         // No container PID — just set cwd to rootfs (legacy non-isolated path)

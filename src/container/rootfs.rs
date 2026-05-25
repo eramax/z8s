@@ -5,7 +5,7 @@ use nix::sys::stat::{makedev, mknod, Mode, SFlag};
 use nix::unistd::{chdir, chroot, getgid, getuid, pivot_root, Uid};
 use std::os::fd::OwnedFd;
 use std::path::Path;
-use tracing::info;
+use tracing::{info, warn};
 
 pub fn is_root() -> bool {
     Uid::effective().is_root()
@@ -59,20 +59,92 @@ pub fn write_userns_maps(child_pid: i32) -> Result<()> {
     let uid = getuid().as_raw();
     let gid = getgid().as_raw();
 
-    let setgroups = format!("/proc/{}/setgroups", child_pid);
-    std::fs::write(&setgroups, "deny")
+    // Prefer newuidmap/newgidmap (uidmap package): writes full subuid range and
+    // does NOT set setgroups=deny, so setgroups(2)/seteuid(2) work inside the
+    // container. This allows apt, su, sudo, and any tool that drops privileges.
+    if try_newid_maps(child_pid, uid, gid).is_ok() {
+        info!("Wrote userns maps via newuidmap/newgidmap for child pid {} (uid={} gid={})", child_pid, uid, gid);
+        return Ok(());
+    }
+
+    // Fallback: single UID/GID mapping. setgroups must be denied before writing
+    // gid_map when the caller is unprivileged (kernel requirement). This means
+    // setgroups(2) is blocked — apt and su won't work. Install uidmap to fix.
+    warn!("newuidmap not available — using single UID/GID mapping (apt/su will not work). Install the uidmap package.");
+
+    std::fs::write(format!("/proc/{}/setgroups", child_pid), "deny")
         .with_context(|| format!("Failed to write setgroups for pid {}", child_pid))?;
-
-    let uid_map = format!("/proc/{}/uid_map", child_pid);
-    std::fs::write(&uid_map, format!("0 {} 1\n", uid))
+    std::fs::write(format!("/proc/{}/uid_map", child_pid), format!("0 {} 1\n", uid))
         .with_context(|| format!("Failed to write uid_map for pid {}", child_pid))?;
-
-    let gid_map = format!("/proc/{}/gid_map", child_pid);
-    std::fs::write(&gid_map, format!("0 {} 1\n", gid))
+    std::fs::write(format!("/proc/{}/gid_map", child_pid), format!("0 {} 1\n", gid))
         .with_context(|| format!("Failed to write gid_map for pid {}", child_pid))?;
 
-    info!("Wrote userns maps for child pid {} (uid={} gid={})", child_pid, uid, gid);
+    info!("Wrote single UID/GID map for child pid {} (uid={} gid={})", child_pid, uid, gid);
     Ok(())
+}
+
+fn try_newid_maps(child_pid: i32, uid: u32, gid: u32) -> Result<()> {
+    let uid_args = build_idmap_args(child_pid, uid, "/etc/subuid")?;
+    let gid_args = build_idmap_args(child_pid, gid, "/etc/subgid")?;
+
+    let ok = std::process::Command::new("newuidmap")
+        .args(&uid_args)
+        .status()
+        .context("Failed to run newuidmap")?
+        .success();
+    anyhow::ensure!(ok, "newuidmap exited with error");
+
+    let ok = std::process::Command::new("newgidmap")
+        .args(&gid_args)
+        .status()
+        .context("Failed to run newgidmap")?
+        .success();
+    anyhow::ensure!(ok, "newgidmap exited with error");
+
+    Ok(())
+}
+
+// Builds args for newuidmap/newgidmap:
+//   <pid> 0 <host_id> 1 [1 <subid_start> <subid_count>]
+// The first entry maps container root (0) to the host user.
+// The second entry maps container UIDs 1-N to the subordinate ID range,
+// allowing tools like apt to switch to non-root UIDs (e.g. _apt = UID 42).
+fn build_idmap_args(child_pid: i32, host_id: u32, subid_file: &str) -> Result<Vec<String>> {
+    let mut args = vec![
+        child_pid.to_string(),
+        "0".to_string(), host_id.to_string(), "1".to_string(),
+    ];
+    if let Some((start, count)) = read_subid(subid_file, host_id) {
+        args.extend(["1".to_string(), start.to_string(), count.to_string()]);
+    }
+    Ok(args)
+}
+
+fn read_subid(path: &str, host_id: u32) -> Option<(u64, u64)> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let username = nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(host_id))
+        .ok()
+        .flatten()
+        .map(|u| u.name);
+
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut parts = line.splitn(3, ':');
+        let id_field = parts.next()?;
+        let start: u64 = parts.next()?.parse().ok()?;
+        let count: u64 = parts.next()?.parse().ok()?;
+
+        let matches = id_field.parse::<u32>().map_or(false, |id| id == host_id)
+            || username.as_deref().map_or(false, |name| id_field == name);
+
+        if matches {
+            return Some((start, count));
+        }
+    }
+    None
 }
 
 pub fn child_enter_ns_fork(rootfs_path: &str, sync_w: OwnedFd, ack_r: OwnedFd) -> Result<()> {
@@ -95,16 +167,37 @@ pub fn child_enter_ns_fork(rootfs_path: &str, sync_w: OwnedFd, ack_r: OwnedFd) -
         anyhow::bail!("child: invalid ack byte: {}", ack[0]);
     }
 
-    mount(
+    // Best-effort: prevent bind-mount propagation back to host.
+    // May be blocked in restricted environments (e.g. nested containers, seccomp).
+    if let Err(e) = mount(
         None::<&str>,
         "/",
         None::<&str>,
         MsFlags::MS_PRIVATE | MsFlags::MS_REC,
         None::<&str>,
-    )
-    .context("Failed to set private mount propagation")?;
+    ) {
+        warn!("mount MS_PRIVATE on / failed ({e}) — attempting chroot fallback");
+    }
 
-    enter_rootfs(rootfs_path, false)
+    // Try full isolation: bind mount + pivot_root.
+    if enter_rootfs(rootfs_path, false).is_ok() {
+        return Ok(());
+    }
+
+    // Fallback 1: chroot (works in some environments without full mount namespace)
+    eprintln!("z8s: pivot_root unavailable, trying chroot isolation");
+    if chroot(rootfs_path).is_ok() {
+        chdir("/").context("chdir / after chroot failed")?;
+        return Ok(());
+    }
+
+    // Fallback 2: user-namespace-only isolation (no filesystem isolation).
+    // The container runs as uid=0 in its own user namespace but on the host
+    // filesystem. This happens in restricted environments (e.g. nested containers)
+    // where mount/chroot syscalls are blocked by the outer runtime's seccomp.
+    // The container process will still use the correct UID mapping.
+    eprintln!("z8s: filesystem isolation unavailable in this environment — running with user-namespace-only isolation");
+    Ok(())
 }
 
 pub fn child_enter_ns_root(rootfs_path: &str) -> Result<()> {

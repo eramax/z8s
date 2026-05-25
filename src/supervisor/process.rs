@@ -11,7 +11,6 @@ use k8s_openapi::api::core::v1::Container;
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 use std::collections::HashMap;
-use std::os::unix::process::CommandExt;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
@@ -168,18 +167,16 @@ impl ProcessSupervisor {
             let rootfs_owned = rootfs_path.to_string();
 
             if rootfs::is_root() {
-                let mut c = Command::new(&entrypoint);
-                c.args(&cmd_args);
-                unsafe {
-                    c.as_std_mut().pre_exec(move || {
-                        if let Err(e) = rootfs::child_enter_ns_root(&rootfs_owned) {
-                            eprintln!("z8s: namespace setup (root) failed: {}", e);
-                            return Err(std::io::Error::new(std::io::ErrorKind::Other, e));
-                        }
-                        Ok(())
-                    });
-                }
-                c
+                return self.spawn_root_ns_container(
+                    &entrypoint,
+                    &cmd_args,
+                    &env_vars,
+                    &rootfs_owned,
+                    container_id,
+                    pod_uid,
+                    &image,
+                    container,
+                ).await;
             } else {
                 return self.spawn_userns_container(
                     &entrypoint,
@@ -209,6 +206,128 @@ impl ProcessSupervisor {
         self.cgroup_manager.add_pid_to_cgroup(pod_uid, pid)?;
 
         self.build_running_container(child, container_id, rootfs_path, &image, container).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn spawn_root_ns_container(
+        &self,
+        entrypoint: &str,
+        cmd_args: &[String],
+        env_vars: &[(String, String)],
+        rootfs_path: &str,
+        container_id: &str,
+        pod_uid: &str,
+        image: &str,
+        container: &Container,
+    ) -> Result<RunningContainer> {
+        let (stdout_r, stdout_w) = nix::unistd::pipe().context("Failed to create stdout pipe")?;
+        let (stderr_r, stderr_w) = nix::unistd::pipe().context("Failed to create stderr pipe")?;
+
+        let rootfs_owned = rootfs_path.to_string();
+        let entrypoint_owned = entrypoint.to_string();
+        let args_owned = cmd_args.to_vec();
+        let env_owned = env_vars.to_vec();
+
+        match unsafe { nix::unistd::fork() } {
+            Ok(nix::unistd::ForkResult::Parent { child }) => {
+                drop(stdout_w);
+                drop(stderr_w);
+
+                let pid = child.as_raw() as u32;
+                info!("Container {} started with PID {} (root ns)", container_id, pid);
+                self.cgroup_manager.add_pid_to_cgroup(pod_uid, pid)?;
+
+                let log_buffer = Arc::new(Mutex::new(Vec::<String>::new()));
+
+                {
+                    let buf = log_buffer.clone();
+                    let file = tokio::fs::File::from_std(std::fs::File::from(stdout_r));
+                    tokio::spawn(async move {
+                        let mut lines = tokio::io::BufReader::new(file).lines();
+                        while let Ok(Some(line)) = lines.next_line().await {
+                            let mut log = buf.lock().await;
+                            log.push(format!("[stdout] {}", line));
+                            if log.len() > 1000 { log.remove(0); }
+                        }
+                    });
+                }
+
+                {
+                    let buf = log_buffer.clone();
+                    let file = tokio::fs::File::from_std(std::fs::File::from(stderr_r));
+                    tokio::spawn(async move {
+                        let mut lines = tokio::io::BufReader::new(file).lines();
+                        while let Ok(Some(line)) = lines.next_line().await {
+                            let mut log = buf.lock().await;
+                            log.push(format!("[stderr] {}", line));
+                            if log.len() > 1000 { log.remove(0); }
+                        }
+                    });
+                }
+
+                let instance = ContainerInstance {
+                    container_id: container_id.to_string(),
+                    container_name: container.name.clone(),
+                    image: image.to_string(),
+                    pid: Some(pid),
+                    rootfs: rootfs_path.to_string(),
+                    started_at: Some(chrono::Utc::now()),
+                };
+
+                Ok(RunningContainer {
+                    child: None,
+                    instance,
+                    restart_count: 0,
+                    log_buffer,
+                    ready: Arc::new(Mutex::new(true)),
+                    healthy: Arc::new(Mutex::new(true)),
+                })
+            }
+            Ok(nix::unistd::ForkResult::Child) => {
+                drop(stdout_r);
+                drop(stderr_r);
+
+                nix::unistd::dup2_stdout(&stdout_w).ok();
+                nix::unistd::dup2_stderr(&stderr_w).ok();
+                drop(stdout_w);
+                drop(stderr_w);
+
+                if let Ok(fd) = nix::fcntl::open(
+                    "/dev/null",
+                    nix::fcntl::OFlag::O_RDONLY,
+                    nix::sys::stat::Mode::empty(),
+                ) {
+                    let _ = nix::unistd::dup2_stdin(fd);
+                }
+
+                if let Err(e) = rootfs::child_enter_ns_root(&rootfs_owned) {
+                    eprintln!("z8s: root namespace setup failed: {}", e);
+                    std::process::exit(1);
+                }
+
+                for (k, v) in &env_owned {
+                    std::env::set_var(k, v);
+                }
+
+                let mut argv: Vec<std::ffi::CString> =
+                    vec![std::ffi::CString::new(entrypoint_owned.clone()).unwrap()];
+                for a in &args_owned {
+                    argv.push(std::ffi::CString::new(a.as_str()).unwrap());
+                }
+
+                let e = nix::unistd::execvp(&argv[0], &argv)
+                    .expect_err("execvp returned unexpectedly");
+                eprintln!("z8s: execvp({}) failed: {}", entrypoint_owned, e);
+                std::process::exit(1);
+            }
+            Err(e) => {
+                drop(stdout_r);
+                drop(stdout_w);
+                drop(stderr_r);
+                drop(stderr_w);
+                anyhow::bail!("Failed to fork: {}", e);
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -331,7 +450,7 @@ impl ProcessSupervisor {
                 drop(ack_w);
 
                 if let Err(e) = rootfs::child_enter_ns_fork(&rootfs_owned, sync_w, ack_r) {
-                    eprintln!("z8s: namespace setup failed: {}", e);
+                    eprintln!("z8s: namespace setup failed: {:#}", e);
                     std::process::exit(1);
                 }
 
@@ -363,10 +482,9 @@ impl ProcessSupervisor {
                     argv.push(std::ffi::CString::new(a.as_str()).unwrap());
                 }
 
-                if let Err(e) = nix::unistd::execvp(&argv[0], &argv) {
-                    let msg = format!("z8s: execvp({}) failed: {}\n", entrypoint_owned, e);
-                    unsafe { nix::libc::write(2, msg.as_ptr() as *const _, msg.len()); }
-                }
+                let e = nix::unistd::execvp(&argv[0], &argv)
+                    .expect_err("execvp returned unexpectedly");
+                eprintln!("z8s: execvp({}) failed: {}", entrypoint_owned, e);
                 std::process::exit(1);
             }
             Err(e) => {
