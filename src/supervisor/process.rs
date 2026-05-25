@@ -19,6 +19,17 @@ use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
+struct ContainerSpawnCtx<'a> {
+    entrypoint: &'a str,
+    cmd_args: &'a [String],
+    env_vars: &'a [(String, String)],
+    rootfs_path: &'a str,
+    container_id: &'a str,
+    pod_uid: &'a str,
+    image: &'a str,
+    container: &'a Container,
+}
+
 #[derive(Debug, Clone)]
 pub struct ContainerInstance {
     pub container_id: String,
@@ -166,28 +177,20 @@ impl ProcessSupervisor {
 
             let rootfs_owned = rootfs_path.to_string();
 
+            let ctx = ContainerSpawnCtx {
+                entrypoint: &entrypoint,
+                cmd_args: &cmd_args,
+                env_vars: &env_vars,
+                rootfs_path: &rootfs_owned,
+                container_id,
+                pod_uid,
+                image: &image,
+                container,
+            };
             if rootfs::is_root() {
-                return self.spawn_root_ns_container(
-                    &entrypoint,
-                    &cmd_args,
-                    &env_vars,
-                    &rootfs_owned,
-                    container_id,
-                    pod_uid,
-                    &image,
-                    container,
-                ).await;
+                return self.spawn_root_ns_container(ctx).await;
             } else {
-                return self.spawn_userns_container(
-                    &entrypoint,
-                    &cmd_args,
-                    &env_vars,
-                    &rootfs_owned,
-                    container_id,
-                    pod_uid,
-                    &image,
-                    container,
-                ).await;
+                return self.spawn_userns_container(ctx).await;
             }
         };
 
@@ -208,18 +211,8 @@ impl ProcessSupervisor {
         self.build_running_container(child, container_id, rootfs_path, &image, container).await
     }
 
-    #[allow(clippy::too_many_arguments)]
-    async fn spawn_root_ns_container(
-        &self,
-        entrypoint: &str,
-        cmd_args: &[String],
-        env_vars: &[(String, String)],
-        rootfs_path: &str,
-        container_id: &str,
-        pod_uid: &str,
-        image: &str,
-        container: &Container,
-    ) -> Result<RunningContainer> {
+    async fn spawn_root_ns_container(&self, ctx: ContainerSpawnCtx<'_>) -> Result<RunningContainer> {
+        let ContainerSpawnCtx { entrypoint, cmd_args, env_vars, rootfs_path, container_id, pod_uid, image, container } = ctx;
         let (stdout_r, stdout_w) = nix::unistd::pipe().context("Failed to create stdout pipe")?;
         let (stderr_r, stderr_w) = nix::unistd::pipe().context("Failed to create stderr pipe")?;
 
@@ -330,18 +323,8 @@ impl ProcessSupervisor {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    async fn spawn_userns_container(
-        &self,
-        entrypoint: &str,
-        cmd_args: &[String],
-        env_vars: &[(String, String)],
-        rootfs_path: &str,
-        container_id: &str,
-        pod_uid: &str,
-        image: &str,
-        container: &Container,
-    ) -> Result<RunningContainer> {
+    async fn spawn_userns_container(&self, ctx: ContainerSpawnCtx<'_>) -> Result<RunningContainer> {
+        let ContainerSpawnCtx { entrypoint, cmd_args, env_vars, rootfs_path, container_id, pod_uid, image, container } = ctx;
         let (stdout_r, stdout_w) = nix::unistd::pipe()
             .context("Failed to create stdout pipe")?;
         let (stderr_r, stderr_w) = nix::unistd::pipe()

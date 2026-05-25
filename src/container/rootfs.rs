@@ -150,9 +150,10 @@ fn read_subid(path: &str, host_id: u32) -> Option<(u64, u64)> {
 pub fn child_enter_ns_fork(rootfs_path: &str, sync_w: OwnedFd, ack_r: OwnedFd) -> Result<()> {
     let flags = CloneFlags::CLONE_NEWUSER
         | CloneFlags::CLONE_NEWNS
-        | CloneFlags::CLONE_NEWUTS;
+        | CloneFlags::CLONE_NEWUTS
+        | CloneFlags::CLONE_NEWIPC;
     unshare(flags)
-        .context("Failed to unshare user/mount/pid/uts namespaces")?;
+        .context("Failed to unshare user/mount/uts/ipc namespaces")?;
 
     nix::unistd::write(&sync_w, b"S")
         .context("child: failed to write sync byte")?;
