@@ -571,18 +571,53 @@ async fn patch_deployment_scale(
     Path((namespace, name)): Path<(String, String)>,
     body: axum::extract::Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    use k8s_openapi::api::autoscaling::v1::{Scale, ScaleSpec, ScaleStatus};
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+
     let trackers = state.store.get_by_kind("Deployment").await;
     for t in &trackers {
         if t.resource.name() == name && t.resource.namespace() == namespace {
             if let AnyResource::Deployment(ref mut deploy) = t.resource.clone() {
+                let desired = body.get("spec")
+                    .and_then(|s| s.get("replicas"))
+                    .and_then(|r| r.as_i64())
+                    .or_else(|| body.get("replicas").and_then(|r| r.as_i64()));
+
+                let replicas = desired.unwrap_or(
+                    deploy.spec.as_ref().and_then(|s| s.replicas).map(|r| r as i64).unwrap_or(1)
+                ) as i32;
+
                 if let Some(spec) = deploy.spec.as_mut() {
-                    if let Some(replicas) = body.get("spec").and_then(|s| s.get("replicas")).and_then(|r| r.as_i64()) {
-                        spec.replicas = Some(replicas as i32);
-                        info!("Scaled deployment {}/{} to {} replicas", namespace, name, replicas);
-                        state.store.apply(AnyResource::Deployment(deploy.clone())).await.ok();
-                        return Ok(Json(resource_to_deploy_json(&AnyResource::Deployment(deploy.clone()))));
-                    }
+                    spec.replicas = Some(replicas);
+                    info!("Scaled deployment {}/{} to {} replicas", namespace, name, replicas);
+                    state.store.apply(AnyResource::Deployment(deploy.clone())).await.ok();
                 }
+
+                let selector = deploy.spec.as_ref()
+                    .and_then(|s| s.selector.match_labels.as_ref())
+                    .map(|labels| {
+                        labels.iter()
+                            .map(|(k, v)| format!("{}={}", k, v))
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    });
+
+                let scale = Scale {
+                    metadata: ObjectMeta {
+                        name: Some(name.clone()),
+                        namespace: Some(namespace.clone()),
+                        uid: Some(format!("Deployment/{}/{}", namespace, name)),
+                        ..Default::default()
+                    },
+                    spec: Some(ScaleSpec {
+                        replicas: Some(replicas),
+                    }),
+                    status: Some(ScaleStatus {
+                        replicas,
+                        selector,
+                    }),
+                };
+                return Ok(Json(serde_json::to_value(&scale).unwrap_or_default()));
             }
         }
     }
