@@ -172,6 +172,39 @@ impl ProcessSupervisor {
         (cms, secrets)
     }
 
+    async fn resolve_service_env(&self, pod: &Pod) -> Vec<(String, String)> {
+        let pod_ns = pod.metadata.namespace.as_deref().unwrap_or("default");
+        let trackers = self.store.get_by_kind("Service").await;
+        let mut vars = Vec::new();
+        for t in trackers {
+            if let AnyResource::Service(svc) = &t.resource {
+                if svc.metadata.namespace.as_deref().unwrap_or("default") != pod_ns {
+                    continue;
+                }
+                let cluster_ip = svc.spec.as_ref()
+                    .and_then(|s| s.cluster_ip.as_deref())
+                    .unwrap_or("None");
+                if cluster_ip == "None" || cluster_ip.is_empty() {
+                    continue;
+                }
+                let svc_name = svc.metadata.name.as_deref().unwrap_or_default();
+                let prefix = svc_name.to_uppercase().replace('-', "_");
+                vars.push((format!("{}_SERVICE_HOST", prefix), cluster_ip.to_string()));
+                if let Some(ports) = svc.spec.as_ref().and_then(|s| s.ports.as_ref()) {
+                    for port in ports {
+                        let port_str = port.port.to_string();
+                        vars.push((format!("{}_SERVICE_PORT", prefix), port_str.clone()));
+                        if let Some(pname) = &port.name {
+                            let pname_up = pname.to_uppercase().replace('-', "_");
+                            vars.push((format!("{}_SERVICE_PORT_{}", prefix, pname_up), port_str));
+                        }
+                    }
+                }
+            }
+        }
+        vars
+    }
+
     fn resolve_env_from(
         container: &Container,
         pod: &Pod,
@@ -244,10 +277,12 @@ impl ProcessSupervisor {
             })
             .unwrap_or_default();
 
-        // Resolve volumes and envFrom for pod resources
+        // Resolve volumes, envFrom, and service env vars for pod resources
         let volumes = if let AnyResource::Pod(pod) = resource {
             let (cms, secrets) = self.fetch_cms_and_secrets().await;
             env_vars.extend(Self::resolve_env_from(container, pod, &cms, &secrets));
+            // Inject service env vars (K8s-style: SVCNAME_SERVICE_HOST, SVCNAME_SERVICE_PORT)
+            env_vars.extend(self.resolve_service_env(pod).await);
             if !is_native {
                 crate::container::volumes::prepare_volumes(
                     pod,

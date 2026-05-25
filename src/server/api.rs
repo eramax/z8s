@@ -11,10 +11,10 @@ use k8s_openapi::api::authorization::v1::{
     SelfSubjectAccessReview, SelfSubjectAccessReviewSpec, SubjectAccessReviewStatus,
 };
 use k8s_openapi::api::core::v1::{
-    ConfigMap, ContainerState, ContainerStateRunning, ContainerStatus, DaemonEndpoint, Event,
-    EventSource, HostIP, Namespace, NamespaceStatus, Node, NodeAddress,
+    ConfigMap, ContainerState, ContainerStateRunning, ContainerStatus, DaemonEndpoint,
+    Event, EventSource, HostIP, Namespace, NamespaceStatus, Node, NodeAddress,
     NodeCondition, NodeDaemonEndpoints, NodeSpec, NodeStatus, NodeSystemInfo,
-    ObjectReference, PodCondition, PodIP, PodStatus, Secret,
+    ObjectReference, PodCondition, PodIP, PodStatus, Secret, Service, ServiceStatus,
 };
 use k8s_openapi::List;
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
@@ -67,11 +67,16 @@ type EventStore = Arc<Mutex<Vec<Event>>>;
 pub struct AppState {
     pub store: Arc<ResourceStore>,
     pub supervisor: Arc<ProcessSupervisor>,
+    pub network: Arc<crate::network::NetworkManager>,
     pub namespaces: NamespaceStore,
     pub events: EventStore,
 }
 
-pub async fn run_server(store: Arc<ResourceStore>, supervisor: Arc<ProcessSupervisor>) {
+pub async fn run_server(
+    store: Arc<ResourceStore>,
+    supervisor: Arc<ProcessSupervisor>,
+    network: Arc<crate::network::NetworkManager>,
+) {
     let namespaces: NamespaceStore = Arc::new(RwLock::new(HashMap::new()));
     {
         let mut ns = namespaces.write().await;
@@ -92,7 +97,7 @@ pub async fn run_server(store: Arc<ResourceStore>, supervisor: Arc<ProcessSuperv
         ));
     }
 
-    let state = AppState { store, supervisor, namespaces, events };
+    let state = AppState { store, supervisor, network, namespaces, events };
 
     let app = Router::new()
         .route("/", get(root_handler))
@@ -136,6 +141,15 @@ pub async fn run_server(store: Arc<ResourceStore>, supervisor: Arc<ProcessSuperv
         .route("/api/v1/namespaces/{namespace}/secrets", get(list_secrets).post(create_secret))
         .route("/api/v1/namespaces/{namespace}/secrets/{name}",
             get(get_secret).put(update_secret).patch(update_secret).delete(delete_secret))
+        // Services
+        .route("/api/v1/services", get(list_services_all))
+        .route("/api/v1/namespaces/{namespace}/services", get(list_services).post(create_service))
+        .route("/api/v1/namespaces/{namespace}/services/{name}",
+            get(get_service).put(update_service).patch(update_service).delete(delete_service))
+        // Endpoints
+        .route("/api/v1/endpoints", get(list_endpoints_all))
+        .route("/api/v1/namespaces/{namespace}/endpoints", get(list_endpoints))
+        .route("/api/v1/namespaces/{namespace}/endpoints/{name}", get(get_endpoints))
         // Metrics
         .route("/apis/metrics.k8s.io/v1beta1", get(metrics_api_resources))
         .route("/apis/metrics.k8s.io/v1beta1/nodes", get(metrics_top_nodes))
@@ -303,7 +317,8 @@ async fn api_v1_resources() -> Json<APIResourceList> {
             api_resource("pods/log", "", true, "Pod", &["get"], &[], &[]),
             api_resource("namespaces", "namespace", false, "Namespace", &["get", "list", "create", "delete"], &["ns"], &[]),
             api_resource("nodes", "node", false, "Node", &["get", "list"], &["no"], &[]),
-            api_resource("services", "service", true, "Service", &["get", "list", "create", "delete"], &["svc"], &[]),
+            api_resource("services", "service", true, "Service", &["get", "list", "watch", "create", "update", "patch", "delete"], &["svc"], &[]),
+            api_resource("endpoints", "endpoints", true, "Endpoints", &["get", "list", "watch"], &["ep"], &[]),
             api_resource("configmaps", "configmap", true, "ConfigMap", &["get", "list", "create", "delete"], &["cm"], &[]),
             api_resource("secrets", "secret", true, "Secret", &["get", "list", "create", "delete"], &[], &[]),
             api_resource("events", "event", true, "Event", &["get", "list", "watch"], &["ev"], &[]),
@@ -1655,4 +1670,196 @@ impl IntoResponse for ApiError {
         };
         (self.status, Json(body)).into_response()
     }
+}
+
+// ── Services ──────────────────────────────────────────────────────────────────
+
+static SERVICE_IP_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+
+fn alloc_cluster_ip() -> String {
+    let n = SERVICE_IP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let b3 = ((n >> 8) & 0xFF) as u8;
+    let b4 = (n & 0xFF) as u8;
+    let b4 = if b4 == 0 { 1 } else if b4 == 255 { 254 } else { b4 };
+    format!("10.96.{}.{}", b3, b4)
+}
+
+static NODEPORT_COUNTER: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(30000);
+
+fn alloc_node_port() -> i32 {
+    NODEPORT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as i32
+}
+
+async fn list_services_all(State(state): State<AppState>) -> Json<serde_json::Value> {
+    list_services_in_ns(&state, None).await
+}
+
+async fn list_services(
+    State(state): State<AppState>,
+    Path(namespace): Path<String>,
+) -> Json<serde_json::Value> {
+    list_services_in_ns(&state, Some(namespace)).await
+}
+
+async fn list_services_in_ns(state: &AppState, namespace: Option<String>) -> Json<serde_json::Value> {
+    let trackers = state.store.get_by_kind("Service").await;
+    let items: Vec<serde_json::Value> = trackers.iter()
+        .filter(|t| namespace.as_deref().map_or(true, |ns| t.resource.namespace() == ns))
+        .filter_map(|t| serde_json::to_value(&t.resource).ok())
+        .collect();
+    Json(serde_json::json!({
+        "apiVersion": "v1",
+        "kind": "ServiceList",
+        "metadata": make_list_meta(),
+        "items": items
+    }))
+}
+
+async fn get_service(
+    State(state): State<AppState>,
+    Path((namespace, name)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let trackers = state.store.get_by_kind("Service").await;
+    for t in &trackers {
+        if t.resource.namespace() == namespace && t.resource.name() == name {
+            return Ok(Json(serde_json::to_value(&t.resource).unwrap_or_default()));
+        }
+    }
+    Err(ApiError::not_found(format!("service \"{}/{}\" not found", namespace, name)))
+}
+
+async fn create_service(
+    State(state): State<AppState>,
+    Path(namespace): Path<String>,
+    raw: axum::body::Bytes,
+) -> Result<axum::response::Response, ApiError> {
+    let body = parse_body(&raw)?;
+    let mut svc: Service = serde_json::from_value(body)
+        .map_err(|e| ApiError::bad_request(format!("invalid Service: {}", e)))?;
+    if svc.metadata.namespace.is_none() {
+        svc.metadata.namespace = Some(namespace.clone());
+    }
+    if svc.metadata.uid.is_none() {
+        svc.metadata.uid = Some(uuid::Uuid::new_v4().to_string());
+    }
+    if svc.metadata.creation_timestamp.is_none() {
+        svc.metadata.creation_timestamp = Some(now_time());
+    }
+
+    // Fill in ClusterIP and NodePort if missing
+    if let Some(spec) = svc.spec.as_mut() {
+        let svc_type = spec.type_.as_deref().unwrap_or("ClusterIP");
+        if spec.cluster_ip.as_deref().unwrap_or("").is_empty() && svc_type != "ExternalName" {
+            spec.cluster_ip = Some(alloc_cluster_ip());
+            spec.cluster_ips = spec.cluster_ip.clone().map(|ip| vec![ip]);
+        }
+        if svc_type == "NodePort" || svc_type == "LoadBalancer" {
+            if let Some(ports) = spec.ports.as_mut() {
+                for p in ports.iter_mut() {
+                    if p.node_port.is_none() {
+                        p.node_port = Some(alloc_node_port());
+                    }
+                }
+            }
+        }
+    }
+    if svc.status.is_none() {
+        svc.status = Some(ServiceStatus::default());
+    }
+
+    let already_exists = state.store.get_by_kind("Service").await.iter()
+        .any(|t| t.resource.name() == svc.metadata.name.as_deref().unwrap_or("") && t.resource.namespace() == namespace);
+
+    let resource = AnyResource::Service(svc.clone());
+    state.store.apply(resource.clone()).await.map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    // Start service proxy for NodePort services
+    state.network.sync_service(&svc).await;
+
+    let status = if already_exists { StatusCode::OK } else { StatusCode::CREATED };
+    Ok((status, Json(serde_json::to_value(&resource).unwrap_or_default())).into_response())
+}
+
+async fn update_service(
+    State(state): State<AppState>,
+    Path((namespace, name)): Path<(String, String)>,
+    raw: axum::body::Bytes,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let patch = parse_body(&raw)?;
+    let existing = state.store.get_by_kind("Service").await
+        .into_iter()
+        .find(|t| t.resource.namespace() == namespace && t.resource.name() == name)
+        .and_then(|t| if let AnyResource::Service(svc) = t.resource { serde_json::to_value(svc).ok() } else { None });
+    let mut merged = existing.unwrap_or(serde_json::Value::Object(Default::default()));
+    json_merge_patch(&mut merged, &patch);
+    let mut svc: Service = serde_json::from_value(merged)
+        .map_err(|e| ApiError::bad_request(format!("invalid Service: {}", e)))?;
+    if svc.metadata.namespace.is_none() { svc.metadata.namespace = Some(namespace); }
+    if svc.metadata.name.is_none() { svc.metadata.name = Some(name); }
+    let resource = AnyResource::Service(svc.clone());
+    state.store.apply(resource.clone()).await.map_err(|e| ApiError::bad_request(e.to_string()))?;
+    state.network.sync_service(&svc).await;
+    Ok(Json(serde_json::to_value(&resource).unwrap_or_default()))
+}
+
+async fn delete_service(
+    State(state): State<AppState>,
+    Path((namespace, name)): Path<(String, String)>,
+) -> Result<Json<Status>, ApiError> {
+    let trackers = state.store.get_by_kind("Service").await;
+    for t in &trackers {
+        if t.resource.namespace() == namespace && t.resource.name() == name {
+            state.store.delete(&t.resource).await.ok();
+            state.network.remove_service(&namespace, &name).await;
+            return Ok(Json(ok_status()));
+        }
+    }
+    Err(ApiError::not_found(format!("service \"{}/{}\" not found", namespace, name)))
+}
+
+// ── Endpoints ─────────────────────────────────────────────────────────────────
+
+async fn list_endpoints_all(State(state): State<AppState>) -> Json<serde_json::Value> {
+    list_endpoints_ns(&state, None).await
+}
+
+async fn list_endpoints(
+    State(state): State<AppState>,
+    Path(namespace): Path<String>,
+) -> Json<serde_json::Value> {
+    list_endpoints_ns(&state, Some(namespace)).await
+}
+
+async fn list_endpoints_ns(state: &AppState, namespace: Option<String>) -> Json<serde_json::Value> {
+    let svc_trackers = state.store.get_by_kind("Service").await;
+    let mut items = Vec::new();
+    for t in &svc_trackers {
+        if namespace.as_deref().map_or(false, |ns| t.resource.namespace() != ns) { continue; }
+        if let AnyResource::Service(svc) = &t.resource {
+            let ep = state.network.compute_endpoints(svc).await;
+            if let Ok(v) = serde_json::to_value(&ep) { items.push(v); }
+        }
+    }
+    Json(serde_json::json!({
+        "apiVersion": "v1",
+        "kind": "EndpointsList",
+        "metadata": make_list_meta(),
+        "items": items
+    }))
+}
+
+async fn get_endpoints(
+    State(state): State<AppState>,
+    Path((namespace, name)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let trackers = state.store.get_by_kind("Service").await;
+    for t in &trackers {
+        if t.resource.namespace() == namespace && t.resource.name() == name {
+            if let AnyResource::Service(svc) = &t.resource {
+                let ep = state.network.compute_endpoints(svc).await;
+                return Ok(Json(serde_json::to_value(&ep).unwrap_or_default()));
+            }
+        }
+    }
+    Err(ApiError::not_found(format!("endpoints \"{}/{}\" not found", namespace, name)))
 }

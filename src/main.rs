@@ -3,6 +3,7 @@ mod container;
 mod controller;
 mod init;
 mod manifest;
+mod network;
 mod server;
 mod supervisor;
 
@@ -11,6 +12,7 @@ use crate::container::image::ImageManager;
 use crate::controller::DeploymentController;
 use crate::init::InitHandler;
 use crate::manifest::watcher::ManifestWatcher;
+use crate::network::NetworkManager;
 use crate::supervisor::cgroup::CgroupManager;
 use crate::supervisor::process::ProcessSupervisor;
 use anyhow::Result;
@@ -61,6 +63,8 @@ async fn main() -> Result<()> {
         store.clone(),
     ));
 
+    let network = Arc::new(NetworkManager::new(store.clone(), supervisor.clone()));
+
     let watcher = Arc::new(ManifestWatcher::new(store.clone()));
 
     let controller =
@@ -101,8 +105,9 @@ async fn main() -> Result<()> {
 
     let store_clone = store.clone();
     let s2 = supervisor.clone();
+    let net2 = network.clone();
     tokio::spawn(async move {
-        server::run_server(store_clone, s2).await;
+        server::run_server(store_clone, s2, net2).await;
     });
 
     // Initial reconcile runs in background (don't block startup on slow image pulls)

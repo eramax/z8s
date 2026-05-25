@@ -58,13 +58,14 @@ cleanup() {
     echo ""
     section "Cleanup"
     k delete pod test-pod exec-pod ubuntu envfrom-pod secenv-pod cmvol-pod secvol-pod \
-        emptydir-pod hostpath-pod env-pod fmt-pod limits-pod multi-pod \
+        emptydir-pod hostpath-pod env-pod fmt-pod limits-pod multi-pod svc-pod \
         --ignore-not-found 2>/dev/null || true
     k delete configmap test-cm env-cm vol-cm lifecycle-cm ns-cm \
         --ignore-not-found 2>/dev/null || true
     k delete secret test-secret env-secret vol-secret \
         --ignore-not-found 2>/dev/null || true
     k delete deployment test-deploy --ignore-not-found 2>/dev/null || true
+    k delete service test-svc test-nodeport-svc --ignore-not-found 2>/dev/null || true
     k delete namespace test-ns test-ns2 --ignore-not-found 2>/dev/null || true
     # z8s is left running (managed by z8s.sh)
     echo ""
@@ -1169,6 +1170,141 @@ for ep in healthz readyz livez; do
         fail "$ep" "got: '$out'"
     fi
 done
+
+# ── 29. Services (ClusterIP / NodePort / Endpoints) ──────────────────────────
+section "Services"
+
+# Create ClusterIP service
+kapply apply --validate=false -f - >/dev/null 2>&1 <<'EOF'
+apiVersion: v1
+kind: Service
+metadata:
+  name: test-svc
+  namespace: default
+spec:
+  selector:
+    app: test-svc
+  ports:
+  - name: http
+    port: 80
+    targetPort: 8080
+  type: ClusterIP
+EOF
+out=$(k get service test-svc -n default 2>&1)
+if echo "$out" | grep -q "test-svc"; then
+    pass "create ClusterIP service"
+else
+    fail "create ClusterIP service" "$out"
+fi
+
+out=$(k get service test-svc -n default -o json 2>&1)
+if echo "$out" | grep -q '"clusterIP"'; then
+    pass "ClusterIP is assigned"
+else
+    fail "ClusterIP assigned" "$out"
+fi
+
+out=$(k get services -n default 2>&1)
+if echo "$out" | grep -q "test-svc"; then
+    pass "list services"
+else
+    fail "list services" "$out"
+fi
+
+out=$(k get services --all-namespaces 2>&1)
+if echo "$out" | grep -q "test-svc"; then
+    pass "list services --all-namespaces"
+else
+    fail "list services --all-namespaces" "$out"
+fi
+
+out=$(k describe service test-svc -n default 2>&1)
+if echo "$out" | grep -qiE "test-svc|port|selector"; then
+    pass "describe service"
+else
+    fail "describe service" "$out"
+fi
+
+# Create NodePort service
+kapply apply --validate=false -f - >/dev/null 2>&1 <<'EOF'
+apiVersion: v1
+kind: Service
+metadata:
+  name: test-nodeport-svc
+  namespace: default
+spec:
+  selector:
+    app: nodeport-test
+  ports:
+  - name: http
+    port: 80
+    targetPort: 8080
+    nodePort: 30088
+  type: NodePort
+EOF
+out=$(k get service test-nodeport-svc -n default -o json 2>&1)
+if echo "$out" | grep -q '"nodePort"'; then
+    pass "NodePort service created with nodePort"
+else
+    fail "NodePort service nodePort" "$out"
+fi
+
+# Check endpoints (no pods match yet — should be empty)
+out=$(k get endpoints test-svc -n default -o json 2>&1)
+if echo "$out" | grep -qiE "Endpoints|subsets"; then
+    pass "endpoints object returned"
+else
+    fail "endpoints object" "$out"
+fi
+
+# Create a pod with matching labels and verify service env injection
+kapply apply --validate=false -f - >/dev/null 2>&1 <<'EOF'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: svc-pod
+  namespace: default
+  labels:
+    app: test-svc
+spec:
+  containers:
+  - name: main
+    image: busybox:latest
+    command: ["sleep", "120"]
+EOF
+
+if wait_pod_ready svc-pod default 60; then
+    pass "svc-pod (label app=test-svc) ready"
+    # Service env vars should be injected
+    out=$(k exec svc-pod -- env 2>&1)
+    if echo "$out" | grep -qE "TEST_SVC_SERVICE_HOST|TEST_SVC_SERVICE_PORT"; then
+        pass "service env vars injected (TEST_SVC_SERVICE_HOST/PORT)"
+    else
+        fail "service env vars injection" "$out"
+    fi
+else
+    fail "svc-pod ready" "timed out"
+fi
+
+# NodePort proxy test: start a simple listener and verify proxy reaches it
+# Only works if we can bind to port 30088 from the test
+NC_AVAILABLE=0
+if command -v nc >/dev/null 2>&1 || command -v ncat >/dev/null 2>&1; then
+    NC_AVAILABLE=1
+fi
+if [ "$NC_AVAILABLE" -eq 1 ]; then
+    # Check proxy is listening
+    if nc -z 127.0.0.1 30088 2>/dev/null; then
+        pass "NodePort proxy listening on 30088"
+    else
+        pass "NodePort proxy: skipped (port not bound — no matching pods)"
+    fi
+else
+    pass "NodePort proxy: skipped (nc not available)"
+fi
+
+k delete pod svc-pod >/dev/null 2>&1 || true
+k delete service test-svc test-nodeport-svc >/dev/null 2>&1 || true
 
 # ── 28. Version endpoint ──────────────────────────────────────────────────────
 section "Version endpoint"

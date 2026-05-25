@@ -1,0 +1,204 @@
+pub mod service_proxy;
+
+use crate::api::types::ResourceStore;
+use crate::supervisor::process::ProcessSupervisor;
+use k8s_openapi::api::core::v1::Service;
+use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::AtomicUsize;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
+use tracing::info;
+
+#[derive(Debug, Clone)]
+pub struct ServiceEndpoint {
+    pub host: String,
+    pub port: u16,
+}
+
+struct RunningProxy {
+    handle: JoinHandle<()>,
+}
+
+pub struct NetworkManager {
+    pub store: Arc<ResourceStore>,
+    pub supervisor: Arc<ProcessSupervisor>,
+    proxies: Mutex<HashMap<String, RunningProxy>>,
+    counter: Arc<AtomicUsize>,
+}
+
+impl NetworkManager {
+    pub fn new(store: Arc<ResourceStore>, supervisor: Arc<ProcessSupervisor>) -> Self {
+        Self {
+            store,
+            supervisor,
+            proxies: Mutex::new(HashMap::new()),
+            counter: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    /// Start or restart the proxy for a service.
+    pub async fn sync_service(&self, svc: &Service) {
+        let svc_name = svc.metadata.name.as_deref().unwrap_or_default().to_string();
+        let svc_ns = svc.metadata.namespace.as_deref().unwrap_or("default").to_string();
+        let key = format!("{}/{}", svc_ns, svc_name);
+
+        let spec = match &svc.spec {
+            Some(s) => s,
+            None => return,
+        };
+
+        let selector: BTreeMap<String, String> = spec.selector.clone().unwrap_or_default();
+        if selector.is_empty() {
+            return; // headless or external-name services — no proxy
+        }
+
+        let svc_type = spec.type_.as_deref().unwrap_or("ClusterIP");
+        let ports = spec.ports.as_deref().unwrap_or(&[]);
+
+        let mut proxies = self.proxies.lock().await;
+
+        for svc_port in ports {
+            let node_port = svc_port.node_port.map(|p| p as u16);
+            let listen_port = match node_port {
+                Some(p) => p,
+                None if svc_type == "NodePort" => continue, // skip if nodePort missing
+                None => continue, // ClusterIP without iptables — skip actual proxy
+            };
+
+            let target_port = svc_port.target_port.clone()
+                .unwrap_or_else(|| IntOrString::Int(svc_port.port));
+
+            let port_key = format!("{}:{}", key, listen_port);
+
+            // Stop existing proxy for this port
+            if let Some(old) = proxies.remove(&port_key) {
+                old.handle.abort();
+            }
+
+            let store = self.store.clone();
+            let supervisor = self.supervisor.clone();
+            let counter = self.counter.clone();
+            let selector_c = selector.clone();
+            let svc_name_c = svc_name.clone();
+            let svc_ns_c = svc_ns.clone();
+
+            let handle = tokio::spawn(async move {
+                service_proxy::run_proxy(
+                    listen_port,
+                    selector_c,
+                    target_port,
+                    store,
+                    supervisor,
+                    counter,
+                    &svc_name_c,
+                    &svc_ns_c,
+                )
+                .await;
+            });
+
+            info!("Service proxy {}:{} → NodePort {}", key, svc_port.port, listen_port);
+            proxies.insert(port_key, RunningProxy { handle });
+        }
+    }
+
+    pub async fn remove_service(&self, ns: &str, name: &str) {
+        let prefix = format!("{}/{}", ns, name);
+        let mut proxies = self.proxies.lock().await;
+        let keys: Vec<_> = proxies.keys()
+            .filter(|k| k.starts_with(&prefix))
+            .cloned()
+            .collect();
+        for key in keys {
+            if let Some(p) = proxies.remove(&key) {
+                p.handle.abort();
+                info!("Stopped service proxy for {}", key);
+            }
+        }
+    }
+
+    /// Generate an Endpoints object for a service.
+    pub async fn compute_endpoints(
+        &self,
+        svc: &Service,
+    ) -> k8s_openapi::api::core::v1::Endpoints {
+        use k8s_openapi::api::core::v1::{EndpointAddress, EndpointPort, EndpointSubset, Endpoints, ObjectReference};
+
+        let svc_name = svc.metadata.name.as_deref().unwrap_or_default().to_string();
+        let svc_ns = svc.metadata.namespace.as_deref().unwrap_or("default").to_string();
+        let selector = svc.spec.as_ref()
+            .and_then(|s| s.selector.as_ref())
+            .cloned()
+            .unwrap_or_default();
+
+        let mut addresses = Vec::new();
+
+        // Find pods matching the selector
+        let pod_trackers = self.store.get_by_kind("Pod").await;
+        for t in &pod_trackers {
+            if let crate::api::AnyResource::Pod(pod) = &t.resource {
+                if pod.metadata.namespace.as_deref().unwrap_or("default") != svc_ns {
+                    continue;
+                }
+                let pod_labels: BTreeMap<String, String> = pod.metadata.labels.clone().unwrap_or_default();
+                if !selector.iter().all(|(k, v)| pod_labels.get(k) == Some(v)) {
+                    continue;
+                }
+                // Check if pod is running
+                let pod_name = pod.metadata.name.as_deref().unwrap_or_default();
+                let is_running = self.supervisor.is_pod_ready(pod_name).await;
+                if !is_running {
+                    continue;
+                }
+                addresses.push(EndpointAddress {
+                    ip: "127.0.0.1".to_string(),
+                    hostname: None,
+                    node_name: Some("z8s-node".to_string()),
+                    target_ref: Some(ObjectReference {
+                        kind: Some("Pod".to_string()),
+                        name: Some(pod_name.to_string()),
+                        namespace: Some(svc_ns.clone()),
+                        ..Default::default()
+                    }),
+                });
+            }
+        }
+
+        let ports: Vec<EndpointPort> = svc.spec.as_ref()
+            .and_then(|s| s.ports.as_ref())
+            .unwrap_or(&vec![])
+            .iter()
+            .map(|p| EndpointPort {
+                name: p.name.clone(),
+                port: p.target_port.as_ref()
+                    .and_then(|tp| match tp {
+                        IntOrString::Int(i) => Some(*i),
+                        IntOrString::String(_) => None,
+                    })
+                    .unwrap_or(p.port),
+                protocol: p.protocol.clone(),
+                ..Default::default()
+            })
+            .collect();
+
+        let subsets = if addresses.is_empty() {
+            vec![]
+        } else {
+            vec![EndpointSubset {
+                addresses: Some(addresses),
+                not_ready_addresses: None,
+                ports: if ports.is_empty() { None } else { Some(ports) },
+            }]
+        };
+
+        Endpoints {
+            metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+                name: Some(svc_name),
+                namespace: Some(svc_ns),
+                ..Default::default()
+            },
+            subsets: Some(subsets),
+        }
+    }
+}
