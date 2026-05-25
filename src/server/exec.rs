@@ -158,7 +158,7 @@ if let Ok(mut t) = termios::tcgetattr(&slave_fd) {
     termios::cfmakeraw(&mut t);
     t.output_flags |= OutputFlags::OPOST | OutputFlags::ONLCR | OutputFlags::ONOCR;
     t.local_flags |= LocalFlags::ECHO | LocalFlags::ECHOE | LocalFlags::ECHOK
-        | LocalFlags::ISIG;
+        | LocalFlags::ISIG | LocalFlags::ICANON;
     t.local_flags &= !LocalFlags::ECHOCTL;
     t.input_flags |= InputFlags::ICRNL | InputFlags::IXON;
     let _ = termios::tcsetattr(&slave_fd, SetArg::TCSANOW, &t);
