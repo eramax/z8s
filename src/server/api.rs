@@ -533,13 +533,21 @@ async fn list_deployments_in_namespace(
     headers: axum::http::HeaderMap,
 ) -> Result<axum::response::Response, ApiError> {
     let trackers = state.store.get_by_kind("Deployment").await;
+    let running = state.supervisor.running.lock().await;
+    let pods = state.store.get_by_kind("Pod").await;
+
     let items: Vec<serde_json::Value> = trackers
         .iter()
         .filter(|t| {
             namespace.as_deref().map_or(true, |ns| t.resource.namespace() == ns)
         })
-        .map(|t| resource_to_deploy_json(&t.resource))
+        .map(|t| {
+            let (ready, available) = count_deployment_pods(&t.resource, &pods, &running);
+            resource_to_deploy_json(&t.resource, Some(ready), Some(available))
+        })
         .collect();
+
+    drop(running);
 
     if accepts_table(&headers) {
         return Ok((StatusCode::OK, Json(deployment_list_to_table(&items))).into_response());
@@ -558,9 +566,12 @@ async fn get_deployment(
     Path((namespace, name)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let trackers = state.store.get_by_kind("Deployment").await;
+    let running = state.supervisor.running.lock().await;
+    let pods = state.store.get_by_kind("Pod").await;
     for t in &trackers {
         if t.resource.namespace() == namespace && t.resource.name() == name {
-            return Ok(Json(resource_to_deploy_json(&t.resource)));
+            let (ready, available) = count_deployment_pods(&t.resource, &pods, &running);
+            return Ok(Json(resource_to_deploy_json(&t.resource, Some(ready), Some(available))));
         }
     }
     Err(ApiError::NotFound(format!("deployment \"{}\" not found", name)))
@@ -703,6 +714,53 @@ async fn delete_pod(
     Err(ApiError::NotFound(format!("pod \"{}\" not found", name)))
 }
 
+fn count_deployment_pods(
+    resource: &AnyResource,
+    pods: &[crate::api::types::ResourceTracker],
+    running: &std::collections::HashMap<String, crate::supervisor::process::RunningContainer>,
+) -> (usize, usize) {
+    use crate::api::types::extract_containers;
+    let deploy = match resource {
+        AnyResource::Deployment(d) => d,
+        _ => return (0, 0),
+    };
+
+    let namespace = deploy.metadata.namespace.as_deref().unwrap_or("default");
+    let selector = deploy.spec.as_ref()
+        .and_then(|s| s.selector.match_labels.as_ref());
+
+    let (ready, total) = if let Some(labels) = selector {
+        let matching: Vec<_> = pods.iter()
+            .filter(|t| {
+                if let AnyResource::Pod(pod) = &t.resource {
+                    pod.metadata.namespace.as_deref() == Some(namespace)
+                        && pod.metadata.labels.as_ref().map_or(false, |pl| {
+                            labels.iter().all(|(k, v)| pl.get(k) == Some(v))
+                        })
+                } else {
+                    false
+                }
+            })
+            .collect();
+
+        let ready_count = matching.iter().filter(|t| {
+            let containers = extract_containers(&t.resource);
+            containers.iter().any(|c| {
+                let cid = format!("{}-{}", t.resource.name(), c.name);
+                running.get(&cid).map_or(false, |rc| {
+                    rc.ready.clone().try_lock().map(|r| *r).unwrap_or(false)
+                })
+            })
+        }).count();
+
+        (ready_count, matching.len())
+    } else {
+        (0, 0)
+    };
+
+    (ready, total)
+}
+
 fn fill_deployment_metadata(deploy: &mut k8s_openapi::api::apps::v1::Deployment) {
     let meta = &mut deploy.metadata;
     if meta.creation_timestamp.is_none() {
@@ -716,7 +774,11 @@ fn fill_deployment_metadata(deploy: &mut k8s_openapi::api::apps::v1::Deployment)
     }
 }
 
-fn resource_to_deploy_json(resource: &AnyResource) -> serde_json::Value {
+fn resource_to_deploy_json(
+    resource: &AnyResource,
+    ready_count: Option<usize>,
+    available_count: Option<usize>,
+) -> serde_json::Value {
     use k8s_openapi::api::apps::v1::{DeploymentCondition, DeploymentStatus};
 
     let deploy = match resource {
@@ -725,25 +787,33 @@ fn resource_to_deploy_json(resource: &AnyResource) -> serde_json::Value {
     };
 
     let time = now_time();
-    let replicas = deploy.spec.as_ref().and_then(|s| s.replicas);
+    let desired = deploy.spec.as_ref().and_then(|s| s.replicas);
+    let running = ready_count.map(|n| n as i32).or(desired);
+    let available = available_count.map(|n| n as i32).or(desired);
+
+    let all_ready = running.unwrap_or(0) >= desired.unwrap_or(1);
 
     let status = DeploymentStatus {
-        replicas,
-        ready_replicas: replicas,
-        available_replicas: replicas,
-        updated_replicas: replicas,
+        replicas: desired,
+        ready_replicas: running,
+        available_replicas: available,
+        updated_replicas: available,
         conditions: Some(vec![
             DeploymentCondition {
                 type_: "Available".into(),
-                status: "True".into(),
+                status: if all_ready { "True" } else { "False" }.into(),
                 last_update_time: Some(time.clone()),
                 last_transition_time: Some(time.clone()),
-                reason: Some("MinimumReplicasAvailable".into()),
-                message: Some("Deployment has minimum availability.".into()),
+                reason: Some(if all_ready { "MinimumReplicasAvailable" } else { "MinimumReplicasUnavailable" }.into()),
+                message: Some(if all_ready {
+                    "Deployment has minimum availability.".into()
+                } else {
+                    format!("Deployment does not have minimum availability. {}/{} pods ready", running.unwrap_or(0), desired.unwrap_or(1))
+                }),
             },
             DeploymentCondition {
                 type_: "Progressing".into(),
-                status: "True".into(),
+                status: if all_ready { "True" } else { "True" }.into(),
                 last_update_time: Some(time.clone()),
                 last_transition_time: Some(time.clone()),
                 reason: Some("NewReplicaSetAvailable".into()),
