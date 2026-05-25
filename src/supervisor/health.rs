@@ -1,5 +1,3 @@
-use crate::api::types::extract_containers;
-use crate::api::AnyResource;
 use k8s_openapi::api::core::v1::{ExecAction, HTTPGetAction, TCPSocketAction};
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use std::time::Duration;
@@ -16,39 +14,6 @@ pub enum HealthStatus {
 pub struct HealthChecker;
 
 impl HealthChecker {
-    pub fn new() -> Self {
-        Self
-    }
-
-    pub fn get_probes(&self, resource: &AnyResource) -> Vec<(String, ProbeConfig)> {
-        let mut probes = Vec::new();
-        let containers = extract_containers(resource);
-
-        for container in &containers {
-            let name = container.name.clone();
-
-            if let Some(liveness) = &container.liveness_probe {
-                if let Some(config) = ProbeConfig::from_probe(liveness) {
-                    probes.push((format!("{}/liveness", name), config));
-                }
-            }
-
-            if let Some(readiness) = &container.readiness_probe {
-                if let Some(config) = ProbeConfig::from_probe(readiness) {
-                    probes.push((format!("{}/readiness", name), config));
-                }
-            }
-
-            if let Some(startup) = &container.startup_probe {
-                if let Some(config) = ProbeConfig::from_probe(startup) {
-                    probes.push((format!("{}/startup", name), config));
-                }
-            }
-        }
-
-        probes
-    }
-
     pub async fn check_exec(cmd: &[String], timeout: Duration) -> HealthStatus {
         if cmd.is_empty() {
             return HealthStatus::Unknown;
@@ -128,8 +93,6 @@ pub struct ProbeConfig {
     pub initial_delay_seconds: i32,
     pub period_seconds: i32,
     pub timeout_seconds: i32,
-    pub success_threshold: i32,
-    pub failure_threshold: i32,
 }
 
 impl ProbeConfig {
@@ -149,8 +112,6 @@ impl ProbeConfig {
             initial_delay_seconds: probe.initial_delay_seconds.unwrap_or(0),
             period_seconds: probe.period_seconds.unwrap_or(10),
             timeout_seconds: probe.timeout_seconds.unwrap_or(1),
-            success_threshold: probe.success_threshold.unwrap_or(1),
-            failure_threshold: probe.failure_threshold.unwrap_or(3),
         })
     }
 

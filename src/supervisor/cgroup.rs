@@ -26,10 +26,6 @@ impl CgroupManager {
         }
     }
 
-    pub fn base_path(&self) -> &str {
-        &self.base_path
-    }
-
     pub fn create_pod_cgroup(&self, pod_uid: &str) -> Result<String> {
         if !self.enabled { return Ok(String::new()); }
         let cg_path = format!("{}/{}", self.base_path, sanitize_cgroup_name(pod_uid));

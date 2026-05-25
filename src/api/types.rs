@@ -4,7 +4,7 @@ use k8s_openapi::api::core::v1::{ConfigMap, Container, Pod, Secret, Service};
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use tokio::sync::RwLock;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,10 +56,6 @@ impl AnyResource {
         self.metadata().namespace.as_deref().unwrap_or("default")
     }
 
-    pub fn labels(&self) -> BTreeMap<String, String> {
-        self.metadata().labels.clone().unwrap_or_default()
-    }
-
     pub fn uid(&self) -> String {
         format!("{}/{}", self.kind(), self.name())
     }
@@ -77,7 +73,6 @@ pub enum ResourceState {
 pub struct ResourceTracker {
     pub resource: AnyResource,
     pub state: ResourceState,
-    pub children: Vec<String>,
     pub last_updated: chrono::DateTime<chrono::Utc>,
 }
 
@@ -86,7 +81,6 @@ impl ResourceTracker {
         Self {
             resource,
             state: ResourceState::Pending,
-            children: Vec::new(),
             last_updated: chrono::Utc::now(),
         }
     }

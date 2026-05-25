@@ -147,7 +147,12 @@ fn read_subid(path: &str, host_id: u32) -> Option<(u64, u64)> {
     None
 }
 
-pub fn child_enter_ns_fork(rootfs_path: &str, sync_w: OwnedFd, ack_r: OwnedFd) -> Result<()> {
+pub fn child_enter_ns_fork(
+    rootfs_path: &str,
+    sync_w: OwnedFd,
+    ack_r: OwnedFd,
+    volumes: &[crate::container::volumes::ResolvedVolume],
+) -> Result<()> {
     let flags = CloneFlags::CLONE_NEWUSER
         | CloneFlags::CLONE_NEWNS
         | CloneFlags::CLONE_NEWUTS
@@ -180,6 +185,11 @@ pub fn child_enter_ns_fork(rootfs_path: &str, sync_w: OwnedFd, ack_r: OwnedFd) -
         warn!("mount MS_PRIVATE on / failed ({e}) — attempting chroot fallback");
     }
 
+    // Bind-mount pod volumes before pivot_root (host paths are still visible)
+    if !volumes.is_empty() && !rootfs_path.is_empty() {
+        crate::container::volumes::bind_mount_volumes(rootfs_path, volumes);
+    }
+
     // Try full isolation: bind mount + pivot_root.
     if enter_rootfs(rootfs_path, false).is_ok() {
         return Ok(());
@@ -201,7 +211,10 @@ pub fn child_enter_ns_fork(rootfs_path: &str, sync_w: OwnedFd, ack_r: OwnedFd) -
     Ok(())
 }
 
-pub fn child_enter_ns_root(rootfs_path: &str) -> Result<()> {
+pub fn child_enter_ns_root(
+    rootfs_path: &str,
+    volumes: &[crate::container::volumes::ResolvedVolume],
+) -> Result<()> {
     unshare(
         CloneFlags::CLONE_NEWNS
             | CloneFlags::CLONE_NEWPID
@@ -217,6 +230,10 @@ pub fn child_enter_ns_root(rootfs_path: &str) -> Result<()> {
         None::<&str>,
     )
     .context("Failed to set private mount propagation")?;
+
+    if !volumes.is_empty() {
+        crate::container::volumes::bind_mount_volumes(rootfs_path, volumes);
+    }
 
     chroot(rootfs_path).context("Failed to chroot")?;
     chdir("/").context("Failed to chdir to /")?;

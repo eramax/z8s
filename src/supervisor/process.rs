@@ -7,7 +7,7 @@ use crate::container::rootfs;
 use crate::supervisor::cgroup::CgroupManager;
 use crate::supervisor::health::{HealthChecker, HealthStatus, ProbeAction, ProbeConfig};
 use anyhow::{Context, Result};
-use k8s_openapi::api::core::v1::Container;
+use k8s_openapi::api::core::v1::{ConfigMap, Container, Pod, Secret};
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 use std::collections::HashMap;
@@ -28,6 +28,7 @@ struct ContainerSpawnCtx<'a> {
     pod_uid: &'a str,
     image: &'a str,
     container: &'a Container,
+    volumes: Vec<crate::container::volumes::ResolvedVolume>,
 }
 
 #[derive(Debug, Clone)]
@@ -54,7 +55,6 @@ pub struct ProcessSupervisor {
     pub running: Arc<Mutex<HashMap<String, RunningContainer>>>,
     pub image_manager: Arc<ImageManager>,
     pub cgroup_manager: Arc<CgroupManager>,
-    pub health_checker: Arc<HealthChecker>,
     pub store: Arc<ResourceStore>,
 }
 
@@ -62,7 +62,6 @@ impl ProcessSupervisor {
     pub fn new(
         image_manager: Arc<ImageManager>,
         cgroup_manager: Arc<CgroupManager>,
-        health_checker: Arc<HealthChecker>,
         store: Arc<ResourceStore>,
     ) -> Self {
         let base = if rootfs::is_root() {
@@ -75,7 +74,6 @@ impl ProcessSupervisor {
             running: Arc::new(Mutex::new(HashMap::new())),
             image_manager,
             cgroup_manager,
-            health_checker,
             store,
         }
     }
@@ -120,7 +118,7 @@ impl ProcessSupervisor {
 
             info!("Starting container {}/{}", pod_name, container.name);
             let rc = self
-                .spawn_container(container, &container_id, &rootfs_path, &pod_uid)
+                .spawn_container(resource, container, &container_id, &rootfs_path, &pod_uid)
                 .await?;
             prepared.push((container_id, rc));
         }
@@ -135,8 +133,85 @@ impl ProcessSupervisor {
         Ok(())
     }
 
+    async fn fetch_cms_and_secrets(
+        &self,
+    ) -> (HashMap<(String, String), ConfigMap>, HashMap<(String, String), Secret>) {
+        let cms = self
+            .store
+            .get_by_kind("ConfigMap")
+            .await
+            .into_iter()
+            .filter_map(|t| {
+                if let AnyResource::ConfigMap(cm) = t.resource {
+                    let ns = cm.metadata.namespace.clone().unwrap_or_default();
+                    let name = cm.metadata.name.clone().unwrap_or_default();
+                    Some(((ns, name), cm))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let secrets = self
+            .store
+            .get_by_kind("Secret")
+            .await
+            .into_iter()
+            .filter_map(|t| {
+                if let AnyResource::Secret(sec) = t.resource {
+                    let ns = sec.metadata.namespace.clone().unwrap_or_default();
+                    let name = sec.metadata.name.clone().unwrap_or_default();
+                    Some(((ns, name), sec))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        (cms, secrets)
+    }
+
+    fn resolve_env_from(
+        container: &Container,
+        pod: &Pod,
+        cms: &HashMap<(String, String), ConfigMap>,
+        secrets: &HashMap<(String, String), Secret>,
+    ) -> Vec<(String, String)> {
+        let ns = pod.metadata.namespace.as_deref().unwrap_or("default");
+        let mut vars = Vec::new();
+        for env_from in container.env_from.as_deref().unwrap_or(&[]) {
+            let prefix = env_from.prefix.as_deref().unwrap_or("");
+            if let Some(cm_ref) = &env_from.config_map_ref {
+                if let Some(cm) = cms.get(&(ns.to_string(), cm_ref.name.clone())) {
+                    for (k, v) in cm.data.as_ref().into_iter().flatten() {
+                        vars.push((format!("{}{}", prefix, k), v.clone()));
+                    }
+                } else {
+                    warn!("envFrom configMapRef '{}' not found in ns '{}'", cm_ref.name, ns);
+                }
+            }
+            if let Some(sec_ref) = &env_from.secret_ref {
+                if let Some(sec) = secrets.get(&(ns.to_string(), sec_ref.name.clone())) {
+                    for (k, v) in sec.data.as_ref().into_iter().flatten() {
+                        match std::str::from_utf8(&v.0) {
+                            Ok(s) => vars.push((format!("{}{}", prefix, k), s.to_string())),
+                            Err(_) => warn!("Secret key '{}' is not valid UTF-8, skipping", k),
+                        }
+                    }
+                    for (k, v) in sec.string_data.as_ref().into_iter().flatten() {
+                        vars.push((format!("{}{}", prefix, k), v.clone()));
+                    }
+                } else {
+                    warn!("envFrom secretRef '{}' not found in ns '{}'", sec_ref.name, ns);
+                }
+            }
+        }
+        vars
+    }
+
     async fn spawn_container(
         &self,
+        resource: &AnyResource,
         container: &Container,
         container_id: &str,
         rootfs_path: &str,
@@ -158,7 +233,7 @@ impl ProcessSupervisor {
         let entrypoint = cmd[0].clone();
         let cmd_args: Vec<String> = cmd[1..].iter().chain(args.iter()).cloned().collect();
 
-        let env_vars: Vec<(String, String)> = container
+        let mut env_vars: Vec<(String, String)> = container
             .env
             .as_ref()
             .map(|env| {
@@ -167,6 +242,26 @@ impl ProcessSupervisor {
                     .collect()
             })
             .unwrap_or_default();
+
+        // Resolve volumes and envFrom for pod resources
+        let volumes = if let AnyResource::Pod(pod) = resource {
+            let (cms, secrets) = self.fetch_cms_and_secrets().await;
+            env_vars.extend(Self::resolve_env_from(container, pod, &cms, &secrets));
+            if !is_native {
+                crate::container::volumes::prepare_volumes(
+                    pod,
+                    &container.name,
+                    pod_uid,
+                    &|ns, name| cms.get(&(ns.to_string(), name.to_string())).cloned(),
+                    &|ns, name| secrets.get(&(ns.to_string(), name.to_string())).cloned(),
+                )
+                .unwrap_or_default()
+            } else {
+                vec![]
+            }
+        } else {
+            vec![]
+        };
 
         let mut child_cmd = if is_native {
             let mut c = Command::new(&entrypoint);
@@ -186,6 +281,7 @@ impl ProcessSupervisor {
                 pod_uid,
                 image: &image,
                 container,
+                volumes,
             };
             if rootfs::is_root() {
                 return self.spawn_root_ns_container(ctx).await;
@@ -202,7 +298,7 @@ impl ProcessSupervisor {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
 
-        let mut child = child_cmd.spawn().context("Failed to spawn container process")?;
+        let child = child_cmd.spawn().context("Failed to spawn container process")?;
         let pid = child.id().expect("No PID for spawned process");
         info!("Container {} started with PID {}", container_id, pid);
 
@@ -212,7 +308,7 @@ impl ProcessSupervisor {
     }
 
     async fn spawn_root_ns_container(&self, ctx: ContainerSpawnCtx<'_>) -> Result<RunningContainer> {
-        let ContainerSpawnCtx { entrypoint, cmd_args, env_vars, rootfs_path, container_id, pod_uid, image, container } = ctx;
+        let ContainerSpawnCtx { entrypoint, cmd_args, env_vars, rootfs_path, container_id, pod_uid, image, container, volumes } = ctx;
         let (stdout_r, stdout_w) = nix::unistd::pipe().context("Failed to create stdout pipe")?;
         let (stderr_r, stderr_w) = nix::unistd::pipe().context("Failed to create stderr pipe")?;
 
@@ -293,7 +389,7 @@ impl ProcessSupervisor {
                     let _ = nix::unistd::dup2_stdin(fd);
                 }
 
-                if let Err(e) = rootfs::child_enter_ns_root(&rootfs_owned) {
+                if let Err(e) = rootfs::child_enter_ns_root(&rootfs_owned, &volumes) {
                     eprintln!("z8s: root namespace setup failed: {}", e);
                     std::process::exit(1);
                 }
@@ -324,7 +420,7 @@ impl ProcessSupervisor {
     }
 
     async fn spawn_userns_container(&self, ctx: ContainerSpawnCtx<'_>) -> Result<RunningContainer> {
-        let ContainerSpawnCtx { entrypoint, cmd_args, env_vars, rootfs_path, container_id, pod_uid, image, container } = ctx;
+        let ContainerSpawnCtx { entrypoint, cmd_args, env_vars, rootfs_path, container_id, pod_uid, image, container, volumes } = ctx;
         let (stdout_r, stdout_w) = nix::unistd::pipe()
             .context("Failed to create stdout pipe")?;
         let (stderr_r, stderr_w) = nix::unistd::pipe()
@@ -432,7 +528,7 @@ impl ProcessSupervisor {
                 drop(sync_r);
                 drop(ack_w);
 
-                if let Err(e) = rootfs::child_enter_ns_fork(&rootfs_owned, sync_w, ack_r) {
+                if let Err(e) = rootfs::child_enter_ns_fork(&rootfs_owned, sync_w, ack_r, &volumes) {
                     eprintln!("z8s: namespace setup failed: {:#}", e);
                     std::process::exit(1);
                 }
@@ -664,6 +760,7 @@ impl ProcessSupervisor {
         let pod_uid = resource.uid();
         self.cgroup_manager.remove_cgroup(&pod_uid).ok();
         self.store.update_state(&pod_uid, ResourceState::Terminated).await;
+        crate::container::volumes::cleanup_emptydir(&pod_uid);
     }
 
     pub async fn is_pod_ready(&self, pod_name: &str) -> bool {

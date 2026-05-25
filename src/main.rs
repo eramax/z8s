@@ -1,5 +1,4 @@
 mod api;
-mod builder;
 mod container;
 mod controller;
 mod init;
@@ -13,7 +12,6 @@ use crate::controller::DeploymentController;
 use crate::init::InitHandler;
 use crate::manifest::watcher::ManifestWatcher;
 use crate::supervisor::cgroup::CgroupManager;
-use crate::supervisor::health::HealthChecker;
 use crate::supervisor::process::ProcessSupervisor;
 use anyhow::Result;
 use std::sync::Arc;
@@ -57,12 +55,9 @@ async fn main() -> Result<()> {
         ImageManager::new().expect("Failed to create image manager")
     }));
 
-    let health_checker = Arc::new(HealthChecker::new());
-
     let supervisor = Arc::new(ProcessSupervisor::new(
         image_manager,
         cgroup_manager,
-        health_checker,
         store.clone(),
     ));
 

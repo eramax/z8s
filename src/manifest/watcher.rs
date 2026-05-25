@@ -24,11 +24,6 @@ impl ManifestWatcher {
         }
     }
 
-    pub fn with_dir(mut self, dir: &str) -> Self {
-        self.dir = dir.to_string();
-        self
-    }
-
     pub async fn load_existing(&self) -> Result<()> {
         let dir = Path::new(&self.dir);
         if !dir.exists() {

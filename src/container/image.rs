@@ -13,9 +13,6 @@ const ACCEPTED_LAYER_TYPES: &[&str] = &[
     "application/vnd.oci.image.layer.v1.tar+zstd",
 ];
 
-const Z8S_IMAGE_CACHE: &str = "Z8S_IMAGE_CACHE";
-const Z8S_ROOTFS: &str = "Z8S_ROOTFS";
-
 fn z8s_base_dir() -> String {
     if nix::unistd::Uid::effective().is_root() {
         "/var/lib/z8s".to_string()
@@ -175,7 +172,4 @@ impl ImageManager {
         Ok(())
     }
 
-    pub fn rootfs_path(&self, container_id: &str) -> String {
-        format!("{}/{}", self.rootfs_dir, container_id)
-    }
 }

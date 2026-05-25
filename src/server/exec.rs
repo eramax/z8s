@@ -589,7 +589,7 @@ async fn exec_ws_pipes(
                         let _ = child.kill().await;
                         break;
                     }
-                    Some(Err(e)) => {
+                    Some(Err(_e)) => {
                         drop(child_stdin);
                         child.kill().await.ok();
                         break;
