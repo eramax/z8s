@@ -315,20 +315,23 @@ async fn exec_ws(mut socket: WebSocket, cmds: Vec<String>, rootfs: Option<String
         }
     }
 
-    // Wait for child exit and send status
-    let exit_code = child.wait().await.ok().and_then(|s| s.code()).unwrap_or(0) as u8;
-    if exit_code != 0 {
-        let status = serde_json::json!({
-            "kind": "Status", "apiVersion": "v1", "metadata": {},
-            "status": "Failure",
-            "message": format!("command exited with code {}", exit_code),
-            "reason": "NonZeroExitCode",
-            "details": { "exitCode": exit_code }
-        });
-        let data = serde_json::to_string(&status).unwrap_or_default();
-        let mut frame = vec![3u8];
-        frame.extend_from_slice(data.as_bytes());
-        let _ = ws_sender.send(Message::Binary(axum::body::Bytes::from(frame))).await;
-    }
+    // Wait for child exit and send status on channel 3
+    let exit_code = child.wait().await.ok().and_then(|s| s.code()).unwrap_or(0);
+    let (status_str, message) = if exit_code == 0 {
+        ("Success", "command exited with code 0".to_string())
+    } else {
+        ("Failure", format!("command exited with code {}", exit_code))
+    };
+    let status = serde_json::json!({
+        "kind": "Status", "apiVersion": "v1", "metadata": {},
+        "status": status_str,
+        "message": message,
+        "details": { "exitCode": exit_code }
+    });
+    let data = serde_json::to_string(&status).unwrap_or_default();
+    let mut frame = vec![3u8];
+    frame.extend_from_slice(data.as_bytes());
+    let _ = ws_sender.send(Message::Binary(axum::body::Bytes::from(frame))).await;
+
     let _ = ws_sender.send(Message::Close(Some(CloseFrame { code: 1000, reason: Default::default() }))).await;
 }
