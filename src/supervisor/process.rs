@@ -83,8 +83,8 @@ impl ProcessSupervisor {
         self.cgroup_manager.create_pod_cgroup(&pod_uid)?;
         self.set_resource_limits(&pod_uid, &containers)?;
 
-        let mut running = self.running.lock().await;
-
+        // Prepare containers in parallel: pull images + spawn (no lock held)
+        let mut prepared = Vec::new();
         for container in &containers {
             let container_name = container.name.clone();
             let container_id = format!("{}-{}", pod_name, container_name);
@@ -109,9 +109,14 @@ impl ProcessSupervisor {
                 .spawn_container(container, &container_id, &rootfs, &pod_uid)
                 .await?;
 
-            running.insert(container_id.clone(), running_container);
+            prepared.push((container_id, running_container));
         }
 
+        // Brief lock to insert all prepared containers
+        let mut running = self.running.lock().await;
+        for (cid, rc) in prepared {
+            running.insert(cid, rc);
+        }
         drop(running);
 
         self.store
