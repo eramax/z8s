@@ -1,27 +1,29 @@
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::Path;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 const CGROUP_DIR: &str = "/sys/fs/cgroup";
 
 pub struct CgroupManager {
     base_path: String,
-    // Public accessor for process.rs
-    pub _base_path_public: String,
+    enabled: bool,
 }
 
 impl CgroupManager {
     pub fn new() -> Result<Self> {
         let base_path = format!("{}/z8s", CGROUP_DIR);
         if !Path::new(CGROUP_DIR).exists() {
-            anyhow::bail!("Cgroups v2 not found at {}", CGROUP_DIR);
+            warn!("cgroups v2 not found — running without resource limits");
+            return Ok(Self { base_path, enabled: false });
         }
-        fs::create_dir_all(&base_path).context("Failed to create base cgroup directory")?;
-        Ok(Self {
-            _base_path_public: base_path.clone(),
-            base_path,
-        })
+        match fs::create_dir_all(&base_path) {
+            Ok(_) => Ok(Self { base_path, enabled: true }),
+            Err(e) => {
+                warn!("Cannot write cgroup dir (need root?): {} — running without resource limits", e);
+                Ok(Self { base_path, enabled: false })
+            }
+        }
     }
 
     pub fn base_path(&self) -> &str {
@@ -29,14 +31,20 @@ impl CgroupManager {
     }
 
     pub fn create_pod_cgroup(&self, pod_uid: &str) -> Result<String> {
+        if !self.enabled { return Ok(String::new()); }
         let cg_path = format!("{}/{}", self.base_path, sanitize_cgroup_name(pod_uid));
-        fs::create_dir_all(&cg_path)
-            .context(format!("Failed to create cgroup: {}", cg_path))?;
-        info!("Created cgroup: {}", cg_path);
+        match fs::create_dir_all(&cg_path) {
+            Ok(_) => info!("Created cgroup: {}", cg_path),
+            Err(e) => {
+                warn!("Cannot create pod cgroup (no root?): {} — continuing without cgroup", e);
+                return Ok(String::new());
+            }
+        }
         Ok(cg_path)
     }
 
     pub fn set_memory_limit(&self, pod_uid: &str, limit_bytes: i64) -> Result<()> {
+        if !self.enabled { return Ok(()); }
         let path = format!("{}/{}/memory.max", self.base_path, sanitize_cgroup_name(pod_uid));
         if limit_bytes > 0 {
             fs::write(&path, format!("{}", limit_bytes))
@@ -47,6 +55,7 @@ impl CgroupManager {
     }
 
     pub fn set_cpu_limit(&self, pod_uid: &str, cpu_quota: i64, cpu_period: i64) -> Result<()> {
+        if !self.enabled { return Ok(()); }
         if cpu_quota > 0 && cpu_period > 0 {
             let quota_path = format!(
                 "{}/{}/cpu.max",
@@ -61,18 +70,22 @@ impl CgroupManager {
     }
 
     pub fn add_pid_to_cgroup(&self, pod_uid: &str, pid: u32) -> Result<()> {
+        if !self.enabled { return Ok(()); }
         let path = format!(
             "{}/{}/cgroup.procs",
             self.base_path,
             sanitize_cgroup_name(pod_uid)
         );
-        fs::write(&path, format!("{}", pid))
-            .context(format!("Failed to add pid {} to cgroup at {}", pid, path))?;
-        debug!("Added pid {} to cgroup {}", pid, pod_uid);
+        if let Err(e) = fs::write(&path, format!("{}", pid)) {
+            warn!("Cannot write pid {} to cgroup (no root?): {} — continuing without cgroup tracking", pid, e);
+        } else {
+            debug!("Added pid {} to cgroup {}", pid, pod_uid);
+        }
         Ok(())
     }
 
     pub fn remove_cgroup(&self, pod_uid: &str) -> Result<()> {
+        if !self.enabled { return Ok(()); }
         let cg_path = format!("{}/{}", self.base_path, sanitize_cgroup_name(pod_uid));
         if Path::new(&cg_path).exists() {
             let procs_path = format!("{}/cgroup.kill", cg_path);
@@ -87,6 +100,7 @@ impl CgroupManager {
     }
 
     pub fn set_memory_low(&self, pod_uid: &str, limit_bytes: i64) -> Result<()> {
+        if !self.enabled { return Ok(()); }
         if limit_bytes > 0 {
             let path = format!(
                 "{}/{}/memory.low",

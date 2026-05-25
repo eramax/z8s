@@ -7,44 +7,44 @@ BINARY="/home/abb/dev/z8s/target/debug/z8s"
 WORKDIR="/home/abb/dev/z8s"
 
 start() {
-    if [ -f "$PIDFILE" ] && sudo kill -0 "$(sudo cat "$PIDFILE")" 2>/dev/null; then
-        echo "z8s already running (PID $(sudo cat "$PIDFILE"))"
+    if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+        echo "z8s already running (PID $(cat "$PIDFILE"))"
         exit 1
     fi
     cd "$WORKDIR"
-    sudo touch "$LOGFILE"
-    sudo "$BINARY" >> "$LOGFILE" 2>&1 &
+    touch "$LOGFILE"
+    "$BINARY" >> "$LOGFILE" 2>&1 &
     PID=$!
-    echo "$PID" | sudo tee "$PIDFILE" > /dev/null
+    echo "$PID" > "$PIDFILE"
     sleep 1
-    if sudo kill -0 "$PID" 2>/dev/null; then
-        echo "z8s started (PID $PID)"
+    if kill -0 "$PID" 2>/dev/null; then
+        echo "z8s started (PID $PID, log=$LOGFILE)"
     else
         echo "z8s failed to start - check $LOGFILE"
-        sudo rm -f "$PIDFILE"
+        rm -f "$PIDFILE"
         exit 1
     fi
 }
 
 stop() {
     if [ -f "$PIDFILE" ]; then
-        PID=$(sudo cat "$PIDFILE")
+        PID=$(cat "$PIDFILE")
         echo "Stopping z8s (PID $PID)..."
-        sudo kill -TERM "$PID" 2>/dev/null || true
+        kill -TERM "$PID" 2>/dev/null || true
         for i in $(seq 1 10); do
-            if ! sudo kill -0 "$PID" 2>/dev/null; then
+            if ! kill -0 "$PID" 2>/dev/null; then
                 break
             fi
             sleep 1
         done
-        if sudo kill -0 "$PID" 2>/dev/null; then
+        if kill -0 "$PID" 2>/dev/null; then
             echo "Force killing..."
-            sudo kill -KILL "$PID" 2>/dev/null || true
+            kill -KILL "$PID" 2>/dev/null || true
         fi
-        sudo rm -f "$PIDFILE"
+        rm -f "$PIDFILE"
     else
-        # fallback: kill any z8s
-        sudo pkill -f "^sudo.*$BINARY" 2>/dev/null || true
+        # fallback: kill any running z8s debug binary
+        pkill -f "$BINARY" 2>/dev/null || true
     fi
     echo "z8s stopped"
 }
@@ -56,8 +56,8 @@ restart() {
 }
 
 status() {
-    if [ -f "$PIDFILE" ] && sudo kill -0 "$(sudo cat "$PIDFILE")" 2>/dev/null; then
-        echo "z8s running (PID $(sudo cat "$PIDFILE"))"
+    if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+        echo "z8s running (PID $(cat "$PIDFILE"), log=$LOGFILE)"
     else
         echo "z8s not running"
     fi

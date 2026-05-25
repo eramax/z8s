@@ -70,17 +70,24 @@ impl HealthChecker {
     }
 
     pub async fn check_http(action: &HTTPGetAction, timeout: Duration) -> HealthStatus {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
         let host = action.host.as_deref().unwrap_or("localhost");
         let port = int_or_string_port(&action.port);
         let path = action.path.as_deref().unwrap_or("/");
-        let scheme = action.scheme.as_deref().unwrap_or("HTTP");
 
-        let url = format!("{}://{}:{}{}", scheme.to_lowercase(), host, port, path);
-
-        let result = tokio::time::timeout(timeout, async { reqwest::get(&url).await }).await;
+        let result = tokio::time::timeout(timeout, async {
+            let mut stream = TcpStream::connect(format!("{}:{}", host, port)).await?;
+            let req = format!("GET {} HTTP/1.0\r\nHost: {}\r\nConnection: close\r\n\r\n", path, host);
+            stream.write_all(req.as_bytes()).await?;
+            let mut resp = Vec::with_capacity(16);
+            stream.read_buf(&mut resp).await?;
+            Ok::<bool, std::io::Error>(resp.starts_with(b"HTTP/1") && resp.windows(3).any(|w| w == b"200"))
+        })
+        .await;
 
         match result {
-            Ok(Ok(resp)) if resp.status().is_success() => HealthStatus::Healthy,
+            Ok(Ok(true)) => HealthStatus::Healthy,
             _ => HealthStatus::Unhealthy,
         }
     }

@@ -5,8 +5,8 @@ edition = "2021"
 description = "A minimal, fast init process and Kubernetes-compatible orchestrator"
 
 [dependencies]
-tokio = { version = "1", features = ["full"] }
-k8s-openapi = { version = "0.27", features = ["v1_32"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "signal", "sync", "io-util", "process"] }
+k8s-openapi = { version = "0.27", features = ["v1_35"] }
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
 serde_json = "1"
@@ -20,12 +20,8 @@ notify = "8"
 anyhow = { version = "1", features = ["backtrace"] }
 uuid = { version = "1", features = ["v4"] }
 chrono = "0.4"
-reqwest = { version = "0.12", default-features = false, features = ["native-tls"] }
 axum = { version = "0.8", default-features = false, features = ["json", "tokio", "http1", "ws", "query"] }
-tower-http = { version = "0.6", features = ["cors"] }
-hyper = { version = "1", features = ["full"] }
-http = "1"
-futures = "0.3"
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 
 [profile.release]
 opt-level = "z"

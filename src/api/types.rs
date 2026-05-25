@@ -1,9 +1,10 @@
 use anyhow::{Context, Result};
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::core::v1::{ConfigMap, Container, Pod, Secret, Service};
+use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
 use tokio::sync::RwLock;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -17,6 +18,26 @@ pub enum AnyResource {
 }
 
 impl AnyResource {
+    pub fn metadata(&self) -> &ObjectMeta {
+        match self {
+            AnyResource::Pod(r) => &r.metadata,
+            AnyResource::Deployment(r) => &r.metadata,
+            AnyResource::Service(r) => &r.metadata,
+            AnyResource::ConfigMap(r) => &r.metadata,
+            AnyResource::Secret(r) => &r.metadata,
+        }
+    }
+
+    pub fn metadata_mut(&mut self) -> &mut ObjectMeta {
+        match self {
+            AnyResource::Pod(r) => &mut r.metadata,
+            AnyResource::Deployment(r) => &mut r.metadata,
+            AnyResource::Service(r) => &mut r.metadata,
+            AnyResource::ConfigMap(r) => &mut r.metadata,
+            AnyResource::Secret(r) => &mut r.metadata,
+        }
+    }
+
     pub fn kind(&self) -> &'static str {
         match self {
             AnyResource::Pod(_) => "Pod",
@@ -28,33 +49,15 @@ impl AnyResource {
     }
 
     pub fn name(&self) -> &str {
-        match self {
-            AnyResource::Pod(p) => p.metadata.name.as_deref().unwrap_or("<unnamed>"),
-            AnyResource::Deployment(d) => d.metadata.name.as_deref().unwrap_or("<unnamed>"),
-            AnyResource::Service(s) => s.metadata.name.as_deref().unwrap_or("<unnamed>"),
-            AnyResource::ConfigMap(c) => c.metadata.name.as_deref().unwrap_or("<unnamed>"),
-            AnyResource::Secret(s) => s.metadata.name.as_deref().unwrap_or("<unnamed>"),
-        }
+        self.metadata().name.as_deref().unwrap_or("<unnamed>")
     }
 
     pub fn namespace(&self) -> &str {
-        match self {
-            AnyResource::Pod(p) => p.metadata.namespace.as_deref().unwrap_or("default"),
-            AnyResource::Deployment(d) => d.metadata.namespace.as_deref().unwrap_or("default"),
-            AnyResource::Service(s) => s.metadata.namespace.as_deref().unwrap_or("default"),
-            AnyResource::ConfigMap(c) => c.metadata.namespace.as_deref().unwrap_or("default"),
-            AnyResource::Secret(s) => s.metadata.namespace.as_deref().unwrap_or("default"),
-        }
+        self.metadata().namespace.as_deref().unwrap_or("default")
     }
 
     pub fn labels(&self) -> BTreeMap<String, String> {
-        match self {
-            AnyResource::Pod(p) => p.metadata.labels.clone().unwrap_or_default(),
-            AnyResource::Deployment(d) => d.metadata.labels.clone().unwrap_or_default(),
-            AnyResource::Service(s) => s.metadata.labels.clone().unwrap_or_default(),
-            AnyResource::ConfigMap(c) => c.metadata.labels.clone().unwrap_or_default(),
-            AnyResource::Secret(s) => s.metadata.labels.clone().unwrap_or_default(),
-        }
+        self.metadata().labels.clone().unwrap_or_default()
     }
 
     pub fn uid(&self) -> String {
@@ -90,43 +93,45 @@ impl ResourceTracker {
 }
 
 pub struct ResourceStore {
-    resources: Arc<RwLock<HashMap<String, ResourceTracker>>>,
+    resources: RwLock<HashMap<String, ResourceTracker>>,
 }
 
 impl ResourceStore {
     pub fn new() -> Self {
         Self {
-            resources: Arc::new(RwLock::new(HashMap::new())),
+            resources: RwLock::new(HashMap::new()),
         }
     }
 
     pub async fn apply(&self, resource: AnyResource) -> Result<()> {
         let uid = resource.uid();
         let mut store = self.resources.write().await;
-        let tracker = ResourceTracker::new(resource);
-        store.insert(uid, tracker);
+        store.insert(uid, ResourceTracker::new(resource));
         Ok(())
     }
 
     pub async fn delete(&self, resource: &AnyResource) -> Result<()> {
         let uid = resource.uid();
-        let mut store = self.resources.write().await;
-        store.remove(&uid);
+        self.resources.write().await.remove(&uid);
         Ok(())
     }
 
     pub async fn get_all(&self) -> Vec<ResourceTracker> {
-        let store = self.resources.read().await;
-        store.values().cloned().collect()
+        self.resources.read().await.values().cloned().collect()
     }
 
     pub async fn get_by_kind(&self, kind: &str) -> Vec<ResourceTracker> {
-        let store = self.resources.read().await;
-        store
+        self.resources
+            .read()
+            .await
             .values()
             .filter(|t| t.resource.kind() == kind)
             .cloned()
             .collect()
+    }
+
+    pub async fn get(&self, uid: &str) -> Option<ResourceTracker> {
+        self.resources.read().await.get(uid).cloned()
     }
 
     pub async fn update_state(&self, uid: &str, state: ResourceState) {
@@ -177,32 +182,56 @@ pub fn parse_manifest_yaml(yaml: &str) -> Result<Vec<AnyResource>> {
 
 pub fn extract_containers(resource: &AnyResource) -> Vec<Container> {
     match resource {
-        AnyResource::Pod(pod) => {
-            if let Some(spec) = &pod.spec {
-                let mut containers = spec.containers.clone();
-                if let Some(init) = &spec.init_containers {
-                    containers.extend(init.clone());
-                }
-                containers
-            } else {
-                Vec::new()
+        AnyResource::Pod(pod) => pod.spec.as_ref().map_or_else(Vec::new, |s| {
+            let mut c = s.containers.clone();
+            if let Some(init) = &s.init_containers {
+                c.extend(init.clone());
             }
-        }
-        AnyResource::Deployment(deploy) => {
-            if let Some(spec) = &deploy.spec {
-                if let Some(template) = &spec.template.spec {
-                    let mut containers = template.containers.clone();
-                    if let Some(init) = &template.init_containers {
-                        containers.extend(init.clone());
-                    }
-                    containers
-                } else {
-                    Vec::new()
+            c
+        }),
+        AnyResource::Deployment(deploy) => deploy
+            .spec
+            .as_ref()
+            .and_then(|s| s.template.spec.as_ref())
+            .map_or_else(Vec::new, |s| {
+                let mut c = s.containers.clone();
+                if let Some(init) = &s.init_containers {
+                    c.extend(init.clone());
                 }
-            } else {
-                Vec::new()
-            }
-        }
+                c
+            }),
         _ => Vec::new(),
+    }
+}
+
+/// Parse a k8s resource Quantity string into bytes.
+pub fn parse_quantity_bytes(q: &Quantity) -> u64 {
+    let s = q.0.trim();
+    if let Some(rest) = s.strip_suffix("Ki") {
+        rest.parse::<u64>().unwrap_or(0) * 1024
+    } else if let Some(rest) = s.strip_suffix("Mi") {
+        rest.parse::<u64>().unwrap_or(0) * 1024 * 1024
+    } else if let Some(rest) = s.strip_suffix("Gi") {
+        rest.parse::<u64>().unwrap_or(0) * 1024 * 1024 * 1024
+    } else if let Some(rest) = s.strip_suffix('k') {
+        rest.parse::<u64>().unwrap_or(0) * 1000
+    } else if let Some(rest) = s.strip_suffix('M') {
+        rest.parse::<u64>().unwrap_or(0) * 1_000_000
+    } else if let Some(rest) = s.strip_suffix('G') {
+        rest.parse::<u64>().unwrap_or(0) * 1_000_000_000
+    } else {
+        s.parse::<u64>().unwrap_or(0)
+    }
+}
+
+/// Parse a k8s CPU Quantity into (quota_usec, period_usec) for cgroups cpu.max.
+pub fn parse_quantity_cpu(q: &Quantity) -> (i64, i64) {
+    let s = q.0.trim();
+    if let Some(rest) = s.strip_suffix('m') {
+        let millicores = rest.parse::<i64>().unwrap_or(0);
+        (millicores * 100, 100_000)
+    } else {
+        let cores = s.parse::<f64>().unwrap_or(0.0);
+        ((cores * 100_000.0) as i64, 100_000)
     }
 }

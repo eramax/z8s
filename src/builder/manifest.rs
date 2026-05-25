@@ -1,7 +1,4 @@
 use crate::api::AnyResource;
-use crate::builder::container::ContainerBuilder;
-use crate::builder::deployment::DeploymentBuilder;
-use crate::builder::pod::PodBuilder;
 use anyhow::{Context, Result};
 use k8s_openapi::api::core::v1::Pod;
 use k8s_openapi::api::apps::v1::Deployment;
@@ -52,29 +49,29 @@ impl ManifestBuilder {
         Ok(resources)
     }
 
-    fn build_pod(raw: &RawManifest) -> Result<AnyResource> {
+    fn build_pod(_raw: &RawManifest) -> Result<AnyResource> {
         let pod: Pod = serde_yaml::from_value(serde_yaml::Value::default())?;
         Ok(AnyResource::Pod(pod))
     }
 
-    fn build_deployment(raw: &RawManifest) -> Result<AnyResource> {
+    fn build_deployment(_raw: &RawManifest) -> Result<AnyResource> {
         let deploy: Deployment = serde_yaml::from_value(serde_yaml::Value::default())?;
         Ok(AnyResource::Deployment(deploy))
     }
 
-    fn build_service(raw: &RawManifest) -> Result<AnyResource> {
+    fn build_service(_raw: &RawManifest) -> Result<AnyResource> {
         let svc: k8s_openapi::api::core::v1::Service =
             serde_yaml::from_value(serde_yaml::Value::default())?;
         Ok(AnyResource::Service(svc))
     }
 
-    fn build_configmap(raw: &RawManifest) -> Result<AnyResource> {
+    fn build_configmap(_raw: &RawManifest) -> Result<AnyResource> {
         let cm: k8s_openapi::api::core::v1::ConfigMap =
             serde_yaml::from_value(serde_yaml::Value::default())?;
         Ok(AnyResource::ConfigMap(cm))
     }
 
-    fn build_secret(raw: &RawManifest) -> Result<AnyResource> {
+    fn build_secret(_raw: &RawManifest) -> Result<AnyResource> {
         let secret: k8s_openapi::api::core::v1::Secret =
             serde_yaml::from_value(serde_yaml::Value::default())?;
         Ok(AnyResource::Secret(secret))

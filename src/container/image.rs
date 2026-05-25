@@ -2,8 +2,6 @@ use anyhow::{Context, Result};
 use oci_distribution::client::{Client, ClientConfig, ImageLayer};
 use oci_distribution::secrets::RegistryAuth;
 use oci_distribution::Reference;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::path::Path;
 use tracing::{debug, info};
 

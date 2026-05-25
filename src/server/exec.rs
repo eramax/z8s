@@ -1,43 +1,31 @@
 use crate::server::api::AppState;
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use axum::extract::{Path, State, WebSocketUpgrade};
-use axum::response::IntoResponse;
-use axum::http::StatusCode;
 use axum::http::request::Parts;
-use futures::{SinkExt, StreamExt};
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
+use futures_util::{SinkExt, StreamExt};
 use nix::fcntl::OFlag;
 use nix::mount::MsFlags;
 use nix::pty;
-use nix::sys::termios::{self, SetArg, InputFlags, OutputFlags, LocalFlags};
+use nix::sys::termios::{self, InputFlags, LocalFlags, OutputFlags, SetArg};
 use std::collections::HashMap;
-use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
-use std::os::unix::io::RawFd;
+use std::os::unix::io::{AsRawFd, RawFd};
 use std::os::unix::process::CommandExt;
-
-#[repr(C)]
-struct Winsize {
-    ws_row: u16,
-    ws_col: u16,
-    ws_xpixel: u16,
-    ws_ypixel: u16,
-}
-
-const TIOCSWINSZ: u64 = 0x5414;
+use std::process::Stdio;
+use tokio::process::Command;
+use tracing::info;
 
 fn set_winsize(fd: RawFd, cols: u16, rows: u16) {
-    let ws = Winsize {
+    let ws = nix::libc::winsize {
         ws_row: rows,
         ws_col: cols,
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
-    unsafe {
-        let r = nix::libc::ioctl(fd, TIOCSWINSZ as std::os::raw::c_ulong, &ws as *const Winsize);
-        std::mem::drop(r);
-    }
+    // SAFETY: TIOCSWINSZ ioctl on a valid PTY fd is always safe.
+    unsafe { nix::libc::ioctl(fd, nix::libc::TIOCSWINSZ, &ws) };
 }
-use tokio::process::Command;
-use tracing::info;
 
 pub struct ExecParams {
     pub command: Vec<String>,
@@ -51,19 +39,14 @@ where
     type Rejection = (StatusCode, &'static str);
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        let uri = parts.uri.clone();
-        let query = uri.query().unwrap_or("");
-        let params: HashMap<String, Vec<String>> = parse_query_params(query);
-
-        let command = params.get("command")
+        let query = parts.uri.query().unwrap_or("");
+        let params = parse_query_params(query);
+        let command = params
+            .get("command")
             .or_else(|| params.get("command[]"))
             .cloned()
             .unwrap_or_default();
-
-        let container = params.get("container")
-            .and_then(|v| v.first())
-            .cloned();
-
+        let container = params.get("container").and_then(|v| v.first()).cloned();
         Ok(ExecParams { command, container })
     }
 }
@@ -88,7 +71,9 @@ fn url_decode(s: &str) -> String {
 fn parse_query_params(query: &str) -> HashMap<String, Vec<String>> {
     let mut map: HashMap<String, Vec<String>> = HashMap::new();
     for pair in query.split('&') {
-        if pair.is_empty() { continue; }
+        if pair.is_empty() {
+            continue;
+        }
         let mut parts = pair.splitn(2, '=');
         let key = url_decode(parts.next().unwrap_or(""));
         let value = url_decode(parts.next().unwrap_or(""));
@@ -105,69 +90,87 @@ pub async fn exec_handler(
 ) -> impl IntoResponse {
     let cmds = params.command.clone();
     info!(pod = %name, ns = %namespace, cmds = ?cmds, container = ?params.container, "Exec WS");
-
     let rootfs = resolve_rootfs(&state, &name, params.container.as_deref()).await;
     ws.protocols(["v5.channel.k8s.io", "v4.channel.k8s.io", "v3.channel.k8s.io", "channel.k8s.io"])
         .on_upgrade(move |socket| exec_ws(socket, cmds, rootfs))
 }
 
 pub async fn exec_post_handler(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     Path((_namespace, name)): Path<(String, String)>,
     params: ExecParams,
 ) -> impl IntoResponse {
-    info!(pod = %name, cmds = ?params.command, container = ?params.container, "Exec POST handler reached");
-
-    (StatusCode::METHOD_NOT_ALLOWED, axum::Json(serde_json::json!({
-        "kind": "Status", "apiVersion": "v1", "metadata": {},
-        "status": "Failure",
-        "message": "SPDY exec not implemented; use WebSocket exec via kubectl >= 1.30",
-        "reason": "MethodNotAllowed",
-        "code": 405
-    }))).into_response()
+    info!(pod = %name, cmds = ?params.command, container = ?params.container, "Exec POST");
+    (
+        StatusCode::METHOD_NOT_ALLOWED,
+        axum::Json(serde_json::json!({
+            "kind": "Status", "apiVersion": "v1", "metadata": {},
+            "status": "Failure",
+            "message": "SPDY exec not supported; use WebSocket (kubectl >= 1.30)",
+            "reason": "MethodNotAllowed",
+            "code": 405
+        })),
+    )
+        .into_response()
 }
 
-async fn resolve_rootfs(state: &AppState, pod_name: &str, container_name: Option<&str>) -> Option<String> {
+async fn resolve_rootfs(
+    state: &AppState,
+    pod_name: &str,
+    container_name: Option<&str>,
+) -> Option<String> {
     let running = state.supervisor.running.lock().await;
     let prefix = format!("{}-", pod_name);
-    if let Some(container) = container_name {
-        let cid = format!("{}-{}", pod_name, container);
-        running.get(&cid).map(|rc| rc.instance.rootfs.clone())
+    let rootfs = if let Some(container) = container_name {
+        running
+            .get(&format!("{}-{}", pod_name, container))
+            .map(|rc| rc.instance.rootfs.clone())
     } else {
-        running.iter()
-            .find(|(key, _)| key.starts_with(&prefix))
+        running
+            .iter()
+            .find(|(k, _)| k.starts_with(&prefix))
             .map(|(_, rc)| rc.instance.rootfs.clone())
-    }
+    };
+    // Empty rootfs means native process — treat as no chroot
+    rootfs.filter(|r| !r.is_empty())
 }
 
-fn spawn_with_pty(cmd: &str, args: &[&str], rootfs: Option<&str>) -> Result<(OwnedFd, tokio::process::Child), String> {
-    let master_fd = pty::posix_openpt(OFlag::O_RDWR | OFlag::O_NONBLOCK)
+fn spawn_with_pty(
+    cmd: &str,
+    args: &[&str],
+    rootfs: Option<&str>,
+) -> Result<(pty::PtyMaster, Command), String> {
+    let master = pty::posix_openpt(OFlag::O_RDWR | OFlag::O_NONBLOCK)
         .map_err(|e| format!("posix_openpt: {}", e))?;
-    pty::grantpt(&master_fd).map_err(|e| format!("grantpt: {}", e))?;
-    pty::unlockpt(&master_fd).map_err(|e| format!("unlockpt: {}", e))?;
-    let slave_name = unsafe { pty::ptsname(&master_fd) }.map_err(|e| format!("ptsname: {}", e))?;
+    pty::grantpt(&master).map_err(|e| format!("grantpt: {}", e))?;
+    pty::unlockpt(&master).map_err(|e| format!("unlockpt: {}", e))?;
+    // SAFETY: ptsname is not thread-safe on some systems; safe here because we hold
+    // the master fd exclusively and this is the only call site.
+    let slave_name =
+        unsafe { pty::ptsname(&master) }.map_err(|e| format!("ptsname: {}", e))?;
 
-    let slave_fd = std::fs::OpenOptions::new()
+    let slave = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open(&slave_name)
         .map_err(|e| format!("open slave {}: {}", slave_name, e))?;
 
-    // Set up the slave terminal for a proper interactive shell
-if let Ok(mut t) = termios::tcgetattr(&slave_fd) {
-    termios::cfmakeraw(&mut t);
-    t.output_flags |= OutputFlags::OPOST | OutputFlags::ONLCR | OutputFlags::ONOCR;
-    t.local_flags |= LocalFlags::ECHO | LocalFlags::ECHOE | LocalFlags::ECHOK
-        | LocalFlags::ISIG | LocalFlags::ICANON;
-    t.local_flags &= !LocalFlags::ECHOCTL;
-    t.input_flags |= InputFlags::ICRNL | InputFlags::IXON;
-    let _ = termios::tcsetattr(&slave_fd, SetArg::TCSANOW, &t);
-}
-    set_winsize(slave_fd.as_raw_fd(), 80, 24);
+    if let Ok(mut t) = termios::tcgetattr(&slave) {
+        termios::cfmakeraw(&mut t);
+        t.output_flags |= OutputFlags::OPOST | OutputFlags::ONLCR | OutputFlags::ONOCR;
+        t.local_flags |= LocalFlags::ECHO
+            | LocalFlags::ECHOE
+            | LocalFlags::ECHOK
+            | LocalFlags::ISIG
+            | LocalFlags::ICANON;
+        t.local_flags &= !LocalFlags::ECHOCTL;
+        t.input_flags |= InputFlags::ICRNL | InputFlags::IXON;
+        let _ = termios::tcsetattr(&slave, SetArg::TCSANOW, &t);
+    }
+    set_winsize(slave.as_raw_fd(), 80, 24);
 
-    // Prepare rootfs: mount /proc, /dev/pts and ensure /etc/resolv.conf has DNS
-    if let Some(rootfs) = rootfs.as_ref() {
-        let root = std::path::Path::new(rootfs);
+    if let Some(root) = rootfs {
+        let root = std::path::Path::new(root);
         let _ = std::fs::create_dir_all(root.join("proc"));
         let _ = nix::mount::mount(
             Some("proc"),
@@ -176,7 +179,7 @@ if let Ok(mut t) = termios::tcgetattr(&slave_fd) {
             MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC | MsFlags::MS_NODEV,
             None::<&str>,
         );
-        let pts = root.join("dev").join("pts");
+        let pts = root.join("dev/pts");
         let _ = std::fs::create_dir_all(&pts);
         let _ = nix::mount::mount(
             Some("devpts"),
@@ -185,61 +188,78 @@ if let Ok(mut t) = termios::tcgetattr(&slave_fd) {
             MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC,
             None::<&str>,
         );
-        // Ensure /dev/ptmx exists (needed by apt/debconf)
-        let ptmx = root.join("dev").join("ptmx");
+        let ptmx = root.join("dev/ptmx");
         if !ptmx.exists() {
-            let _ = nix::sys::stat::mknod(&ptmx, nix::sys::stat::SFlag::S_IFCHR, nix::sys::stat::Mode::S_IRWXU, nix::sys::stat::makedev(5, 2));
+            let _ = nix::sys::stat::mknod(
+                &ptmx,
+                nix::sys::stat::SFlag::S_IFCHR,
+                nix::sys::stat::Mode::S_IRWXU,
+                nix::sys::stat::makedev(5, 2),
+            );
         }
         let _ = std::fs::create_dir_all(root.join("etc"));
-        let resolv = root.join("etc").join("resolv.conf");
-        let content = std::fs::read_to_string(&resolv).unwrap_or_default();
-        if content.trim().is_empty() || content.contains("127.0.0.53") || content.contains("systemd-resolved") {
+        let resolv = root.join("etc/resolv.conf");
+        let existing = std::fs::read_to_string(&resolv).unwrap_or_default();
+        if existing.trim().is_empty()
+            || existing.contains("127.0.0.53")
+            || existing.contains("systemd-resolved")
+        {
             let _ = std::fs::write(&resolv, "nameserver 1.1.1.1\nnameserver 8.8.8.8\n");
         }
     }
 
-    let mut child_cmd = if let Some(rootfs) = rootfs {
+    let mut child_cmd = if let Some(root) = rootfs {
         let mut c = Command::new("chroot");
-        c.arg(rootfs).arg(cmd);
-        for a in args { c.arg(a); }
+        c.arg(root).arg(cmd);
+        for a in args {
+            c.arg(a);
+        }
         c
     } else {
         let mut c = Command::new(cmd);
-        for a in args { c.arg(a); }
+        for a in args {
+            c.arg(a);
+        }
         c
     };
 
-    unsafe {
-        child_cmd
-            .stdin(std::process::Stdio::from_raw_fd(slave_fd.try_clone().map_err(|e| format!("clone: {}", e))?.into_raw_fd()))
-            .stdout(std::process::Stdio::from_raw_fd(slave_fd.try_clone().map_err(|e| format!("clone: {}", e))?.into_raw_fd()))
-            .stderr(std::process::Stdio::from_raw_fd(slave_fd.into_raw_fd()));
-    }
+    // Safe: Stdio::from(File) moves the file fd without any raw pointer arithmetic.
+    child_cmd
+        .stdin(Stdio::from(
+            slave.try_clone().map_err(|e| format!("clone stdin: {}", e))?,
+        ))
+        .stdout(Stdio::from(
+            slave.try_clone().map_err(|e| format!("clone stdout: {}", e))?,
+        ))
+        .stderr(Stdio::from(slave));
     child_cmd.kill_on_drop(true);
+
+    // SAFETY: pre_exec is inherently unsafe (runs between fork/exec). We minimise the
+    // unsafe surface: setsid() is called via the safe nix wrapper; only the ioctl and
+    // signal resets need the inner unsafe block.
     unsafe {
         child_cmd.as_std_mut().pre_exec(move || {
+            let _ = nix::unistd::setsid();
             unsafe {
-                nix::libc::setsid();
-                nix::libc::ioctl(0, 0x540E, 0); // TIOCSCTTY — fd 0 is controlling terminal
-                // Set foreground process group so signals go to the right process
-                nix::libc::tcsetpgrp(0, nix::libc::getpid() as i32);
-                // Reset inherited signal handlers to default
-                nix::libc::signal(nix::libc::SIGINT, nix::libc::SIG_DFL);
-                nix::libc::signal(nix::libc::SIGHUP, nix::libc::SIG_DFL);
-                nix::libc::signal(nix::libc::SIGTERM, nix::libc::SIG_DFL);
-                nix::libc::signal(nix::libc::SIGPIPE, nix::libc::SIG_DFL);
-                nix::libc::signal(nix::libc::SIGTSTP, nix::libc::SIG_DFL);
-                #[allow(non_upper_case_globals)]
-                nix::libc::signal(nix::libc::SIGTTIN, nix::libc::SIG_DFL);
-                #[allow(non_upper_case_globals)]
-                nix::libc::signal(nix::libc::SIGTTOU, nix::libc::SIG_DFL);
+                nix::libc::ioctl(0, nix::libc::TIOCSCTTY as _, 0);
+                nix::libc::tcsetpgrp(0, nix::libc::getpid());
+                for sig in [
+                    nix::libc::SIGINT,
+                    nix::libc::SIGHUP,
+                    nix::libc::SIGTERM,
+                    nix::libc::SIGPIPE,
+                    nix::libc::SIGTSTP,
+                    nix::libc::SIGTTIN,
+                    nix::libc::SIGTTOU,
+                ] {
+                    nix::libc::signal(sig, nix::libc::SIG_DFL);
+                }
             }
             Ok(())
         });
     }
 
-    let child = child_cmd.spawn().map_err(|e| format!("spawn: {}", e))?;
-    Ok((master_fd.into(), child))
+    Ok((master, child_cmd))
 }
 
 async fn exec_ws(mut socket: WebSocket, cmds: Vec<String>, rootfs: Option<String>) {
@@ -250,82 +270,76 @@ async fn exec_ws(mut socket: WebSocket, cmds: Vec<String>, rootfs: Option<String
 
     let cmd = cmds[0].clone();
     let args: Vec<&str> = cmds.iter().skip(1).map(|s| s.as_str()).collect();
-
     info!("Exec WS: cmd={}, args={:?}, rootfs={:?}", cmd, args, rootfs);
 
-    // Spawn child with PTY
-    let (master_fd, mut child) = match spawn_with_pty(&cmd, &args, rootfs.as_deref()) {
-        Ok((fd, c)) => (fd, c),
+    let (master, mut child_cmd) = match spawn_with_pty(&cmd, &args, rootfs.as_deref()) {
+        Ok(pair) => pair,
         Err(e) => {
-            let _ = socket.send(Message::Text(format!("error: {}", e).into())).await;
+            let _ = socket
+                .send(Message::Text(format!("error: {}", e).into()))
+                .await;
             return;
         }
     };
 
-    let pid = child.id();
-    info!("Exec WS: child spawned with PID {:?}", pid);
+    let mut child = match child_cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = socket
+                .send(Message::Text(format!("spawn error: {}", e).into()))
+                .await;
+            return;
+        }
+    };
+    // Drop command immediately so all slave PTY fds are closed in the parent.
+    // When the child exits and closes its copies, the master will get EIO.
+    drop(child_cmd);
 
-    let async_master = tokio::io::unix::AsyncFd::new(master_fd)
-        .expect("AsyncFd for PTY master");
+    info!("Exec WS: child PID {:?}", child.id());
 
-    let (mut ws_sender, mut ws_receiver) = socket.split();
-
+    let async_master =
+        tokio::io::unix::AsyncFd::new(master).expect("AsyncFd for PTY master");
+    let (mut ws_tx, mut ws_rx) = socket.split();
     let mut read_buf = vec![0u8; 4096];
 
     loop {
         tokio::select! {
             result = async_master.readable() => {
-                let mut guard = match result {
-                    Ok(g) => g,
-                    _ => break,
-                };
+                let mut guard = match result { Ok(g) => g, _ => break };
                 match guard.try_io(|inner| {
-                    use std::io::Read;
-                    let fd = inner.as_raw_fd();
-                    let mut f = unsafe { std::fs::File::from_raw_fd(fd) };
-                    let ret = f.read(&mut read_buf);
-                    std::mem::forget(f); // don't close
-                    ret
+                    nix::unistd::read(inner.get_ref(), &mut read_buf)
+                        .map_err(|e| std::io::Error::from_raw_os_error(e as i32))
                 }) {
                     Ok(Ok(0)) => break,
                     Ok(Ok(n)) => {
                         let mut frame = vec![1u8];
                         frame.extend_from_slice(&read_buf[..n]);
-                        if ws_sender.send(Message::Binary(axum::body::Bytes::from(frame))).await.is_err() {
+                        if ws_tx.send(Message::Binary(axum::body::Bytes::from(frame))).await.is_err() {
                             break;
                         }
                     }
-                    Ok(Err(ref e)) => {
-                        info!("PTY read error: {}", e);
-                        break;
-                    }
+                    Ok(Err(e)) => { info!("PTY read: {}", e); break; }
                     Err(_would_block) => {}
                 }
             }
 
-            msg = ws_receiver.next() => {
+            msg = ws_rx.next() => {
                 match msg {
-                    Some(Ok(Message::Binary(data))) => {
-                        if data.is_empty() { continue; }
-                        let channel = data[0];
-                        match channel {
-                            0 => {
-                                if data.len() > 1 {
-                                    let mut guard = async_master.writable().await.unwrap();
-                                    let _ = guard.try_io(|inner| {
-                                        nix::unistd::write(inner, &data[1..])
-                                            .map(|_| 0)
-                                            .map_err(std::io::Error::other)
-                                    });
-                                }
+                    Some(Ok(Message::Binary(data))) if !data.is_empty() => {
+                        match data[0] {
+                            0 if data.len() > 1 => {
+                                let mut guard = async_master.writable().await.unwrap();
+                                let _ = guard.try_io(|inner| {
+                                    nix::unistd::write(inner, &data[1..])
+                                        .map(|_| 0usize)
+                                        .map_err(std::io::Error::other)
+                                });
                             }
-                            4 => {
-                                if data.len() > 1 {
-                                    if let Ok(resize) = serde_json::from_slice::<serde_json::Value>(&data[1..]) {
-                                        let cols = resize.get("Width").and_then(|v| v.as_u64()).unwrap_or(80) as u16;
-                                        let rows = resize.get("Height").and_then(|v| v.as_u64()).unwrap_or(24) as u16;
-                                        set_winsize(async_master.get_ref().as_raw_fd(), cols, rows);
-                                    }
+                            4 if data.len() > 1 => {
+                                if let Ok(r) = serde_json::from_slice::<serde_json::Value>(&data[1..]) {
+                                    let cols = r.get("Width").and_then(|v| v.as_u64()).unwrap_or(80) as u16;
+                                    let rows = r.get("Height").and_then(|v| v.as_u64()).unwrap_or(24) as u16;
+                                    set_winsize(async_master.get_ref().as_raw_fd(), cols, rows);
                                 }
                             }
                             _ => {}
@@ -341,23 +355,24 @@ async fn exec_ws(mut socket: WebSocket, cmds: Vec<String>, rootfs: Option<String
         }
     }
 
-    // Wait for child exit and send status on channel 3
     let exit_code = child.wait().await.ok().and_then(|s| s.code()).unwrap_or(0);
     let (status_str, message) = if exit_code == 0 {
         ("Success", "command exited with code 0".to_string())
     } else {
         ("Failure", format!("command exited with code {}", exit_code))
     };
-    let status = serde_json::json!({
+    let status_json = serde_json::json!({
         "kind": "Status", "apiVersion": "v1", "metadata": {},
-        "status": status_str,
-        "message": message,
+        "status": status_str, "message": message,
         "details": { "exitCode": exit_code }
     });
-    let data = serde_json::to_string(&status).unwrap_or_default();
     let mut frame = vec![3u8];
-    frame.extend_from_slice(data.as_bytes());
-    let _ = ws_sender.send(Message::Binary(axum::body::Bytes::from(frame))).await;
-
-    let _ = ws_sender.send(Message::Close(Some(CloseFrame { code: 1000, reason: Default::default() }))).await;
+    frame.extend_from_slice(serde_json::to_string(&status_json).unwrap_or_default().as_bytes());
+    let _ = ws_tx.send(Message::Binary(axum::body::Bytes::from(frame))).await;
+    let _ = ws_tx
+        .send(Message::Close(Some(CloseFrame {
+            code: 1000,
+            reason: Default::default(),
+        })))
+        .await;
 }

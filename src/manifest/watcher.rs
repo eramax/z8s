@@ -146,22 +146,9 @@ impl ManifestWatcher {
 
 fn set_default_namespace(resource: &AnyResource) -> AnyResource {
     let mut resource = resource.clone();
-    match &mut resource {
-        AnyResource::Pod(ref mut p) => {
-            p.metadata.namespace.get_or_insert_with(|| "default".to_string());
-        }
-        AnyResource::Deployment(ref mut d) => {
-            d.metadata.namespace.get_or_insert_with(|| "default".to_string());
-        }
-        AnyResource::Service(ref mut s) => {
-            s.metadata.namespace.get_or_insert_with(|| "default".to_string());
-        }
-        AnyResource::ConfigMap(ref mut c) => {
-            c.metadata.namespace.get_or_insert_with(|| "default".to_string());
-        }
-        AnyResource::Secret(ref mut s) => {
-            s.metadata.namespace.get_or_insert_with(|| "default".to_string());
-        }
-    }
+    resource
+        .metadata_mut()
+        .namespace
+        .get_or_insert_with(|| "default".to_string());
     resource
 }

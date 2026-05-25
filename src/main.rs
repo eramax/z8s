@@ -49,8 +49,7 @@ async fn main() -> Result<()> {
 
     let cgroup_manager = Arc::new(CgroupManager::new().unwrap_or_else(|e| {
         warn!("Cgroups not available: {}. Running without resource limits.", e);
-        std::fs::create_dir_all("/sys/fs/cgroup/z8s").ok();
-        CgroupManager::new().expect("Failed to create cgroup manager even with fallback")
+        CgroupManager::new().expect("cgroup manager init failed twice")
     }));
 
     let image_manager = Arc::new(ImageManager::new().unwrap_or_else(|e| {
