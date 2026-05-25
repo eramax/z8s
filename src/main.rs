@@ -65,6 +65,11 @@ async fn main() -> Result<()> {
 
     let network = Arc::new(NetworkManager::new(store.clone(), supervisor.clone()));
 
+    // Start in-cluster DNS (127.0.0.1:53 or :5353)
+    if let Some(port) = crate::network::dns::run_dns(store.clone()).await {
+        crate::network::set_dns_port(port);
+    }
+
     let watcher = Arc::new(ManifestWatcher::new(store.clone()));
 
     let controller =
