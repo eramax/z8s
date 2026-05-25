@@ -1,0 +1,53 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: logger-pod
+  namespace: default
+  labels:
+    app: logger
+spec:
+  containers:
+  - name: logger
+    image: alpine:latest
+    command:
+    - /bin/sh
+    - -c
+    - |
+      i=0
+      while true; do
+        i=$((i+1))
+        echo "[$(date -Iseconds)] INFO  Log message number $i from logger-pod"
+        echo "[$(date -Iseconds)] DEBUG counter=$i status=ok" >&2
+        sleep 5
+      done
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: logger-deploy
+  namespace: default
+  labels:
+    app: logger-deploy
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: logger-deploy
+  template:
+    metadata:
+      labels:
+        app: logger-deploy
+    spec:
+      containers:
+      - name: logger
+        image: alpine:latest
+        command:
+        - /bin/sh
+        - -c
+        - |
+          i=0
+          while true; do
+            i=$((i+1))
+            echo "[$(date -Iseconds)] INFO  Logger-deploy pod $(hostname) message $i"
+            sleep 3
+          done

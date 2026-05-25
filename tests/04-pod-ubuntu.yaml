@@ -1,0 +1,35 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ubuntu-pod
+  namespace: z8s-test
+  labels:
+    app: ubuntu
+    type: test-pod
+spec:
+  securityContext:
+    runAsUser: 1000
+    runAsNonRoot: true
+  containers:
+  - name: ubuntu
+    image: ubuntu:latest
+    command: ["sleep", "infinity"]
+    env:
+    - name: CUSTOM_VAR
+      value: custom-value
+    - name: NAMESPACE
+      value: z8s-test
+    envFrom:
+    - configMapRef:
+        name: app-config
+    - secretRef:
+        name: app-secret
+    volumeMounts:
+    - name: host-time
+      mountPath: /host/etc
+      readOnly: true
+  volumes:
+  - name: host-time
+    hostPath:
+      path: /etc
+      type: Directory

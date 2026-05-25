@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: z8s-test
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: z8s-prod
