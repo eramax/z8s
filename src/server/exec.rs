@@ -6,6 +6,7 @@ use axum::http::StatusCode;
 use axum::http::request::Parts;
 use futures::{SinkExt, StreamExt};
 use nix::fcntl::OFlag;
+use nix::mount::MsFlags;
 use nix::pty;
 use nix::sys::termios::{self, SetArg, InputFlags, OutputFlags, LocalFlags};
 use std::collections::HashMap;
@@ -163,6 +164,25 @@ if let Ok(mut t) = termios::tcgetattr(&slave_fd) {
     let _ = termios::tcsetattr(&slave_fd, SetArg::TCSANOW, &t);
 }
     set_winsize(slave_fd.as_raw_fd(), 80, 24);
+
+    // Prepare rootfs: mount /proc and ensure /etc/resolv.conf has DNS
+    if let Some(rootfs) = rootfs.as_ref() {
+        let root = std::path::Path::new(rootfs);
+        let _ = std::fs::create_dir_all(root.join("proc"));
+        let _ = nix::mount::mount(
+            Some("proc"),
+            &root.join("proc"),
+            Some("proc"),
+            MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC | MsFlags::MS_NODEV,
+            None::<&str>,
+        );
+        let _ = std::fs::create_dir_all(root.join("etc"));
+        let resolv = root.join("etc").join("resolv.conf");
+        let content = std::fs::read_to_string(&resolv).unwrap_or_default();
+        if content.trim().is_empty() || content.contains("127.0.0.53") || content.contains("systemd-resolved") {
+            let _ = std::fs::write(&resolv, "nameserver 1.1.1.1\nnameserver 8.8.8.8\n");
+        }
+    }
 
     let mut child_cmd = if let Some(rootfs) = rootfs {
         let mut c = Command::new("chroot");
