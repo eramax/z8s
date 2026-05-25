@@ -128,9 +128,11 @@ pub async fn exec_handler(
     let stdout_flag = params.stdout;
     let stderr_flag = params.stderr;
     info!(pod = %name, ns = %namespace, cmds = ?cmds, container = ?params.container, tty, "Exec WS");
-    let rootfs_pid = resolve_rootfs(&state, &name, params.container.as_deref()).await;
+    let info = resolve_container(&state, &name, params.container.as_deref()).await;
+    let rootfs_pid = info.as_ref().and_then(|i| i.rootfs_pid.clone());
+    let env_vars = info.map(|i| i.env_vars).unwrap_or_default();
     ws.protocols(["v5.channel.k8s.io", "v4.channel.k8s.io", "v3.channel.k8s.io", "channel.k8s.io"])
-        .on_upgrade(move |socket| exec_ws(socket, cmds, rootfs_pid, tty, stdin_flag, stdout_flag, stderr_flag))
+        .on_upgrade(move |socket| exec_ws(socket, cmds, rootfs_pid, env_vars, tty, stdin_flag, stdout_flag, stderr_flag))
 }
 
 pub async fn exec_post_handler(
@@ -152,37 +154,37 @@ pub async fn exec_post_handler(
         .into_response()
 }
 
-async fn resolve_rootfs(
+struct ContainerExecInfo {
+    rootfs_pid: Option<(String, u32)>,
+    env_vars: Vec<(String, String)>,
+}
+
+async fn resolve_container(
     state: &AppState,
     pod_name: &str,
     container_name: Option<&str>,
-) -> Option<(String, u32)> {
+) -> Option<ContainerExecInfo> {
     let running = state.supervisor.running.lock().await;
     let prefix = format!("{}-", pod_name);
-    if let Some(container) = container_name {
-        running
-            .get(&format!("{}-{}", pod_name, container))
-            .and_then(|rc| {
-                let rootfs = rc.instance.rootfs.clone();
-                let pid = rc.instance.pid?;
-                (!rootfs.is_empty()).then_some((rootfs, pid))
-            })
+    let rc = if let Some(container) = container_name {
+        running.get(&format!("{}-{}", pod_name, container))
     } else {
-        running
-            .iter()
-            .find(|(k, _)| k.starts_with(&prefix))
-            .and_then(|(_, rc)| {
-                let rootfs = rc.instance.rootfs.clone();
-                let pid = rc.instance.pid?;
-                (!rootfs.is_empty()).then_some((rootfs, pid))
-            })
-    }
+        running.iter().find(|(k, _)| k.starts_with(&prefix)).map(|(_, v)| v)
+    }?;
+
+    let env_vars = rc.instance.env_vars.clone();
+    let rootfs = rc.instance.rootfs.clone();
+    let pid = rc.instance.pid?;
+    let rootfs_pid = if rootfs.is_empty() { None } else { Some((rootfs, pid)) };
+
+    Some(ContainerExecInfo { rootfs_pid, env_vars })
 }
 
 fn spawn_with_pty(
     cmd: &str,
     args: &[&str],
     rootfs_pid: Option<(&str, u32)>,
+    env_vars: &[(String, String)],
 ) -> Result<(pty::PtyMaster, Command), String> {
     let master = pty::posix_openpt(OFlag::O_RDWR | OFlag::O_NONBLOCK)
         .map_err(|e| format!("posix_openpt: {}", e))?;
@@ -215,7 +217,7 @@ fn spawn_with_pty(
         let _ = rootfs::setup_exec_mounts(root);
     }
 
-    let mut child_cmd = build_command(cmd, args, rootfs_pid);
+    let mut child_cmd = build_command(cmd, args, rootfs_pid, env_vars);
 
     child_cmd
         .stdin(Stdio::from(
@@ -261,12 +263,13 @@ fn spawn_with_pipes(
     cmd: &str,
     args: &[&str],
     rootfs_pid: Option<(&str, u32)>,
+    env_vars: &[(String, String)],
 ) -> Result<Command, String> {
     if let Some((root, _pid)) = rootfs_pid {
         let _ = rootfs::setup_exec_mounts(root);
     }
 
-    let mut child_cmd = build_command(cmd, args, rootfs_pid);
+    let mut child_cmd = build_command(cmd, args, rootfs_pid, env_vars);
 
     child_cmd
         .stdin(Stdio::piped())
@@ -290,7 +293,7 @@ fn is_root() -> bool {
     rootfs::is_root()
 }
 
-fn build_command(cmd: &str, args: &[&str], rootfs_pid: Option<(&str, u32)>) -> Command {
+fn build_command(cmd: &str, args: &[&str], rootfs_pid: Option<(&str, u32)>, env_vars: &[(String, String)]) -> Command {
     if let Some((_root, container_pid)) = rootfs_pid {
         // Join the container's user+mount namespaces for real isolation.
         // ns/user must be joined first to gain capabilities, then ns/mnt.
@@ -315,6 +318,10 @@ fn build_command(cmd: &str, args: &[&str], rootfs_pid: Option<(&str, u32)>) -> C
         let mut c = Command::new(cmd);
         for a in args {
             c.arg(a);
+        }
+        c.env_clear();
+        for (k, v) in env_vars {
+            c.env(k, v);
         }
         let rootfs_for_exec = rootfs_pid.map(|(r, _)| r.to_string());
         unsafe { c.as_std_mut().pre_exec(move || {
@@ -343,11 +350,19 @@ fn build_command(cmd: &str, args: &[&str], rootfs_pid: Option<(&str, u32)>) -> C
             for a in args {
                 c.arg(a);
             }
+            c.env_clear();
+            for (k, v) in env_vars {
+                c.env(k, v);
+            }
             c
         } else {
             let mut c = Command::new(cmd);
             for a in args {
                 c.arg(a);
+            }
+            c.env_clear();
+            for (k, v) in env_vars {
+                c.env(k, v);
             }
             c.current_dir(root);
             c
@@ -357,6 +372,10 @@ fn build_command(cmd: &str, args: &[&str], rootfs_pid: Option<(&str, u32)>) -> C
         for a in args {
             c.arg(a);
         }
+        c.env_clear();
+        for (k, v) in env_vars {
+            c.env(k, v);
+        }
         c
     }
 }
@@ -365,6 +384,7 @@ async fn exec_ws(
     mut socket: WebSocket,
     cmds: Vec<String>,
     rootfs_pid: Option<(String, u32)>,
+    env_vars: Vec<(String, String)>,
     tty: bool,
     stdin_flag: bool,
     stdout_flag: bool,
@@ -380,14 +400,14 @@ async fn exec_ws(
     info!("Exec WS: cmd={}, args={:?}, rootfs={:?}, tty={}", cmd, args, rootfs_pid.as_ref().map(|(r, _)| r.as_str()), tty);
 
     if tty {
-        exec_ws_tty(socket, &cmd, &args, rootfs_pid.as_ref().map(|(r, p)| (r.as_str(), *p))).await
+        exec_ws_tty(socket, &cmd, &args, rootfs_pid.as_ref().map(|(r, p)| (r.as_str(), *p)), &env_vars).await
     } else {
-        exec_ws_pipes(socket, &cmd, &args, rootfs_pid.as_ref().map(|(r, p)| (r.as_str(), *p)), stdin_flag, stdout_flag, stderr_flag).await
+        exec_ws_pipes(socket, &cmd, &args, rootfs_pid.as_ref().map(|(r, p)| (r.as_str(), *p)), &env_vars, stdin_flag, stdout_flag, stderr_flag).await
     }
 }
 
-async fn exec_ws_tty(mut socket: WebSocket, cmd: &str, args: &[&str], rootfs_pid: Option<(&str, u32)>) {
-    let (master, mut child_cmd) = match spawn_with_pty(cmd, args, rootfs_pid) {
+async fn exec_ws_tty(mut socket: WebSocket, cmd: &str, args: &[&str], rootfs_pid: Option<(&str, u32)>, env_vars: &[(String, String)]) {
+    let (master, mut child_cmd) = match spawn_with_pty(cmd, args, rootfs_pid, env_vars) {
         Ok(pair) => pair,
         Err(e) => {
             let _ = socket
@@ -477,11 +497,12 @@ async fn exec_ws_pipes(
     cmd: &str,
     args: &[&str],
     rootfs_pid: Option<(&str, u32)>,
+    env_vars: &[(String, String)],
     stdin_flag: bool,
     stdout_flag: bool,
     stderr_flag: bool,
 ) {
-    let mut child_cmd = match spawn_with_pipes(cmd, args, rootfs_pid) {
+    let mut child_cmd = match spawn_with_pipes(cmd, args, rootfs_pid, env_vars) {
         Ok(c) => c,
         Err(e) => {
             let _ = socket

@@ -30,12 +30,34 @@ use tracing::info;
 pub const Z8S_PORT: u16 = 6443;
 
 /// Accept either JSON or k8s protobuf request bodies.
+// RFC 7396 JSON Merge Patch: null values delete keys, objects recurse.
+fn json_merge_patch(base: &mut serde_json::Value, patch: &serde_json::Value) {
+    if let (serde_json::Value::Object(b), serde_json::Value::Object(p)) = (base, patch) {
+        for (k, v) in p {
+            if v.is_null() {
+                b.remove(k);
+            } else if v.is_object() {
+                let entry = b.entry(k.clone()).or_insert(serde_json::Value::Object(Default::default()));
+                json_merge_patch(entry, v);
+            } else {
+                b.insert(k.clone(), v.clone());
+            }
+        }
+    }
+}
+
 fn parse_body(bytes: &axum::body::Bytes) -> Result<serde_json::Value, ApiError> {
     if let Some(v) = crate::server::proto::try_proto_to_json(bytes) {
         return Ok(v);
     }
-    serde_json::from_slice(bytes)
-        .map_err(|e| ApiError::bad_request(format!("invalid body: {}", e)))
+    if let Ok(v) = serde_json::from_slice(bytes) {
+        return Ok(v);
+    }
+    // kubectl apply sends application/apply-patch+yaml — fall back to YAML
+    serde_yaml::from_slice::<serde_yaml::Value>(bytes)
+        .ok()
+        .and_then(|y| serde_json::to_value(y).ok())
+        .ok_or_else(|| ApiError::bad_request("invalid body: not valid JSON or YAML".to_string()))
 }
 
 type NamespaceStore = Arc<RwLock<HashMap<String, Namespace>>>;
@@ -1002,8 +1024,14 @@ async fn patch_deployment(
     Path((namespace, name)): Path<(String, String)>,
     raw: axum::body::Bytes,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let body = parse_body(&raw)?;
-    let mut deploy: k8s_openapi::api::apps::v1::Deployment = serde_json::from_value(body)
+    let patch = parse_body(&raw)?;
+    let existing = state.store.get_by_kind("Deployment").await
+        .into_iter()
+        .find(|t| t.resource.namespace() == namespace && t.resource.name() == name)
+        .and_then(|t| serde_json::to_value(&t.resource).ok());
+    let mut merged = existing.unwrap_or(serde_json::Value::Object(Default::default()));
+    json_merge_patch(&mut merged, &patch);
+    let mut deploy: k8s_openapi::api::apps::v1::Deployment = serde_json::from_value(merged)
         .map_err(|e| ApiError::bad_request(format!("invalid Deployment: {}", e)))?;
     if deploy.metadata.namespace.is_none() {
         deploy.metadata.namespace = Some(namespace);
@@ -1446,8 +1474,15 @@ async fn update_configmap(
     Path((namespace, name)): Path<(String, String)>,
     raw: axum::body::Bytes,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let body = parse_body(&raw)?;
-    let mut cm: ConfigMap = serde_json::from_value(body)
+    let patch = parse_body(&raw)?;
+    // Merge patch onto existing resource (handles strategic merge patch null = delete semantics)
+    let existing = state.store.get_by_kind("ConfigMap").await
+        .into_iter()
+        .find(|t| t.resource.namespace() == namespace && t.resource.name() == name)
+        .and_then(|t| if let AnyResource::ConfigMap(cm) = t.resource { serde_json::to_value(cm).ok() } else { None });
+    let mut merged = existing.unwrap_or(serde_json::Value::Object(Default::default()));
+    json_merge_patch(&mut merged, &patch);
+    let mut cm: ConfigMap = serde_json::from_value(merged)
         .map_err(|e| ApiError::bad_request(format!("invalid ConfigMap: {}", e)))?;
     if cm.metadata.namespace.is_none() { cm.metadata.namespace = Some(namespace); }
     if cm.metadata.name.is_none() { cm.metadata.name = Some(name); }
@@ -1540,8 +1575,14 @@ async fn update_secret(
     Path((namespace, name)): Path<(String, String)>,
     raw: axum::body::Bytes,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let body = parse_body(&raw)?;
-    let mut sec: Secret = serde_json::from_value(body)
+    let patch = parse_body(&raw)?;
+    let existing = state.store.get_by_kind("Secret").await
+        .into_iter()
+        .find(|t| t.resource.namespace() == namespace && t.resource.name() == name)
+        .and_then(|t| if let AnyResource::Secret(sec) = t.resource { serde_json::to_value(sec).ok() } else { None });
+    let mut merged = existing.unwrap_or(serde_json::Value::Object(Default::default()));
+    json_merge_patch(&mut merged, &patch);
+    let mut sec: Secret = serde_json::from_value(merged)
         .map_err(|e| ApiError::bad_request(format!("invalid Secret: {}", e)))?;
     if sec.metadata.namespace.is_none() { sec.metadata.namespace = Some(namespace); }
     if sec.metadata.name.is_none() { sec.metadata.name = Some(name); }

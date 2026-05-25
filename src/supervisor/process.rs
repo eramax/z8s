@@ -39,6 +39,7 @@ pub struct ContainerInstance {
     pub pid: Option<u32>,
     pub rootfs: String,
     pub started_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub env_vars: Vec<(String, String)>,
 }
 
 #[derive(Debug)]
@@ -304,7 +305,7 @@ impl ProcessSupervisor {
 
         self.cgroup_manager.add_pid_to_cgroup(pod_uid, pid)?;
 
-        self.build_running_container(child, container_id, rootfs_path, &image, container).await
+        self.build_running_container(child, container_id, rootfs_path, &image, container, &env_vars).await
     }
 
     async fn spawn_root_ns_container(&self, ctx: ContainerSpawnCtx<'_>) -> Result<RunningContainer> {
@@ -361,6 +362,7 @@ impl ProcessSupervisor {
                     pid: Some(pid),
                     rootfs: rootfs_path.to_string(),
                     started_at: Some(chrono::Utc::now()),
+                    env_vars: env_owned.clone(),
                 };
 
                 Ok(RunningContainer {
@@ -394,19 +396,18 @@ impl ProcessSupervisor {
                     std::process::exit(1);
                 }
 
-                for (k, v) in &env_owned {
-                    std::env::set_var(k, v);
-                }
-
                 let mut argv: Vec<std::ffi::CString> =
                     vec![std::ffi::CString::new(entrypoint_owned.clone()).unwrap()];
                 for a in &args_owned {
                     argv.push(std::ffi::CString::new(a.as_str()).unwrap());
                 }
+                let envp: Vec<std::ffi::CString> = env_owned.iter()
+                    .map(|(k, v)| std::ffi::CString::new(format!("{}={}", k, v)).unwrap())
+                    .collect();
 
-                let e = nix::unistd::execvp(&argv[0], &argv)
-                    .expect_err("execvp returned unexpectedly");
-                eprintln!("z8s: execvp({}) failed: {}", entrypoint_owned, e);
+                let e = nix::unistd::execvpe(&argv[0], &argv, &envp)
+                    .expect_err("execvpe returned unexpectedly");
+                eprintln!("z8s: execvpe({}) failed: {}", entrypoint_owned, e);
                 std::process::exit(1);
             }
             Err(e) => {
@@ -508,6 +509,7 @@ impl ProcessSupervisor {
                     pid: Some(pid),
                     rootfs: rootfs_path.to_string(),
                     started_at: Some(chrono::Utc::now()),
+                    env_vars: env_owned.clone(),
                 };
 
                 let ready = Arc::new(Mutex::new(true));
@@ -550,20 +552,19 @@ impl ProcessSupervisor {
                     let _ = nix::unistd::dup2_stdin(fd);
                 }
 
-                for (k, v) in &env_owned {
-                    std::env::set_var(k, v);
-                }
-
                 let mut argv: Vec<std::ffi::CString> = vec![
                     std::ffi::CString::new(entrypoint_owned.clone()).unwrap()
                 ];
                 for a in &args_owned {
                     argv.push(std::ffi::CString::new(a.as_str()).unwrap());
                 }
+                let envp: Vec<std::ffi::CString> = env_owned.iter()
+                    .map(|(k, v)| std::ffi::CString::new(format!("{}={}", k, v)).unwrap())
+                    .collect();
 
-                let e = nix::unistd::execvp(&argv[0], &argv)
-                    .expect_err("execvp returned unexpectedly");
-                eprintln!("z8s: execvp({}) failed: {}", entrypoint_owned, e);
+                let e = nix::unistd::execvpe(&argv[0], &argv, &envp)
+                    .expect_err("execvpe returned unexpectedly");
+                eprintln!("z8s: execvpe({}) failed: {}", entrypoint_owned, e);
                 std::process::exit(1);
             }
             Err(e) => {
@@ -587,6 +588,7 @@ impl ProcessSupervisor {
         rootfs_path: &str,
         image: &str,
         container: &Container,
+        env_vars: &[(String, String)],
     ) -> Result<RunningContainer> {
         let pid = child.id().expect("No PID for spawned process");
 
@@ -626,6 +628,7 @@ impl ProcessSupervisor {
             pid: Some(pid),
             rootfs: rootfs_path.to_string(),
             started_at: Some(chrono::Utc::now()),
+            env_vars: env_vars.to_vec(),
         };
 
         let ready = Arc::new(Mutex::new(true));

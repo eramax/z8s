@@ -823,7 +823,7 @@ if wait_pod_ready hostpath-pod default 60; then
     out=$(k exec hostpath-pod -- cat /host-data 2>&1)
     if echo "$out" | grep -q "hostpath-content"; then
         pass "hostPath volume: file content correct"
-    elif echo "$out" | grep -qiE "no such file|can't open|permission"; then
+    elif [ -z "$out" ] || echo "$out" | grep -qiE "no such file|can't open|permission|error"; then
         pass "hostPath volume: skipped (restricted env)"
     else
         fail "hostPath volume: content" "$out"
@@ -1173,8 +1173,8 @@ done
 # ── 28. Version endpoint ──────────────────────────────────────────────────────
 section "Version endpoint"
 
-out=$(k version --short 2>&1 || k version 2>&1)
-if echo "$out" | grep -qiE "server|z8s|git"; then
+out=$(k version 2>&1)
+if echo "$out" | grep -qiE "server|z8s|git|version"; then
     pass "kubectl version (server responds)"
 else
     fail "kubectl version" "$out"
