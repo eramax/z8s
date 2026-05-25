@@ -61,6 +61,9 @@ pub async fn run_server(store: Arc<ResourceStore>, supervisor: Arc<ProcessSuperv
         .route("/api/v1", get(api_v1_resources))
         .route("/apis", get(api_groups))
         .route("/apis/apps/v1", get(api_apps_v1_resources))
+        .route("/apis/authorization.k8s.io/v1", get(api_authz_v1_resources))
+        .route("/apis/authorization.k8s.io/v1/selfsubjectaccessreviews", post(self_subject_access_review))
+        .route("/apis/authorization.k8s.io/v1/subjectaccessreviews", post(self_subject_access_review))
         .route("/api/v1/pods", get(list_pods_all))
         .route("/api/v1/namespaces/{namespace}/pods", get(list_pods).post(create_pod))
         .route("/api/v1/namespaces/{namespace}/pods/{name}", any(pod_handler))
@@ -206,6 +209,11 @@ async fn api_groups() -> Json<serde_json::Value> {
                 "name": "metrics.k8s.io",
                 "versions": [{"groupVersion": "metrics.k8s.io/v1beta1", "version": "v1beta1"}],
                 "preferredVersion": {"groupVersion": "metrics.k8s.io/v1beta1", "version": "v1beta1"}
+            },
+            {
+                "name": "authorization.k8s.io",
+                "versions": [{"groupVersion": "authorization.k8s.io/v1", "version": "v1"}],
+                "preferredVersion": {"groupVersion": "authorization.k8s.io/v1", "version": "v1"}
             }
         ]
     }))
@@ -227,6 +235,43 @@ async fn api_apps_v1_resources() -> Json<serde_json::Value> {
                 "categories": ["all"]
             }
         ]
+    }))
+}
+
+async fn api_authz_v1_resources() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "kind": "APIResourceList",
+        "apiVersion": "v1",
+        "groupVersion": "authorization.k8s.io/v1",
+        "resources": [
+            {
+                "name": "selfsubjectaccessreviews",
+                "singularName": "",
+                "namespaced": false,
+                "kind": "SelfSubjectAccessReview",
+                "verbs": ["create"]
+            },
+            {
+                "name": "subjectaccessreviews",
+                "singularName": "",
+                "namespaced": false,
+                "kind": "SubjectAccessReview",
+                "verbs": ["create"]
+            }
+        ]
+    }))
+}
+
+async fn self_subject_access_review(
+    _body: axum::extract::Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "apiVersion": "authorization.k8s.io/v1",
+        "kind": "SelfSubjectAccessReview",
+        "status": {
+            "allowed": true,
+            "reason": "z8s grants all access"
+        }
     }))
 }
 
