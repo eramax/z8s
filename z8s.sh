@@ -13,7 +13,11 @@ start() {
     fi
     cd "$WORKDIR"
     touch "$LOGFILE"
+    # Enable job control so background job gets its own process group
+    # and survives SIGTERM to the parent's process group (e.g. from timeout).
+    set -m
     "$BINARY" >> "$LOGFILE" 2>&1 &
+    set +m
     PID=$!
     echo "$PID" > "$PIDFILE"
     sleep 1
