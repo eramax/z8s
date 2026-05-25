@@ -165,7 +165,7 @@ if let Ok(mut t) = termios::tcgetattr(&slave_fd) {
 }
     set_winsize(slave_fd.as_raw_fd(), 80, 24);
 
-    // Prepare rootfs: mount /proc and ensure /etc/resolv.conf has DNS
+    // Prepare rootfs: mount /proc, /dev/pts and ensure /etc/resolv.conf has DNS
     if let Some(rootfs) = rootfs.as_ref() {
         let root = std::path::Path::new(rootfs);
         let _ = std::fs::create_dir_all(root.join("proc"));
@@ -176,6 +176,20 @@ if let Ok(mut t) = termios::tcgetattr(&slave_fd) {
             MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC | MsFlags::MS_NODEV,
             None::<&str>,
         );
+        let pts = root.join("dev").join("pts");
+        let _ = std::fs::create_dir_all(&pts);
+        let _ = nix::mount::mount(
+            Some("devpts"),
+            &pts,
+            Some("devpts"),
+            MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC,
+            None::<&str>,
+        );
+        // Ensure /dev/ptmx exists (needed by apt/debconf)
+        let ptmx = root.join("dev").join("ptmx");
+        if !ptmx.exists() {
+            let _ = nix::sys::stat::mknod(&ptmx, nix::sys::stat::SFlag::S_IFCHR, nix::sys::stat::Mode::S_IRWXU, nix::sys::stat::makedev(5, 2));
+        }
         let _ = std::fs::create_dir_all(root.join("etc"));
         let resolv = root.join("etc").join("resolv.conf");
         let content = std::fs::read_to_string(&resolv).unwrap_or_default();
@@ -206,7 +220,19 @@ if let Ok(mut t) = termios::tcgetattr(&slave_fd) {
         child_cmd.as_std_mut().pre_exec(move || {
             unsafe {
                 nix::libc::setsid();
-                nix::libc::ioctl(0, 0x540E, 0);
+                nix::libc::ioctl(0, 0x540E, 0); // TIOCSCTTY — fd 0 is controlling terminal
+                // Set foreground process group so signals go to the right process
+                nix::libc::tcsetpgrp(0, nix::libc::getpid() as i32);
+                // Reset inherited signal handlers to default
+                nix::libc::signal(nix::libc::SIGINT, nix::libc::SIG_DFL);
+                nix::libc::signal(nix::libc::SIGHUP, nix::libc::SIG_DFL);
+                nix::libc::signal(nix::libc::SIGTERM, nix::libc::SIG_DFL);
+                nix::libc::signal(nix::libc::SIGPIPE, nix::libc::SIG_DFL);
+                nix::libc::signal(nix::libc::SIGTSTP, nix::libc::SIG_DFL);
+                #[allow(non_upper_case_globals)]
+                nix::libc::signal(nix::libc::SIGTTIN, nix::libc::SIG_DFL);
+                #[allow(non_upper_case_globals)]
+                nix::libc::signal(nix::libc::SIGTTOU, nix::libc::SIG_DFL);
             }
             Ok(())
         });
