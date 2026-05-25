@@ -1,3 +1,4 @@
+use crate::container::rootfs;
 use crate::server::api::AppState;
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use axum::extract::{Path, State, WebSocketUpgrade};
@@ -6,10 +7,11 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use futures_util::{SinkExt, StreamExt};
 use nix::fcntl::OFlag;
-use nix::mount::MsFlags;
 use nix::pty;
+use nix::sched::CloneFlags;
 use nix::sys::termios::{self, InputFlags, LocalFlags, OutputFlags, SetArg};
 use std::collections::HashMap;
+use std::os::fd::OwnedFd;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::process::Stdio;
@@ -126,9 +128,9 @@ pub async fn exec_handler(
     let stdout_flag = params.stdout;
     let stderr_flag = params.stderr;
     info!(pod = %name, ns = %namespace, cmds = ?cmds, container = ?params.container, tty, "Exec WS");
-    let rootfs = resolve_rootfs(&state, &name, params.container.as_deref()).await;
+    let rootfs_pid = resolve_rootfs(&state, &name, params.container.as_deref()).await;
     ws.protocols(["v5.channel.k8s.io", "v4.channel.k8s.io", "v3.channel.k8s.io", "channel.k8s.io"])
-        .on_upgrade(move |socket| exec_ws(socket, cmds, rootfs, tty, stdin_flag, stdout_flag, stderr_flag))
+        .on_upgrade(move |socket| exec_ws(socket, cmds, rootfs_pid, tty, stdin_flag, stdout_flag, stderr_flag))
 }
 
 pub async fn exec_post_handler(
@@ -154,34 +156,38 @@ async fn resolve_rootfs(
     state: &AppState,
     pod_name: &str,
     container_name: Option<&str>,
-) -> Option<String> {
+) -> Option<(String, u32)> {
     let running = state.supervisor.running.lock().await;
     let prefix = format!("{}-", pod_name);
-    let rootfs = if let Some(container) = container_name {
+    if let Some(container) = container_name {
         running
             .get(&format!("{}-{}", pod_name, container))
-            .map(|rc| rc.instance.rootfs.clone())
+            .and_then(|rc| {
+                let rootfs = rc.instance.rootfs.clone();
+                let pid = rc.instance.pid?;
+                (!rootfs.is_empty()).then_some((rootfs, pid))
+            })
     } else {
         running
             .iter()
             .find(|(k, _)| k.starts_with(&prefix))
-            .map(|(_, rc)| rc.instance.rootfs.clone())
-    };
-    // Empty rootfs means native process — treat as no chroot
-    rootfs.filter(|r| !r.is_empty())
+            .and_then(|(_, rc)| {
+                let rootfs = rc.instance.rootfs.clone();
+                let pid = rc.instance.pid?;
+                (!rootfs.is_empty()).then_some((rootfs, pid))
+            })
+    }
 }
 
 fn spawn_with_pty(
     cmd: &str,
     args: &[&str],
-    rootfs: Option<&str>,
+    rootfs_pid: Option<(&str, u32)>,
 ) -> Result<(pty::PtyMaster, Command), String> {
     let master = pty::posix_openpt(OFlag::O_RDWR | OFlag::O_NONBLOCK)
         .map_err(|e| format!("posix_openpt: {}", e))?;
     pty::grantpt(&master).map_err(|e| format!("grantpt: {}", e))?;
     pty::unlockpt(&master).map_err(|e| format!("unlockpt: {}", e))?;
-    // SAFETY: ptsname is not thread-safe on some systems; safe here because we hold
-    // the master fd exclusively and this is the only call site.
     let slave_name =
         unsafe { pty::ptsname(&master) }.map_err(|e| format!("ptsname: {}", e))?;
 
@@ -205,48 +211,12 @@ fn spawn_with_pty(
     }
     set_winsize(slave.as_raw_fd(), 80, 24);
 
-    if let Some(root) = rootfs {
-        let root = std::path::Path::new(root);
-        let _ = std::fs::create_dir_all(root.join("proc"));
-        let _ = nix::mount::mount(
-            Some("proc"),
-            &root.join("proc"),
-            Some("proc"),
-            MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC | MsFlags::MS_NODEV,
-            None::<&str>,
-        );
-        let pts = root.join("dev/pts");
-        let _ = std::fs::create_dir_all(&pts);
-        let _ = nix::mount::mount(
-            Some("devpts"),
-            &pts,
-            Some("devpts"),
-            MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC,
-            None::<&str>,
-        );
-        let ptmx = root.join("dev/ptmx");
-        if !ptmx.exists() {
-            let _ = nix::sys::stat::mknod(
-                &ptmx,
-                nix::sys::stat::SFlag::S_IFCHR,
-                nix::sys::stat::Mode::S_IRWXU,
-                nix::sys::stat::makedev(5, 2),
-            );
-        }
-        let _ = std::fs::create_dir_all(root.join("etc"));
-        let resolv = root.join("etc/resolv.conf");
-        let existing = std::fs::read_to_string(&resolv).unwrap_or_default();
-        if existing.trim().is_empty()
-            || existing.contains("127.0.0.53")
-            || existing.contains("systemd-resolved")
-        {
-            let _ = std::fs::write(&resolv, "nameserver 1.1.1.1\nnameserver 8.8.8.8\n");
-        }
+    if let Some((root, _pid)) = rootfs_pid {
+        let _ = rootfs::setup_exec_mounts(root);
     }
 
-    let mut child_cmd = build_command(cmd, args, rootfs);
+    let mut child_cmd = build_command(cmd, args, rootfs_pid);
 
-    // Safe: Stdio::from(File) moves the file fd without any raw pointer arithmetic.
     child_cmd
         .stdin(Stdio::from(
             slave.try_clone().map_err(|e| format!("clone stdin: {}", e))?,
@@ -257,26 +227,28 @@ fn spawn_with_pty(
         .stderr(Stdio::from(slave));
     child_cmd.kill_on_drop(true);
 
-    // SAFETY: pre_exec is inherently unsafe (runs between fork/exec). We minimise the
-    // unsafe surface: setsid() is called via the safe nix wrapper; only the ioctl and
-    // signal resets need the inner unsafe block.
+    let ns_fds = rootfs_pid.and_then(|(_, pid)| try_open_namespace_fds(pid));
+
     unsafe {
         child_cmd.as_std_mut().pre_exec(move || {
+            if let Some((ref u_fd, ref m_fd)) = ns_fds {
+                let _ = nix::sched::setns(u_fd, CloneFlags::CLONE_NEWUSER);
+                let _ = nix::sched::setns(m_fd, CloneFlags::CLONE_NEWNS);
+                let _ = nix::unistd::chdir("/");
+            }
             let _ = nix::unistd::setsid();
-            unsafe {
-                nix::libc::ioctl(0, nix::libc::TIOCSCTTY as _, 0);
-                nix::libc::tcsetpgrp(0, nix::libc::getpid());
-                for sig in [
-                    nix::libc::SIGINT,
-                    nix::libc::SIGHUP,
-                    nix::libc::SIGTERM,
-                    nix::libc::SIGPIPE,
-                    nix::libc::SIGTSTP,
-                    nix::libc::SIGTTIN,
-                    nix::libc::SIGTTOU,
-                ] {
-                    nix::libc::signal(sig, nix::libc::SIG_DFL);
-                }
+            nix::libc::ioctl(0, nix::libc::TIOCSCTTY as _, 0);
+            nix::libc::tcsetpgrp(0, nix::libc::getpid());
+            for sig in [
+                nix::libc::SIGINT,
+                nix::libc::SIGHUP,
+                nix::libc::SIGTERM,
+                nix::libc::SIGPIPE,
+                nix::libc::SIGTSTP,
+                nix::libc::SIGTTIN,
+                nix::libc::SIGTTOU,
+            ] {
+                nix::libc::signal(sig, nix::libc::SIG_DFL);
             }
             Ok(())
         });
@@ -288,30 +260,13 @@ fn spawn_with_pty(
 fn spawn_with_pipes(
     cmd: &str,
     args: &[&str],
-    rootfs: Option<&str>,
+    rootfs_pid: Option<(&str, u32)>,
 ) -> Result<Command, String> {
-    if let Some(root) = rootfs {
-        let root_path = std::path::Path::new(root);
-        let _ = std::fs::create_dir_all(root_path.join("proc"));
-        let _ = nix::mount::mount(
-            Some("proc"),
-            &root_path.join("proc"),
-            Some("proc"),
-            MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC | MsFlags::MS_NODEV,
-            None::<&str>,
-        );
-        let _ = std::fs::create_dir_all(root_path.join("etc"));
-        let resolv = root_path.join("etc/resolv.conf");
-        let existing = std::fs::read_to_string(&resolv).unwrap_or_default();
-        if existing.trim().is_empty()
-            || existing.contains("127.0.0.53")
-            || existing.contains("systemd-resolved")
-        {
-            let _ = std::fs::write(&resolv, "nameserver 1.1.1.1\nnameserver 8.8.8.8\n");
-        }
+    if let Some((root, _pid)) = rootfs_pid {
+        let _ = rootfs::setup_exec_mounts(root);
     }
 
-    let mut child_cmd = build_command(cmd, args, rootfs);
+    let mut child_cmd = build_command(cmd, args, rootfs_pid);
 
     child_cmd
         .stdin(Stdio::piped())
@@ -322,12 +277,61 @@ fn spawn_with_pipes(
     Ok(child_cmd)
 }
 
-fn is_root() -> bool {
-    nix::unistd::Uid::effective().is_root()
+fn try_open_namespace_fds(container_pid: u32) -> Option<(OwnedFd, OwnedFd)> {
+    let user_ns_path = format!("/proc/{}/ns/user", container_pid);
+    let mnt_ns_path = format!("/proc/{}/ns/mnt", container_pid);
+    let open_flags = OFlag::O_RDONLY | OFlag::O_CLOEXEC;
+    let user_fd = nix::fcntl::open(user_ns_path.as_str(), open_flags, nix::sys::stat::Mode::empty()).ok()?;
+    let mnt_fd = nix::fcntl::open(mnt_ns_path.as_str(), open_flags, nix::sys::stat::Mode::empty()).ok()?;
+    Some((user_fd, mnt_fd))
 }
 
-fn build_command(cmd: &str, args: &[&str], rootfs: Option<&str>) -> Command {
-    if let Some(root) = rootfs {
+fn is_root() -> bool {
+    rootfs::is_root()
+}
+
+fn build_command(cmd: &str, args: &[&str], rootfs_pid: Option<(&str, u32)>) -> Command {
+    if let Some((_root, container_pid)) = rootfs_pid {
+        // Join the container's user+mount namespaces for real isolation.
+        // ns/user must be joined first to gain capabilities, then ns/mnt.
+        let user_ns_path = format!("/proc/{}/ns/user", container_pid);
+        let mnt_ns_path = format!("/proc/{}/ns/mnt", container_pid);
+        let open_flags = OFlag::O_RDONLY | OFlag::O_CLOEXEC;
+        let user_fd = nix::fcntl::open(
+            user_ns_path.as_str(),
+            open_flags,
+            nix::sys::stat::Mode::empty(),
+        );
+        let mnt_fd = nix::fcntl::open(
+            mnt_ns_path.as_str(),
+            open_flags,
+            nix::sys::stat::Mode::empty(),
+        );
+        let fds = match (user_fd, mnt_fd) {
+            (Ok(u), Ok(m)) => Some((u, m)),
+            _ => None,
+        };
+
+        let mut c = Command::new(cmd);
+        for a in args {
+            c.arg(a);
+        }
+        unsafe {
+            c.as_std_mut().pre_exec(move || {
+                if let Some((ref u_fd, ref m_fd)) = fds {
+                    nix::sched::setns(u_fd, CloneFlags::CLONE_NEWUSER)
+                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("setns(CLONE_NEWUSER): {}", e)))?;
+                    nix::sched::setns(m_fd, CloneFlags::CLONE_NEWNS)
+                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("setns(CLONE_NEWNS): {}", e)))?;
+                    nix::unistd::chdir("/")
+                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("chdir(/): {}", e)))?;
+                }
+                Ok(())
+            });
+        }
+        c
+    } else if let Some(root) = rootfs_pid.map(|(r, _)| r) {
+        // No container PID — just set cwd to rootfs (legacy non-isolated path)
         if is_root() {
             let mut c = Command::new("chroot");
             c.arg(root).arg(cmd);
@@ -355,7 +359,7 @@ fn build_command(cmd: &str, args: &[&str], rootfs: Option<&str>) -> Command {
 async fn exec_ws(
     mut socket: WebSocket,
     cmds: Vec<String>,
-    rootfs: Option<String>,
+    rootfs_pid: Option<(String, u32)>,
     tty: bool,
     stdin_flag: bool,
     stdout_flag: bool,
@@ -368,17 +372,17 @@ async fn exec_ws(
 
     let cmd = cmds[0].clone();
     let args: Vec<&str> = cmds.iter().skip(1).map(|s| s.as_str()).collect();
-    info!("Exec WS: cmd={}, args={:?}, rootfs={:?}, tty={}", cmd, args, rootfs, tty);
+    info!("Exec WS: cmd={}, args={:?}, rootfs={:?}, tty={}", cmd, args, rootfs_pid.as_ref().map(|(r, _)| r.as_str()), tty);
 
     if tty {
-        exec_ws_tty(socket, &cmd, &args, rootfs.as_deref()).await
+        exec_ws_tty(socket, &cmd, &args, rootfs_pid.as_ref().map(|(r, p)| (r.as_str(), *p))).await
     } else {
-        exec_ws_pipes(socket, &cmd, &args, rootfs.as_deref(), stdin_flag, stdout_flag, stderr_flag).await
+        exec_ws_pipes(socket, &cmd, &args, rootfs_pid.as_ref().map(|(r, p)| (r.as_str(), *p)), stdin_flag, stdout_flag, stderr_flag).await
     }
 }
 
-async fn exec_ws_tty(mut socket: WebSocket, cmd: &str, args: &[&str], rootfs: Option<&str>) {
-    let (master, mut child_cmd) = match spawn_with_pty(cmd, args, rootfs) {
+async fn exec_ws_tty(mut socket: WebSocket, cmd: &str, args: &[&str], rootfs_pid: Option<(&str, u32)>) {
+    let (master, mut child_cmd) = match spawn_with_pty(cmd, args, rootfs_pid) {
         Ok(pair) => pair,
         Err(e) => {
             let _ = socket
@@ -467,12 +471,12 @@ async fn exec_ws_pipes(
     mut socket: WebSocket,
     cmd: &str,
     args: &[&str],
-    rootfs: Option<&str>,
+    rootfs_pid: Option<(&str, u32)>,
     stdin_flag: bool,
     stdout_flag: bool,
     stderr_flag: bool,
 ) {
-    let mut child_cmd = match spawn_with_pipes(cmd, args, rootfs) {
+    let mut child_cmd = match spawn_with_pipes(cmd, args, rootfs_pid) {
         Ok(c) => c,
         Err(e) => {
             let _ = socket
@@ -563,14 +567,29 @@ async fn exec_ws_pipes(
             msg = ws_rx.next() => {
                 match msg {
                     Some(Ok(Message::Binary(data))) if !data.is_empty() => {
-                        if data[0] == 0 && data.len() > 1 {
+                        if data[0] == 0 {
                             if let Some(stdin) = child_stdin.as_mut() {
                                 let _ = stdin.write_all(&data[1..]).await;
                                 let _ = stdin.flush().await;
                             }
+                        } else if data[0] == 0xFF && data.len() >= 2 {
+                            // Client closed a stream (channel 255 + stream_id byte)
+                            if data[1] == 0 {
+                                drop(child_stdin.take());
+                            }
                         }
                     }
-                    Some(Ok(Message::Close(_))) | None => {
+                    Some(Ok(Message::Close(_))) => {
+                        drop(child_stdin);
+                        let _ = child.kill().await;
+                        break;
+                    }
+                    Some(Err(e)) => {
+                        drop(child_stdin);
+                        child.kill().await.ok();
+                        break;
+                    }
+                    None => {
                         drop(child_stdin);
                         let _ = child.kill().await;
                         break;

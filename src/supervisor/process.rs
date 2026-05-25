@@ -3,6 +3,7 @@ use crate::api::types::{
 };
 use crate::api::AnyResource;
 use crate::container::image::ImageManager;
+use crate::container::rootfs;
 use crate::supervisor::cgroup::CgroupManager;
 use crate::supervisor::health::{HealthChecker, HealthStatus, ProbeAction, ProbeConfig};
 use anyhow::{Context, Result};
@@ -10,6 +11,7 @@ use k8s_openapi::api::core::v1::Container;
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 use std::collections::HashMap;
+use std::os::unix::process::CommandExt;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,7 +26,6 @@ pub struct ContainerInstance {
     pub container_name: String,
     pub image: String,
     pub pid: Option<u32>,
-    /// Empty string means native process (no chroot/OCI rootfs).
     pub rootfs: String,
     pub started_at: Option<chrono::DateTime<chrono::Utc>>,
 }
@@ -54,7 +55,7 @@ impl ProcessSupervisor {
         health_checker: Arc<HealthChecker>,
         store: Arc<ResourceStore>,
     ) -> Self {
-        let base = if nix::unistd::Uid::effective().is_root() {
+        let base = if rootfs::is_root() {
             "/var/lib/z8s".to_string()
         } else {
             format!("{}/.local/share/z8s", std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string()))
@@ -78,6 +79,15 @@ impl ProcessSupervisor {
 
         let pod_uid = resource.uid();
         let pod_name = resource.name().to_string();
+        // Guard against concurrent start by multiple reconcile rounds
+        {
+            let running = self.running.lock().await;
+            if running.keys().any(|cid| cid.starts_with(&format!("{}-", pod_name))) {
+                info!("Pod {} already running, skipping duplicate start", pod_name);
+                return Ok(());
+            }
+        }
+
         info!("Starting pod {} ({} container(s))", pod_name, containers.len());
 
         self.cgroup_manager.create_pod_cgroup(&pod_uid)?;
@@ -88,8 +98,7 @@ impl ProcessSupervisor {
             let container_id = format!("{}-{}", pod_name, container.name);
             let image_ref = container.image.clone().unwrap_or_default();
 
-            // Empty image or "host://" → native process, no OCI pull
-            let rootfs = if image_ref.is_empty() || image_ref == "host" || image_ref.starts_with("host://") {
+            let rootfs_path = if image_ref.is_empty() || image_ref == "host" || image_ref.starts_with("host://") {
                 info!("Native process {}/{} (no OCI image)", pod_name, container.name);
                 String::new()
             } else {
@@ -101,7 +110,7 @@ impl ProcessSupervisor {
 
             info!("Starting container {}/{}", pod_name, container.name);
             let rc = self
-                .spawn_container(container, &container_id, &rootfs, &pod_uid)
+                .spawn_container(container, &container_id, &rootfs_path, &pod_uid)
                 .await?;
             prepared.push((container_id, rc));
         }
@@ -120,13 +129,13 @@ impl ProcessSupervisor {
         &self,
         container: &Container,
         container_id: &str,
-        rootfs: &str,
+        rootfs_path: &str,
         pod_uid: &str,
     ) -> Result<RunningContainer> {
         let image = container.image.clone().unwrap_or_default();
         let command = container.command.clone().unwrap_or_default();
         let args = container.args.clone().unwrap_or_default();
-        let is_native = rootfs.is_empty();
+        let is_native = rootfs_path.is_empty();
 
         let cmd = if !command.is_empty() {
             command
@@ -150,15 +159,39 @@ impl ProcessSupervisor {
             .unwrap_or_default();
 
         let mut child_cmd = if is_native {
-            // Run directly on the host filesystem
             let mut c = Command::new(&entrypoint);
             c.args(&cmd_args);
             c
         } else {
-            // Run inside the container rootfs via chroot
-            let mut c = Command::new(&entrypoint);
-            c.args(&cmd_args).current_dir(rootfs);
-            c
+            rootfs::prepare_rootfs(rootfs_path)?;
+
+            let rootfs_owned = rootfs_path.to_string();
+
+            if rootfs::is_root() {
+                let mut c = Command::new(&entrypoint);
+                c.args(&cmd_args);
+                unsafe {
+                    c.as_std_mut().pre_exec(move || {
+                        if let Err(e) = rootfs::child_enter_ns_root(&rootfs_owned) {
+                            eprintln!("z8s: namespace setup (root) failed: {}", e);
+                            return Err(std::io::Error::new(std::io::ErrorKind::Other, e));
+                        }
+                        Ok(())
+                    });
+                }
+                c
+            } else {
+                return self.spawn_userns_container(
+                    &entrypoint,
+                    &cmd_args,
+                    &env_vars,
+                    &rootfs_owned,
+                    container_id,
+                    pod_uid,
+                    &image,
+                    container,
+                ).await;
+            }
         };
 
         child_cmd
@@ -174,6 +207,191 @@ impl ProcessSupervisor {
         info!("Container {} started with PID {}", container_id, pid);
 
         self.cgroup_manager.add_pid_to_cgroup(pod_uid, pid)?;
+
+        self.build_running_container(child, container_id, rootfs_path, &image, container).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn spawn_userns_container(
+        &self,
+        entrypoint: &str,
+        cmd_args: &[String],
+        env_vars: &[(String, String)],
+        rootfs_path: &str,
+        container_id: &str,
+        pod_uid: &str,
+        image: &str,
+        container: &Container,
+    ) -> Result<RunningContainer> {
+        let (stdout_r, stdout_w) = nix::unistd::pipe()
+            .context("Failed to create stdout pipe")?;
+        let (stderr_r, stderr_w) = nix::unistd::pipe()
+            .context("Failed to create stderr pipe")?;
+        let (sync_r, sync_w) = nix::unistd::pipe()
+            .context("Failed to create sync pipe")?;
+        let (ack_r, ack_w) = nix::unistd::pipe()
+            .context("Failed to create ack pipe")?;
+
+        let rootfs_owned = rootfs_path.to_string();
+        let entrypoint_owned = entrypoint.to_string();
+        let args_owned: Vec<String> = cmd_args.to_vec();
+        let env_owned: Vec<(String, String)> = env_vars.to_vec();
+
+        match unsafe { nix::unistd::fork() } {
+            Ok(nix::unistd::ForkResult::Parent { child }) => {
+                drop(stdout_w);
+                drop(stderr_w);
+                drop(sync_w);
+                drop(ack_r);
+
+                let child_pid = child.as_raw();
+
+                let mut sync_buf = [0u8; 1];
+                nix::unistd::read(&sync_r, &mut sync_buf)
+                    .context("Failed to read sync from child")?;
+                drop(sync_r);
+
+                rootfs::write_userns_maps(child_pid)?;
+
+                nix::unistd::write(&ack_w, b"A").ok();
+                drop(ack_w);
+
+                info!("User namespace configured for child PID {}", child_pid);
+
+                let pid = child_pid as u32;
+                info!("Container {} started with PID {}", container_id, pid);
+
+                self.cgroup_manager.add_pid_to_cgroup(pod_uid, pid)?;
+
+                let log_buffer = Arc::new(Mutex::new(Vec::<String>::new()));
+
+                let stdout_file = std::fs::File::from(stdout_r);
+                let stdout_async = tokio::io::BufReader::new(
+                    tokio::fs::File::from_std(stdout_file),
+                );
+
+                {
+                    let buf = log_buffer.clone();
+                    tokio::spawn(async move {
+                        let mut lines = stdout_async.lines();
+                        while let Ok(Some(line)) = lines.next_line().await {
+                            let mut log = buf.lock().await;
+                            log.push(format!("[stdout] {}", line));
+                            if log.len() > 1000 {
+                                log.remove(0);
+                            }
+                        }
+                    });
+                }
+
+                let stderr_file = std::fs::File::from(stderr_r);
+                let stderr_async = tokio::io::BufReader::new(
+                    tokio::fs::File::from_std(stderr_file),
+                );
+
+                {
+                    let buf = log_buffer.clone();
+                    tokio::spawn(async move {
+                        let mut lines = stderr_async.lines();
+                        while let Ok(Some(line)) = lines.next_line().await {
+                            let mut log = buf.lock().await;
+                            log.push(format!("[stderr] {}", line));
+                            if log.len() > 1000 {
+                                log.remove(0);
+                            }
+                        }
+                    });
+                }
+
+                let instance = ContainerInstance {
+                    container_id: container_id.to_string(),
+                    container_name: container.name.clone(),
+                    image: image.to_string(),
+                    pid: Some(pid),
+                    rootfs: rootfs_path.to_string(),
+                    started_at: Some(chrono::Utc::now()),
+                };
+
+                let ready = Arc::new(Mutex::new(true));
+                let healthy = Arc::new(Mutex::new(true));
+
+                Ok(RunningContainer {
+                    child: None,
+                    instance,
+                    restart_count: 0,
+                    log_buffer,
+                    ready,
+                    healthy,
+                })
+            }
+            Ok(nix::unistd::ForkResult::Child) => {
+                drop(stdout_r);
+                drop(stderr_r);
+                drop(sync_r);
+                drop(ack_w);
+
+                if let Err(e) = rootfs::child_enter_ns_fork(&rootfs_owned, sync_w, ack_r) {
+                    eprintln!("z8s: namespace setup failed: {}", e);
+                    std::process::exit(1);
+                }
+
+                nix::unistd::dup2_stdout(&stdout_w).ok();
+                nix::unistd::dup2_stderr(&stderr_w).ok();
+                drop(stdout_w);
+                drop(stderr_w);
+
+                // Open /dev/null for stdin instead of close(0)
+                // close(0) after pivot_root causes SIGABRT in userns because when a forked child
+                // starts, glibc tries to open /dev/null for fd 0, but device bind-mounts only
+                // existed if we pre-created the destination files
+                if let Ok(fd) = nix::fcntl::open(
+                    "/dev/null",
+                    nix::fcntl::OFlag::O_RDONLY,
+                    nix::sys::stat::Mode::empty(),
+                ) {
+                    let _ = nix::unistd::dup2_stdin(fd);
+                }
+
+                for (k, v) in &env_owned {
+                    std::env::set_var(k, v);
+                }
+
+                let mut argv: Vec<std::ffi::CString> = vec![
+                    std::ffi::CString::new(entrypoint_owned.clone()).unwrap()
+                ];
+                for a in &args_owned {
+                    argv.push(std::ffi::CString::new(a.as_str()).unwrap());
+                }
+
+                if let Err(e) = nix::unistd::execvp(&argv[0], &argv) {
+                    let msg = format!("z8s: execvp({}) failed: {}\n", entrypoint_owned, e);
+                    unsafe { nix::libc::write(2, msg.as_ptr() as *const _, msg.len()); }
+                }
+                std::process::exit(1);
+            }
+            Err(e) => {
+                drop(stdout_r);
+                drop(stdout_w);
+                drop(stderr_r);
+                drop(stderr_w);
+                drop(sync_r);
+                drop(sync_w);
+                drop(ack_r);
+                drop(ack_w);
+                anyhow::bail!("Failed to fork: {}", e);
+            }
+        }
+    }
+
+    async fn build_running_container(
+        &self,
+        mut child: Child,
+        container_id: &str,
+        rootfs_path: &str,
+        image: &str,
+        container: &Container,
+    ) -> Result<RunningContainer> {
+        let pid = child.id().expect("No PID for spawned process");
 
         let log_buffer = Arc::new(Mutex::new(Vec::<String>::new()));
 
@@ -207,9 +425,9 @@ impl ProcessSupervisor {
         let instance = ContainerInstance {
             container_id: container_id.to_string(),
             container_name: container.name.clone(),
-            image,
+            image: image.to_string(),
             pid: Some(pid),
-            rootfs: rootfs.to_string(),
+            rootfs: rootfs_path.to_string(),
             started_at: Some(chrono::Utc::now()),
         };
 
@@ -332,10 +550,8 @@ impl ProcessSupervisor {
         };
         self.stop_container(container_id).await;
         if let Some((_image, rootfs, _name)) = spec {
-            // Re-spawning requires the original Container spec; store it or delegate to
-            // reconcile() which will detect the missing container and restart it.
             info!("Container {} stopped; reconcile loop will restart it", container_id);
-            let _ = rootfs; // rootfs is available if needed for direct re-spawn
+            let _ = rootfs;
         }
     }
 
@@ -375,8 +591,8 @@ impl ProcessSupervisor {
         Vec::new()
     }
 
-    /// Reconcile only Pods. Deployments are owned by DeploymentController.
     pub async fn reconcile(&self) {
+        self.reap_zombies();
         let resources = self.store.get_all().await;
         for tracker in &resources {
             if !matches!(&tracker.resource, AnyResource::Pod(_)) {
@@ -392,6 +608,25 @@ impl ProcessSupervisor {
                     error!("Failed to start {}: {:?}", uid, e);
                     self.store.update_state(&uid, ResourceState::Failed(e.to_string())).await;
                 }
+            }
+        }
+    }
+
+    fn reap_zombies(&self) {
+        loop {
+            match nix::sys::wait::waitpid(
+                nix::unistd::Pid::from_raw(-1),
+                Some(nix::sys::wait::WaitPidFlag::WNOHANG),
+            ) {
+                Ok(nix::sys::wait::WaitStatus::Exited(pid, status)) => {
+                    info!("Reaped zombie child {} (exit code {})", pid, status);
+                }
+                Ok(nix::sys::wait::WaitStatus::Signaled(pid, sig, _)) => {
+                    info!("Reaped zombie child {} (signal {:?})", pid, sig);
+                }
+                Ok(nix::sys::wait::WaitStatus::StillAlive) => break,
+                Err(nix::errno::Errno::ECHILD) => break,
+                _ => break,
             }
         }
     }

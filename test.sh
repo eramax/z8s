@@ -206,7 +206,31 @@ fi
 
 kapply delete pod test-pod >/dev/null 2>&1 && pass "delete pod" || fail "delete pod" "command failed"
 
-# ── 5. Exec ──────────────────────────────────────────────────────────────────
+# ── 5. Phase 1 isolation (user namespace) ────────────────────────────────────
+section "Phase 1 isolation (user namespace)"
+
+out=$(k exec ubuntu -- id 2>&1)
+if echo "$out" | grep -q "uid=0(root)"; then
+    pass "uid mapping (root inside userns)"
+else
+    fail "uid mapping (root inside userns)" "$out"
+fi
+
+out=$(k exec ubuntu -- ls -la /proc/1/exe 2>&1)
+if ! echo "$out" | grep -qi "systemd\|lib/systemd"; then
+    pass "container has its own /proc/1 (not host init)"
+else
+    fail "container has its own /proc/1 (not host init)" "$out"
+fi
+
+out=$(k exec ubuntu -- cat /proc/self/uid_map 2>&1)
+if echo "$out" | grep -q "^\s*0\s"; then
+    pass "uid_map shows root mapping"
+else
+    fail "uid_map shows root mapping" "$out"
+fi
+
+# ── 6. Exec ──────────────────────────────────────────────────────────────────
 section "Exec & interactive shell"
 
 kapply apply --validate=false -f - >/dev/null 2>&1 <<'EOF'
@@ -248,7 +272,7 @@ fi
 
 k delete pod exec-pod >/dev/null 2>&1 || true
 
-# ── 6. Deployments ───────────────────────────────────────────────────────────
+# ── 7. Deployments ───────────────────────────────────────────────────────────
 section "Deployments"
 
 out=$(kapply apply --validate=false -f - 2>&1 <<'EOF'
@@ -310,7 +334,7 @@ fi
 
 kapply delete deployment test-deploy >/dev/null 2>&1 && pass "delete deployment" || fail "delete deployment" "command failed"
 
-# ── 7. Events ────────────────────────────────────────────────────────────────
+# ── 8. Events ────────────────────────────────────────────────────────────────
 section "Events"
 
 out=$(k get events 2>&1)
@@ -327,7 +351,7 @@ else
     fail "get events -n default" "$out"
 fi
 
-# ── 8. ConfigMaps & Secrets ─────────────────────────────────────────────────
+# ── 9. ConfigMaps & Secrets ─────────────────────────────────────────────────
 section "ConfigMaps & Secrets"
 
 out=$(k get configmaps 2>&1)
@@ -336,7 +360,7 @@ out=$(k get configmaps 2>&1)
 out=$(k get secrets 2>&1)
 [[ $? -eq 0 ]] && pass "get secrets" || fail "get secrets" "$out"
 
-# ── 9. All-namespaces ────────────────────────────────────────────────────────
+# ── 10. All-namespaces ───────────────────────────────────────────────────────
 section "Cross-namespace"
 
 out=$(k get pods --all-namespaces 2>&1)

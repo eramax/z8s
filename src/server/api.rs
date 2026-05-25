@@ -999,6 +999,25 @@ async fn delete_deployment(
     let trackers = state.store.get_by_kind("Deployment").await;
     for t in &trackers {
         if t.resource.name() == name && t.resource.namespace() == namespace {
+            if let AnyResource::Deployment(deploy) = &t.resource {
+                // Cascade delete: stop and remove all pods matching this deployment's selector
+                let selector = deploy.spec.as_ref()
+                    .and_then(|s| s.selector.match_labels.as_ref());
+                if let Some(match_labels) = selector {
+                    let pods = state.store.get_by_kind("Pod").await;
+                    for pt in &pods {
+                        if pt.resource.namespace() != namespace { continue; }
+                        if let AnyResource::Pod(pod) = &pt.resource {
+                            let pod_labels = pod.metadata.labels.clone().unwrap_or_default();
+                            if labels_match(match_labels, &pod_labels) {
+                                info!("Deleting pod {} owned by deployment {}/{}", pt.resource.name(), namespace, name);
+                                state.supervisor.stop_pod(&pt.resource).await;
+                                state.store.delete(&pt.resource).await.ok();
+                            }
+                        }
+                    }
+                }
+            }
             state.store.delete(&t.resource).await.ok();
             info!("Deleted deployment {}/{}", namespace, name);
             return Ok(Json(ok_status()));
@@ -1384,6 +1403,15 @@ async fn fallback_handler(uri: Uri) -> impl IntoResponse {
         ..Default::default()
     };
     (StatusCode::NOT_FOUND, Json(status))
+}
+
+fn labels_match(selector: &BTreeMap<String, String>, labels: &BTreeMap<String, String>) -> bool {
+    for (key, value) in selector {
+        if labels.get(key) != Some(value) {
+            return false;
+        }
+    }
+    true
 }
 
 // ── Error type ────────────────────────────────────────────────────────────────

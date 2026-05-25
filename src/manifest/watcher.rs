@@ -114,11 +114,18 @@ impl ManifestWatcher {
                         EventKind::Create(_)
                         | EventKind::Modify(_) => {
                             for path in &event.paths {
-                                if path.extension().map_or(false, |e| e == "yaml" || e == "yml") {
-                                    info!("Detected change in: {}", path.display());
-                                    if let Err(e) = self.process_file(path).await {
-                                        error!("Failed to process {}: {}", path.display(), e);
-                                    }
+                                if !path.extension().map_or(false, |e| e == "yaml" || e == "yml") {
+                                    continue;
+                                }
+                                // Skip files already loaded during startup (spurious watcher events)
+                                let processed = self.processed.read().await;
+                                if processed.contains(&path.to_string_lossy().to_string()) {
+                                    continue;
+                                }
+                                drop(processed);
+                                info!("Detected change in: {}", path.display());
+                                if let Err(e) = self.process_file(path).await {
+                                    error!("Failed to process {}: {}", path.display(), e);
                                 }
                             }
                         }
