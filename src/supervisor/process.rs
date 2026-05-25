@@ -54,7 +54,12 @@ impl ProcessSupervisor {
         health_checker: Arc<HealthChecker>,
         store: Arc<ResourceStore>,
     ) -> Self {
-        std::fs::create_dir_all("/var/lib/z8s/containers").ok();
+        let base = if nix::unistd::Uid::effective().is_root() {
+            "/var/lib/z8s".to_string()
+        } else {
+            format!("{}/.local/share/z8s", std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string()))
+        };
+        std::fs::create_dir_all(format!("{}/containers", base)).ok();
         Self {
             running: Arc::new(Mutex::new(HashMap::new())),
             image_manager,

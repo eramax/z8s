@@ -14,6 +14,7 @@ use std::os::unix::io::{AsRawFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::process::Stdio;
 use tokio::process::Command;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::info;
 
 fn set_winsize(fd: RawFd, cols: u16, rows: u16) {
@@ -30,6 +31,10 @@ fn set_winsize(fd: RawFd, cols: u16, rows: u16) {
 pub struct ExecParams {
     pub command: Vec<String>,
     pub container: Option<String>,
+    pub tty: bool,
+    pub stdin: bool,
+    pub stdout: bool,
+    pub stderr: bool,
 }
 
 impl<S> axum::extract::FromRequestParts<S> for ExecParams
@@ -47,7 +52,34 @@ where
             .cloned()
             .unwrap_or_default();
         let container = params.get("container").and_then(|v| v.first()).cloned();
-        Ok(ExecParams { command, container })
+        let tty = params
+            .get("tty")
+            .and_then(|v| v.first())
+            .map(|v| v == "true")
+            .unwrap_or(false);
+        let stdin = params
+            .get("stdin")
+            .and_then(|v| v.first())
+            .map(|v| v == "true")
+            .unwrap_or(false);
+        let stdout = params
+            .get("stdout")
+            .and_then(|v| v.first())
+            .map(|v| v == "true")
+            .unwrap_or(true);
+        let stderr = params
+            .get("stderr")
+            .and_then(|v| v.first())
+            .map(|v| v == "true")
+            .unwrap_or(true);
+        Ok(ExecParams {
+            command,
+            container,
+            tty,
+            stdin,
+            stdout,
+            stderr,
+        })
     }
 }
 
@@ -89,10 +121,14 @@ pub async fn exec_handler(
     params: ExecParams,
 ) -> impl IntoResponse {
     let cmds = params.command.clone();
-    info!(pod = %name, ns = %namespace, cmds = ?cmds, container = ?params.container, "Exec WS");
+    let tty = params.tty;
+    let stdin_flag = params.stdin;
+    let stdout_flag = params.stdout;
+    let stderr_flag = params.stderr;
+    info!(pod = %name, ns = %namespace, cmds = ?cmds, container = ?params.container, tty, "Exec WS");
     let rootfs = resolve_rootfs(&state, &name, params.container.as_deref()).await;
     ws.protocols(["v5.channel.k8s.io", "v4.channel.k8s.io", "v3.channel.k8s.io", "channel.k8s.io"])
-        .on_upgrade(move |socket| exec_ws(socket, cmds, rootfs))
+        .on_upgrade(move |socket| exec_ws(socket, cmds, rootfs, tty, stdin_flag, stdout_flag, stderr_flag))
 }
 
 pub async fn exec_post_handler(
@@ -208,20 +244,7 @@ fn spawn_with_pty(
         }
     }
 
-    let mut child_cmd = if let Some(root) = rootfs {
-        let mut c = Command::new("chroot");
-        c.arg(root).arg(cmd);
-        for a in args {
-            c.arg(a);
-        }
-        c
-    } else {
-        let mut c = Command::new(cmd);
-        for a in args {
-            c.arg(a);
-        }
-        c
-    };
+    let mut child_cmd = build_command(cmd, args, rootfs);
 
     // Safe: Stdio::from(File) moves the file fd without any raw pointer arithmetic.
     child_cmd
@@ -262,7 +285,82 @@ fn spawn_with_pty(
     Ok((master, child_cmd))
 }
 
-async fn exec_ws(mut socket: WebSocket, cmds: Vec<String>, rootfs: Option<String>) {
+fn spawn_with_pipes(
+    cmd: &str,
+    args: &[&str],
+    rootfs: Option<&str>,
+) -> Result<Command, String> {
+    if let Some(root) = rootfs {
+        let root_path = std::path::Path::new(root);
+        let _ = std::fs::create_dir_all(root_path.join("proc"));
+        let _ = nix::mount::mount(
+            Some("proc"),
+            &root_path.join("proc"),
+            Some("proc"),
+            MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC | MsFlags::MS_NODEV,
+            None::<&str>,
+        );
+        let _ = std::fs::create_dir_all(root_path.join("etc"));
+        let resolv = root_path.join("etc/resolv.conf");
+        let existing = std::fs::read_to_string(&resolv).unwrap_or_default();
+        if existing.trim().is_empty()
+            || existing.contains("127.0.0.53")
+            || existing.contains("systemd-resolved")
+        {
+            let _ = std::fs::write(&resolv, "nameserver 1.1.1.1\nnameserver 8.8.8.8\n");
+        }
+    }
+
+    let mut child_cmd = build_command(cmd, args, rootfs);
+
+    child_cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+
+    Ok(child_cmd)
+}
+
+fn is_root() -> bool {
+    nix::unistd::Uid::effective().is_root()
+}
+
+fn build_command(cmd: &str, args: &[&str], rootfs: Option<&str>) -> Command {
+    if let Some(root) = rootfs {
+        if is_root() {
+            let mut c = Command::new("chroot");
+            c.arg(root).arg(cmd);
+            for a in args {
+                c.arg(a);
+            }
+            c
+        } else {
+            let mut c = Command::new(cmd);
+            for a in args {
+                c.arg(a);
+            }
+            c.current_dir(root);
+            c
+        }
+    } else {
+        let mut c = Command::new(cmd);
+        for a in args {
+            c.arg(a);
+        }
+        c
+    }
+}
+
+async fn exec_ws(
+    mut socket: WebSocket,
+    cmds: Vec<String>,
+    rootfs: Option<String>,
+    tty: bool,
+    stdin_flag: bool,
+    stdout_flag: bool,
+    stderr_flag: bool,
+) {
     if cmds.is_empty() {
         let _ = socket.close().await;
         return;
@@ -270,9 +368,17 @@ async fn exec_ws(mut socket: WebSocket, cmds: Vec<String>, rootfs: Option<String
 
     let cmd = cmds[0].clone();
     let args: Vec<&str> = cmds.iter().skip(1).map(|s| s.as_str()).collect();
-    info!("Exec WS: cmd={}, args={:?}, rootfs={:?}", cmd, args, rootfs);
+    info!("Exec WS: cmd={}, args={:?}, rootfs={:?}, tty={}", cmd, args, rootfs, tty);
 
-    let (master, mut child_cmd) = match spawn_with_pty(&cmd, &args, rootfs.as_deref()) {
+    if tty {
+        exec_ws_tty(socket, &cmd, &args, rootfs.as_deref()).await
+    } else {
+        exec_ws_pipes(socket, &cmd, &args, rootfs.as_deref(), stdin_flag, stdout_flag, stderr_flag).await
+    }
+}
+
+async fn exec_ws_tty(mut socket: WebSocket, cmd: &str, args: &[&str], rootfs: Option<&str>) {
+    let (master, mut child_cmd) = match spawn_with_pty(cmd, args, rootfs) {
         Ok(pair) => pair,
         Err(e) => {
             let _ = socket
@@ -291,11 +397,9 @@ async fn exec_ws(mut socket: WebSocket, cmds: Vec<String>, rootfs: Option<String
             return;
         }
     };
-    // Drop command immediately so all slave PTY fds are closed in the parent.
-    // When the child exits and closes its copies, the master will get EIO.
     drop(child_cmd);
 
-    info!("Exec WS: child PID {:?}", child.id());
+    info!("Exec WS TTY: child PID {:?}", child.id());
 
     let async_master =
         tokio::io::unix::AsyncFd::new(master).expect("AsyncFd for PTY master");
@@ -356,6 +460,143 @@ async fn exec_ws(mut socket: WebSocket, cmds: Vec<String>, rootfs: Option<String
     }
 
     let exit_code = child.wait().await.ok().and_then(|s| s.code()).unwrap_or(0);
+    send_exit_status(&mut ws_tx, exit_code).await;
+}
+
+async fn exec_ws_pipes(
+    mut socket: WebSocket,
+    cmd: &str,
+    args: &[&str],
+    rootfs: Option<&str>,
+    stdin_flag: bool,
+    stdout_flag: bool,
+    stderr_flag: bool,
+) {
+    let mut child_cmd = match spawn_with_pipes(cmd, args, rootfs) {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = socket
+                .send(Message::Text(format!("error: {}", e).into()))
+                .await;
+            return;
+        }
+    };
+
+    let mut child = match child_cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = socket
+                .send(Message::Text(format!("spawn error: {}", e).into()))
+                .await;
+            return;
+        }
+    };
+
+    info!("Exec WS pipes: child PID {:?}", child.id());
+
+    let child_stdin = if stdin_flag { child.stdin.take() } else { None };
+    let child_stdout = if stdout_flag { child.stdout.take() } else { None };
+    let child_stderr = if stderr_flag { child.stderr.take() } else { None };
+
+    let (ws_tx, mut ws_rx) = socket.split();
+    let ws_tx = std::sync::Arc::new(tokio::sync::Mutex::new(ws_tx));
+    let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<Message>(64);
+
+    if let Some(stdout) = child_stdout {
+        let out_tx = out_tx.clone();
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; 4096];
+            let mut stdout = tokio::io::BufReader::new(stdout);
+            loop {
+                match stdout.read(&mut buf).await {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let mut frame = vec![1u8];
+                        frame.extend_from_slice(&buf[..n]);
+                        if out_tx.send(Message::Binary(axum::body::Bytes::from(frame))).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+    }
+
+    if let Some(stderr) = child_stderr {
+        let out_tx = out_tx.clone();
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; 4096];
+            let mut stderr = tokio::io::BufReader::new(stderr);
+            loop {
+                match stderr.read(&mut buf).await {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let mut frame = vec![2u8];
+                        frame.extend_from_slice(&buf[..n]);
+                        if out_tx.send(Message::Binary(axum::body::Bytes::from(frame))).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+    }
+    drop(out_tx);
+
+    let mut child_stdin = child_stdin;
+    let mut child = child;
+    let ws_tx_arc = ws_tx.clone();
+
+    let forwarder = tokio::spawn(async move {
+        while let Some(msg) = out_rx.recv().await {
+            let mut tx = ws_tx_arc.lock().await;
+            if tx.send(msg).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    loop {
+        tokio::select! {
+            msg = ws_rx.next() => {
+                match msg {
+                    Some(Ok(Message::Binary(data))) if !data.is_empty() => {
+                        if data[0] == 0 && data.len() > 1 {
+                            if let Some(stdin) = child_stdin.as_mut() {
+                                let _ = stdin.write_all(&data[1..]).await;
+                                let _ = stdin.flush().await;
+                            }
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) | None => {
+                        drop(child_stdin);
+                        let _ = child.kill().await;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+
+            status = child.wait() => {
+                drop(child_stdin);
+                let exit_code = status.ok().and_then(|s| s.code()).unwrap_or(0);
+                let mut tx = ws_tx.lock().await;
+                send_exit_status(&mut tx, exit_code).await;
+                forwarder.abort();
+                return;
+            }
+        }
+    }
+
+    let exit_code = child.wait().await.ok().and_then(|s| s.code()).unwrap_or(0);
+    let mut tx = ws_tx.lock().await;
+    send_exit_status(&mut tx, exit_code).await;
+    forwarder.abort();
+}
+
+async fn send_exit_status(ws_tx: &mut futures_util::stream::SplitSink<WebSocket, Message>, exit_code: i32) {
     let (status_str, message) = if exit_code == 0 {
         ("Success", "command exited with code 0".to_string())
     } else {

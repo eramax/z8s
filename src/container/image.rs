@@ -13,8 +13,16 @@ const ACCEPTED_LAYER_TYPES: &[&str] = &[
     "application/vnd.oci.image.layer.v1.tar+zstd",
 ];
 
-const Z8S_IMAGE_CACHE: &str = "/var/lib/z8s/images";
-const Z8S_ROOTFS: &str = "/var/lib/z8s/rootfs";
+const Z8S_IMAGE_CACHE: &str = "Z8S_IMAGE_CACHE";
+const Z8S_ROOTFS: &str = "Z8S_ROOTFS";
+
+fn z8s_base_dir() -> String {
+    if nix::unistd::Uid::effective().is_root() {
+        "/var/lib/z8s".to_string()
+    } else {
+        format!("{}/.local/share/z8s", std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string()))
+    }
+}
 
 pub struct ImageManager {
     client: Client,
@@ -26,8 +34,9 @@ impl ImageManager {
     pub fn new() -> Result<Self> {
         let client = Client::new(ClientConfig::default());
 
-        let cache_dir = Z8S_IMAGE_CACHE.to_string();
-        let rootfs_dir = Z8S_ROOTFS.to_string();
+        let base = z8s_base_dir();
+        let cache_dir = format!("{}/images", base);
+        let rootfs_dir = format!("{}/rootfs", base);
 
         std::fs::create_dir_all(&cache_dir)
             .context("Failed to create image cache directory")?;
