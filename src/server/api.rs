@@ -910,6 +910,10 @@ fn resource_to_deploy_json(
     serde_json::to_value(&deploy).unwrap_or_default()
 }
 
+fn pod_managed_by_deployment(pod_name: &str, deploy_name: &str) -> bool {
+    pod_name.starts_with(&format!("{deploy_name}-pod-"))
+}
+
 fn count_deployment_pods(
     resource: &AnyResource,
     pods: &[crate::api::types::ResourceTracker],
@@ -920,6 +924,7 @@ fn count_deployment_pods(
         AnyResource::Deployment(d) => d,
         _ => return (0, 0),
     };
+    let deploy_name = deploy.metadata.name.as_deref().unwrap_or("");
     let namespace = deploy.metadata.namespace.as_deref().unwrap_or("default");
     let selector = deploy.spec.as_ref().and_then(|s| s.selector.match_labels.as_ref());
 
@@ -929,7 +934,9 @@ fn count_deployment_pods(
         .iter()
         .filter(|t| {
             if let AnyResource::Pod(pod) = &t.resource {
+                let pod_name = t.resource.name();
                 pod.metadata.namespace.as_deref() == Some(namespace)
+                    && pod_managed_by_deployment(pod_name, deploy_name)
                     && pod.metadata.labels.as_ref().map_or(false, |pl| {
                         labels.iter().all(|(k, v)| pl.get(k) == Some(v))
                     })

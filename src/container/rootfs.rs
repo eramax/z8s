@@ -264,18 +264,22 @@ pub fn child_enter_ns_fork(
     sync_w: OwnedFd,
     ack_r: OwnedFd,
     volumes: &[crate::container::volumes::ResolvedVolume],
+    isolate_net: bool,
 ) -> Result<()> {
     // Do not include CLONE_NEWPID: Go runtimes (whoami, http-echo) fail to spawn threads
     // with EINVAL in a PID namespace when filesystem isolation falls back to host mounts.
-    let flags = CloneFlags::CLONE_NEWUSER
+    let mut flags = CloneFlags::CLONE_NEWUSER
         | CloneFlags::CLONE_NEWNS
         | CloneFlags::CLONE_NEWUTS
-        | CloneFlags::CLONE_NEWIPC
-        | CloneFlags::CLONE_NEWNET;
-    unshare(flags)
-        .context("Failed to unshare user/mount/uts/ipc/net namespaces")?;
+        | CloneFlags::CLONE_NEWIPC;
+    if isolate_net {
+        flags |= CloneFlags::CLONE_NEWNET;
+    }
+    unshare(flags).context("Failed to unshare user/mount/uts/ipc namespaces")?;
 
-    crate::network::port_publish::setup_loopback();
+    if isolate_net {
+        crate::network::port_publish::setup_loopback();
+    }
 
     nix::unistd::write(&sync_w, b"S")
         .context("child: failed to write sync byte")?;
@@ -334,13 +338,17 @@ pub fn child_enter_ns_fork(
 pub fn child_enter_ns_root(
     rootfs_path: &str,
     volumes: &[crate::container::volumes::ResolvedVolume],
+    isolate_net: bool,
 ) -> Result<()> {
-    unshare(
-        CloneFlags::CLONE_NEWNS | CloneFlags::CLONE_NEWUTS | CloneFlags::CLONE_NEWNET,
-    )
-    .context("Failed to unshare mount/uts/net")?;
+    let mut flags = CloneFlags::CLONE_NEWNS | CloneFlags::CLONE_NEWUTS;
+    if isolate_net {
+        flags |= CloneFlags::CLONE_NEWNET;
+    }
+    unshare(flags).context("Failed to unshare mount/uts")?;
 
-    crate::network::port_publish::setup_loopback();
+    if isolate_net {
+        crate::network::port_publish::setup_loopback();
+    }
 
     mount(
         None::<&str>,

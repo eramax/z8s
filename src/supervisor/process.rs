@@ -48,7 +48,14 @@ fn declared_container_ports(container: &Container) -> Vec<u16> {
         .unwrap_or_default()
 }
 
-fn merge_publish_ports(container: &Container, extra: &[u16]) -> Vec<u16> {
+fn use_isolated_network(container: &Container) -> bool {
+    !declared_container_ports(container).is_empty()
+}
+
+fn merge_publish_ports(container: &Container, extra: &[u16], isolated_net: bool) -> Vec<u16> {
+    if !isolated_net {
+        return Vec::new();
+    }
     let mut ports = declared_container_ports(container);
     for p in extra {
         if !ports.contains(p) {
@@ -103,6 +110,8 @@ pub struct ContainerInstance {
     pub env_vars: Vec<(String, String)>,
     /// container_port → 127.0.0.1 host port (pod network namespace publish)
     pub published_ports: std::collections::HashMap<u16, u16>,
+    /// Pod has its own network namespace (declared containerPorts).
+    pub isolated_net: bool,
 }
 
 #[derive(Debug)]
@@ -496,6 +505,7 @@ impl ProcessSupervisor {
         service_ports: &[u16],
     ) -> Result<RunningContainer> {
         let ContainerSpawnCtx { entrypoint, cmd_args, env_vars, rootfs_path, container_id, pod_uid, image, container, volumes, run_as_user, run_as_group } = ctx;
+        let isolate_net = use_isolated_network(container);
         let (stdout_r, stdout_w) = nix::unistd::pipe().context("Failed to create stdout pipe")?;
         let (stderr_r, stderr_w) = nix::unistd::pipe().context("Failed to create stderr pipe")?;
 
@@ -550,8 +560,10 @@ impl ProcessSupervisor {
                     started_at: Some(chrono::Utc::now()),
                     env_vars: env_owned.clone(),
                     published_ports: std::collections::HashMap::new(),
+                    isolated_net: isolate_net,
                 };
-                let publish_ports = merge_publish_ports(container, service_ports);
+                let publish_ports =
+                    merge_publish_ports(container, service_ports, isolate_net);
                 let (published_ports, port_publish) =
                     attach_port_publish(pid, &publish_ports);
                 instance.published_ports = published_ports;
@@ -583,7 +595,9 @@ impl ProcessSupervisor {
                     let _ = nix::unistd::dup2_stdin(fd);
                 }
 
-                if let Err(e) = rootfs::child_enter_ns_root(&rootfs_owned, &volumes) {
+                if let Err(e) =
+                    rootfs::child_enter_ns_root(&rootfs_owned, &volumes, isolate_net)
+                {
                     eprintln!("z8s: root namespace setup failed: {}", e);
                     std::process::exit(1);
                 }
@@ -629,6 +643,7 @@ impl ProcessSupervisor {
         service_ports: &[u16],
     ) -> Result<RunningContainer> {
         let ContainerSpawnCtx { entrypoint, cmd_args, env_vars, rootfs_path, container_id, pod_uid, image, container, volumes, run_as_user, run_as_group } = ctx;
+        let isolate_net = use_isolated_network(container);
         let (stdout_r, stdout_w) = nix::unistd::pipe()
             .context("Failed to create stdout pipe")?;
         let (stderr_r, stderr_w) = nix::unistd::pipe()
@@ -718,8 +733,10 @@ impl ProcessSupervisor {
                     started_at: Some(chrono::Utc::now()),
                     env_vars: env_owned.clone(),
                     published_ports: std::collections::HashMap::new(),
+                    isolated_net: isolate_net,
                 };
-                let publish_ports = merge_publish_ports(container, service_ports);
+                let publish_ports =
+                    merge_publish_ports(container, service_ports, isolate_net);
                 let (published_ports, port_publish) =
                     attach_port_publish(pid, &publish_ports);
                 instance.published_ports = published_ports;
@@ -743,7 +760,13 @@ impl ProcessSupervisor {
                 drop(sync_r);
                 drop(ack_w);
 
-                if let Err(e) = rootfs::child_enter_ns_fork(&rootfs_owned, sync_w, ack_r, &volumes) {
+                if let Err(e) = rootfs::child_enter_ns_fork(
+                    &rootfs_owned,
+                    sync_w,
+                    ack_r,
+                    &volumes,
+                    isolate_net,
+                ) {
                     eprintln!("z8s: namespace setup failed: {:#}", e);
                     std::process::exit(1);
                 }
@@ -845,6 +868,7 @@ impl ProcessSupervisor {
             });
         }
 
+        let isolate_net = use_isolated_network(container);
         let mut instance = ContainerInstance {
             container_id: container_id.to_string(),
             container_name: container.name.clone(),
@@ -854,8 +878,9 @@ impl ProcessSupervisor {
             started_at: Some(chrono::Utc::now()),
             env_vars: env_vars.to_vec(),
             published_ports: std::collections::HashMap::new(),
+            isolated_net: isolate_net,
         };
-        let publish_ports = merge_publish_ports(container, service_ports);
+        let publish_ports = merge_publish_ports(container, service_ports, isolate_net);
         let (published_ports, port_publish) = attach_port_publish(pid, &publish_ports);
         instance.published_ports = published_ports;
 
