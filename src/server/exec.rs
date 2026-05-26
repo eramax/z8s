@@ -241,7 +241,7 @@ fn spawn_with_pty(
     unsafe {
         child_cmd.as_std_mut().pre_exec(move || {
             if let Some(ref ns) = ns_fds {
-                let _ = enter_container_namespaces(ns, isolated_net);
+                let _ = enter_container_namespaces(ns, isolated_net, isolated_net);
                 let _ = nix::unistd::chdir("/");
             }
             let _ = nix::unistd::setsid();
@@ -309,13 +309,19 @@ fn try_open_namespace_fds(container_pid: u32) -> Option<ContainerNamespaces> {
     })
 }
 
-fn enter_container_namespaces(ns: &ContainerNamespaces, isolated_net: bool) -> Result<(), std::io::Error> {
+fn enter_container_namespaces(
+    ns: &ContainerNamespaces,
+    isolated_net: bool,
+    use_mnt_ns: bool,
+) -> Result<(), std::io::Error> {
     nix::sched::setns(&ns.user, CloneFlags::CLONE_NEWUSER).map_err(|e| {
         std::io::Error::new(std::io::ErrorKind::Other, format!("setns(CLONE_NEWUSER): {e}"))
     })?;
-    nix::sched::setns(&ns.mnt, CloneFlags::CLONE_NEWNS).map_err(|e| {
-        std::io::Error::new(std::io::ErrorKind::Other, format!("setns(CLONE_NEWNS): {e}"))
-    })?;
+    if use_mnt_ns {
+        nix::sched::setns(&ns.mnt, CloneFlags::CLONE_NEWNS).map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::Other, format!("setns(CLONE_NEWNS): {e}"))
+        })?;
+    }
     if isolated_net {
         nix::sched::setns(&ns.net, CloneFlags::CLONE_NEWNET).map_err(|e| {
             std::io::Error::new(std::io::ErrorKind::Other, format!("setns(CLONE_NEWNET): {e}"))
@@ -344,19 +350,33 @@ fn build_command(
     let args_owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
 
     if let Some((root, container_pid)) = rootfs_pid {
-        let (exec_path, prog_args) = rootfs::build_container_argv(cmd, &args_owned, root);
         let ns_fds = try_open_namespace_fds(container_pid);
+        let fs_isolated = rootfs::container_fs_isolated(container_pid, root);
+        let use_mnt_ns = isolated_net && fs_isolated;
+        let (exec_path, prog_args) = if use_mnt_ns {
+            rootfs::build_container_argv_in_mount_ns(cmd, &args_owned, root)
+        } else {
+            rootfs::build_container_argv(cmd, &args_owned, root)
+        };
+        let (program, prog_args) = if fs_isolated {
+            (exec_path, prog_args)
+        } else {
+            rootfs::wrap_dynamic_linker(&exec_path, prog_args, root)
+        };
 
-        let mut c = Command::new(&exec_path);
+        let mut c = Command::new(&program);
         for a in &prog_args {
             c.arg(a);
         }
         apply_env(&mut c);
 
         if let Some(ns) = ns_fds {
+            let use_mnt = use_mnt_ns;
+            let iso_net = isolated_net;
             unsafe {
-                c.as_std_mut()
-                    .pre_exec(move || enter_container_namespaces(&ns, isolated_net));
+                c.as_std_mut().pre_exec(move || {
+                    enter_container_namespaces(&ns, iso_net, use_mnt)
+                });
             }
         } else {
             c.current_dir(root);

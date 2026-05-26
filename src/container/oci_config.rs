@@ -2,6 +2,7 @@
 
 use k8s_openapi::api::core::v1::Container;
 use serde::{Deserialize, Serialize};
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 pub const OCI_CONFIG_FILE: &str = ".z8s-oci-config.json";
@@ -24,7 +25,12 @@ pub fn read_image_config(rootfs_path: &str) -> SavedImageConfig {
     let path = Path::new(rootfs_path).join(OCI_CONFIG_FILE);
     if let Ok(raw) = std::fs::read_to_string(&path) {
         if let Ok(cfg) = serde_json::from_str::<SavedImageConfig>(&raw) {
-            if cfg.entrypoint.is_some() || cfg.cmd.is_some() {
+            let has_ep = cfg
+                .entrypoint
+                .as_ref()
+                .is_some_and(|ep| !ep.is_empty());
+            let has_cmd = cfg.cmd.as_ref().is_some_and(|c| !c.is_empty());
+            if has_ep || has_cmd {
                 return cfg;
             }
         }
@@ -32,14 +38,45 @@ pub fn read_image_config(rootfs_path: &str) -> SavedImageConfig {
     guess_image_config(rootfs_path)
 }
 
-/// Fallback when `.z8s-oci-config.json` is missing (images cached before OCI config was stored).
+/// Fallback when OCI Entrypoint/Cmd were not stored (legacy cache or empty image config).
 pub fn guess_image_config(rootfs_path: &str) -> SavedImageConfig {
     let root = Path::new(rootfs_path);
-    for candidate in ["/whoami", "/http-echo", "/nginx", "/bin/sh"] {
-        let rel = candidate.trim_start_matches('/');
-        if root.join(rel).exists() {
+    for rel in [
+        "docker-entrypoint.sh",
+        "usr/local/bin/docker-entrypoint.sh",
+        "usr/bin/docker-entrypoint.sh",
+        "entrypoint.sh",
+        "bin/sh",
+    ] {
+        let path = root.join(rel);
+        if path.is_file() {
+            let ep = format!("/{}", rel.trim_start_matches('/'));
             return SavedImageConfig {
-                entrypoint: Some(vec![candidate.to_string()]),
+                entrypoint: Some(vec![ep]),
+                cmd: None,
+            };
+        }
+    }
+    // Single executable at image root (common for minimal / statically linked images).
+    if let Ok(entries) = std::fs::read_dir(root) {
+        let mut exes: Vec<String> = entries
+            .flatten()
+            .filter_map(|e| {
+                let p = e.path();
+                if p.parent()? != root {
+                    return None;
+                }
+                let meta = e.metadata().ok()?;
+                if !meta.is_file() || meta.permissions().mode() & 0o111 == 0 {
+                    return None;
+                }
+                Some(format!("/{}", e.file_name().to_string_lossy()))
+            })
+            .collect();
+        exes.sort();
+        if exes.len() == 1 {
+            return SavedImageConfig {
+                entrypoint: Some(exes),
                 cmd: None,
             };
         }

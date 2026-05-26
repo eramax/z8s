@@ -48,15 +48,20 @@ fn declared_container_ports(container: &Container) -> Vec<u16> {
         .unwrap_or_default()
 }
 
-fn use_isolated_network(container: &Container) -> bool {
-    !declared_container_ports(container).is_empty()
+fn use_isolated_network(container: &Container, service_ports: &[u16]) -> bool {
+    !declared_container_ports(container).is_empty() || !service_ports.is_empty()
 }
 
-fn merge_publish_ports(container: &Container, isolated_net: bool) -> Vec<u16> {
-    if !isolated_net {
-        return Vec::new();
+fn merge_publish_ports(container: &Container, service_ports: &[u16]) -> Vec<u16> {
+    let mut ports = declared_container_ports(container);
+    for &p in service_ports {
+        if !ports.contains(&p) {
+            ports.push(p);
+        }
     }
-    declared_container_ports(container)
+    ports.sort_unstable();
+    ports.dedup();
+    ports
 }
 
 fn attach_port_publish(
@@ -155,6 +160,10 @@ impl ProcessSupervisor {
     }
 
     pub async fn start_pod(&self, resource: &AnyResource) -> Result<()> {
+        self.start_pod_inner(resource, true).await
+    }
+
+    async fn start_pod_inner(&self, resource: &AnyResource, sync_services: bool) -> Result<()> {
         let containers = extract_containers(resource);
         if containers.is_empty() {
             warn!("No containers in resource {}", resource.name());
@@ -213,16 +222,126 @@ impl ProcessSupervisor {
 
         self.store.update_state(&pod_uid, ResourceState::Running).await;
 
-        if let AnyResource::Pod(pod) = resource {
-            let ns = pod.metadata.namespace.as_deref().unwrap_or("default");
-            let labels = pod.metadata.labels.clone().unwrap_or_default();
-            let net = self.network.lock().unwrap().clone();
-            if let Some(net) = net {
-                net.sync_services_for_labels(ns, &labels).await;
+        if sync_services {
+            if let AnyResource::Pod(pod) = resource {
+                let ns = pod.metadata.namespace.as_deref().unwrap_or("default");
+                let labels = pod.metadata.labels.clone().unwrap_or_default();
+                let net = self.network.lock().unwrap().clone();
+                if let Some(net) = net {
+                    net.sync_services_for_labels(ns, &labels).await;
+                }
             }
         }
 
         Ok(())
+    }
+
+    /// Ensure running pods publish ports from Services (pods often start before their Service exists).
+    pub async fn reconcile_network_for_service(&self, svc: &k8s_openapi::api::core::v1::Service) {
+        let selector = svc
+            .spec
+            .as_ref()
+            .and_then(|s| s.selector.as_ref())
+            .cloned()
+            .unwrap_or_default();
+        if selector.is_empty() {
+            return;
+        }
+        let svc_ns = svc.metadata.namespace.as_deref().unwrap_or("default");
+        let trackers = self.store.get_by_kind("Pod").await;
+        for t in &trackers {
+            if t.resource.namespace() != svc_ns {
+                continue;
+            }
+            if let AnyResource::Pod(pod) = &t.resource {
+                let labels = pod.metadata.labels.clone().unwrap_or_default();
+                if selector.iter().all(|(k, v)| labels.get(k) == Some(v)) {
+                    self.ensure_pod_network(&t.resource).await;
+                }
+            }
+        }
+    }
+
+    async fn ensure_pod_network(&self, resource: &AnyResource) {
+        let AnyResource::Pod(pod) = resource else {
+            return;
+        };
+        let pod_name = pod.metadata.name.as_deref().unwrap_or_default();
+        if pod_name.is_empty() || !self.is_pod_alive(pod_name).await {
+            return;
+        }
+
+        let service_ports = self.service_target_ports_for_pod(pod).await;
+        let containers = extract_containers(resource);
+
+        for container in &containers {
+            let cid = format!("{}-{}", pod_name, container.name);
+            let needed = merge_publish_ports(container, &service_ports);
+            let want_isolated = use_isolated_network(container, &service_ports);
+
+            let mut running = self.running.lock().await;
+            let Some(rc) = running.get_mut(&cid) else {
+                continue;
+            };
+
+            if want_isolated && !rc.instance.isolated_net {
+                drop(running);
+                info!(
+                    "Pod {} needs network namespace for ports {:?}; restarting",
+                    pod_name, needed
+                );
+                self.restart_pod_network(resource).await;
+                return;
+            }
+
+            if !want_isolated {
+                continue;
+            }
+
+            let missing: Vec<u16> = needed
+                .iter()
+                .filter(|p| !rc.instance.published_ports.contains_key(p))
+                .copied()
+                .collect();
+            if missing.is_empty() {
+                continue;
+            }
+
+            let Some(pid) = rc.instance.pid else {
+                continue;
+            };
+            if let Some(ref mut pp) = rc.port_publish {
+                pp.append_ports(pid, &missing);
+                for &cp in &missing {
+                    if let Some(hp) = pp.map.get(&cp) {
+                        rc.instance.published_ports.insert(cp, *hp);
+                    }
+                }
+            } else {
+                let (published_ports, port_publish) = attach_port_publish(pid, &missing);
+                rc.instance.published_ports.extend(published_ports);
+                rc.port_publish = port_publish;
+            }
+            info!(
+                "Pod {} container {}: late-published ports {:?}",
+                pod_name, container.name, missing
+            );
+        }
+    }
+
+    async fn restart_pod_network(&self, resource: &AnyResource) {
+        let uid = resource.uid();
+        let clone = resource.clone();
+        self.stop_pod(&clone).await;
+        self.store
+            .update_state(&uid, ResourceState::Pending)
+            .await;
+        if let Err(e) = self.start_pod_inner(&clone, false).await {
+            error!("Failed to restart pod {} for network: {}", resource.name(), e);
+            self.store
+                .update_state(&uid, ResourceState::Failed(e.to_string()))
+                .await;
+        }
     }
 
     async fn fetch_cms_and_secrets(
@@ -496,10 +615,10 @@ impl ProcessSupervisor {
     async fn spawn_root_ns_container(
         &self,
         ctx: ContainerSpawnCtx<'_>,
-        _service_ports: &[u16],
+        service_ports: &[u16],
     ) -> Result<RunningContainer> {
         let ContainerSpawnCtx { entrypoint, cmd_args, env_vars, rootfs_path, container_id, pod_uid, image, container, volumes, run_as_user, run_as_group } = ctx;
-        let isolate_net = use_isolated_network(container);
+        let isolate_net = use_isolated_network(container, service_ports);
         let (stdout_r, stdout_w) = nix::unistd::pipe().context("Failed to create stdout pipe")?;
         let (stderr_r, stderr_w) = nix::unistd::pipe().context("Failed to create stderr pipe")?;
 
@@ -556,7 +675,7 @@ impl ProcessSupervisor {
                     published_ports: std::collections::HashMap::new(),
                     isolated_net: isolate_net,
                 };
-                let publish_ports = merge_publish_ports(container, isolate_net);
+                let publish_ports = merge_publish_ports(container, service_ports);
                 let (published_ports, port_publish) =
                     attach_port_publish(pid, &publish_ports);
                 instance.published_ports = published_ports;
@@ -588,12 +707,14 @@ impl ProcessSupervisor {
                     let _ = nix::unistd::dup2_stdin(fd);
                 }
 
-                if let Err(e) =
-                    rootfs::child_enter_ns_root(&rootfs_owned, &volumes, isolate_net)
+                let isolation = match rootfs::child_enter_ns_root(&rootfs_owned, &volumes, isolate_net)
                 {
-                    eprintln!("z8s: root namespace setup failed: {}", e);
-                    std::process::exit(1);
-                }
+                    Ok(i) => i,
+                    Err(e) => {
+                        eprintln!("z8s: root namespace setup failed: {}", e);
+                        std::process::exit(1);
+                    }
+                };
 
                 if let Some(gid) = run_as_group {
                     let _ = nix::unistd::setgid(nix::unistd::Gid::from_raw(gid));
@@ -604,21 +725,13 @@ impl ProcessSupervisor {
 
                 raise_nproc_limit();
 
-                let (exec_path, prog_args) =
-                    rootfs::build_container_argv(&entrypoint_owned, &args_owned, &rootfs_owned);
-                let mut argv: Vec<std::ffi::CString> =
-                    vec![std::ffi::CString::new(exec_path.clone()).unwrap()];
-                for a in &prog_args {
-                    argv.push(std::ffi::CString::new(a.as_str()).unwrap());
-                }
-                let envp: Vec<std::ffi::CString> = env_owned.iter()
-                    .map(|(k, v)| std::ffi::CString::new(format!("{}={}", k, v)).unwrap())
-                    .collect();
-
-                let e = nix::unistd::execvpe(&argv[0], &argv, &envp)
-                    .expect_err("execvpe returned unexpectedly");
-                eprintln!("z8s: execvpe({}) failed: {}", exec_path, e);
-                std::process::exit(1);
+                let (exec_path, prog_args) = Self::argv_for_isolation(
+                    &entrypoint_owned,
+                    &args_owned,
+                    &rootfs_owned,
+                    isolation,
+                );
+                Self::execvpe_container(&exec_path, &prog_args, &env_owned, &rootfs_owned, isolation);
             }
             Err(e) => {
                 drop(stdout_r);
@@ -630,13 +743,58 @@ impl ProcessSupervisor {
         }
     }
 
+    fn argv_for_isolation(
+        entrypoint: &str,
+        args: &[String],
+        rootfs_host_path: &str,
+        isolation: rootfs::RootfsIsolation,
+    ) -> (String, Vec<String>) {
+        if isolation == rootfs::RootfsIsolation::Degraded {
+            rootfs::build_container_argv(entrypoint, args, rootfs_host_path)
+        } else {
+            rootfs::build_container_argv_in_mount_ns(entrypoint, args, rootfs_host_path)
+        }
+    }
+
+    fn execvpe_container(
+        exec_path: &str,
+        prog_args: &[String],
+        env_owned: &[(String, String)],
+        rootfs_host_path: &str,
+        isolation: rootfs::RootfsIsolation,
+    ) -> ! {
+        let envp: Vec<std::ffi::CString> = env_owned
+            .iter()
+            .map(|(k, v)| std::ffi::CString::new(format!("{}={}", k, v)).unwrap())
+            .collect();
+
+        let mut argv: Vec<std::ffi::CString> =
+            vec![std::ffi::CString::new(exec_path).unwrap()];
+        for a in prog_args {
+            argv.push(std::ffi::CString::new(a.as_str()).unwrap());
+        }
+
+        if isolation == rootfs::RootfsIsolation::Degraded {
+            let (loader, args) =
+                rootfs::wrap_dynamic_linker(exec_path, prog_args.to_vec(), rootfs_host_path);
+            argv = vec![std::ffi::CString::new(loader).unwrap()];
+            for a in args {
+                argv.push(std::ffi::CString::new(a).unwrap());
+            }
+        }
+
+        let e = nix::unistd::execvpe(&argv[0], &argv, &envp).expect_err("execvpe returned unexpectedly");
+        eprintln!("z8s: execvpe({}) failed: {}", argv[0].to_str().unwrap_or("?"), e);
+        std::process::exit(1);
+    }
+
     async fn spawn_userns_container(
         &self,
         ctx: ContainerSpawnCtx<'_>,
-        _service_ports: &[u16],
+        service_ports: &[u16],
     ) -> Result<RunningContainer> {
         let ContainerSpawnCtx { entrypoint, cmd_args, env_vars, rootfs_path, container_id, pod_uid, image, container, volumes, run_as_user, run_as_group } = ctx;
-        let isolate_net = use_isolated_network(container);
+        let isolate_net = use_isolated_network(container, service_ports);
         let (stdout_r, stdout_w) = nix::unistd::pipe()
             .context("Failed to create stdout pipe")?;
         let (stderr_r, stderr_w) = nix::unistd::pipe()
@@ -728,7 +886,7 @@ impl ProcessSupervisor {
                     published_ports: std::collections::HashMap::new(),
                     isolated_net: isolate_net,
                 };
-                let publish_ports = merge_publish_ports(container, isolate_net);
+                let publish_ports = merge_publish_ports(container, service_ports);
                 let (published_ports, port_publish) =
                     attach_port_publish(pid, &publish_ports);
                 instance.published_ports = published_ports;
@@ -752,16 +910,19 @@ impl ProcessSupervisor {
                 drop(sync_r);
                 drop(ack_w);
 
-                if let Err(e) = rootfs::child_enter_ns_fork(
+                let isolation = match rootfs::child_enter_ns_fork(
                     &rootfs_owned,
                     sync_w,
                     ack_r,
                     &volumes,
                     isolate_net,
                 ) {
-                    eprintln!("z8s: namespace setup failed: {:#}", e);
-                    std::process::exit(1);
-                }
+                    Ok(i) => i,
+                    Err(e) => {
+                        eprintln!("z8s: namespace setup failed: {:#}", e);
+                        std::process::exit(1);
+                    }
+                };
 
                 nix::unistd::dup2_stdout(&stdout_w).ok();
                 nix::unistd::dup2_stderr(&stderr_w).ok();
@@ -789,21 +950,13 @@ impl ProcessSupervisor {
 
                 raise_nproc_limit();
 
-                let (exec_path, prog_args) =
-                    rootfs::build_container_argv(&entrypoint_owned, &args_owned, &rootfs_owned);
-                let mut argv: Vec<std::ffi::CString> =
-                    vec![std::ffi::CString::new(exec_path.clone()).unwrap()];
-                for a in &prog_args {
-                    argv.push(std::ffi::CString::new(a.as_str()).unwrap());
-                }
-                let envp: Vec<std::ffi::CString> = env_owned.iter()
-                    .map(|(k, v)| std::ffi::CString::new(format!("{}={}", k, v)).unwrap())
-                    .collect();
-
-                let e = nix::unistd::execvpe(&argv[0], &argv, &envp)
-                    .expect_err("execvpe returned unexpectedly");
-                eprintln!("z8s: execvpe({}) failed: {}", exec_path, e);
-                std::process::exit(1);
+                let (exec_path, prog_args) = Self::argv_for_isolation(
+                    &entrypoint_owned,
+                    &args_owned,
+                    &rootfs_owned,
+                    isolation,
+                );
+                Self::execvpe_container(&exec_path, &prog_args, &env_owned, &rootfs_owned, isolation);
             }
             Err(e) => {
                 drop(stdout_r);
@@ -827,7 +980,7 @@ impl ProcessSupervisor {
         image: &str,
         container: &Container,
         env_vars: &[(String, String)],
-        _service_ports: &[u16],
+        service_ports: &[u16],
     ) -> Result<RunningContainer> {
         let pid = child.id().expect("No PID for spawned process");
 
@@ -860,7 +1013,7 @@ impl ProcessSupervisor {
             });
         }
 
-        let isolate_net = use_isolated_network(container);
+        let isolate_net = use_isolated_network(container, service_ports);
         let mut instance = ContainerInstance {
             container_id: container_id.to_string(),
             container_name: container.name.clone(),
@@ -872,7 +1025,7 @@ impl ProcessSupervisor {
             published_ports: std::collections::HashMap::new(),
             isolated_net: isolate_net,
         };
-        let publish_ports = merge_publish_ports(container, isolate_net);
+        let publish_ports = merge_publish_ports(container, service_ports);
         let (published_ports, port_publish) = attach_port_publish(pid, &publish_ports);
         instance.published_ports = published_ports;
 

@@ -51,8 +51,14 @@ impl NetworkManager {
         }
     }
 
-    /// Start or restart the proxy for a service.
+    /// Start or restart ClusterIP/NodePort proxies and reconcile pod port publish for backends.
     pub async fn sync_service(&self, svc: &Service) {
+        self.sync_service_proxies(svc).await;
+        self.supervisor.reconcile_network_for_service(svc).await;
+    }
+
+    /// Bind/rebind proxies only (safe to call from `start_pod` without async recursion).
+    pub async fn sync_service_proxies(&self, svc: &Service) {
         let svc_name = svc.metadata.name.as_deref().unwrap_or_default().to_string();
         let svc_ns = svc.metadata.namespace.as_deref().unwrap_or("default").to_string();
         let key = format!("{}/{}", svc_ns, svc_name);
@@ -163,7 +169,7 @@ impl NetworkManager {
                     continue;
                 }
                 if selector.iter().all(|(k, v)| pod_labels.get(k) == Some(v)) {
-                    self.sync_service(svc).await;
+                    self.sync_service_proxies(svc).await;
                 }
             }
         }

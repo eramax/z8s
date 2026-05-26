@@ -11,6 +11,17 @@ pub fn is_root() -> bool {
     Uid::effective().is_root()
 }
 
+/// How the container process sees its filesystem after setup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootfsIsolation {
+    /// pivot_root into the OCI rootfs (full isolation).
+    Pivot,
+    /// chroot into the OCI rootfs.
+    Chroot,
+    /// User namespace only; process runs on the host mount view.
+    Degraded,
+}
+
 /// Resolve binary path when the process runs on the host mount view (no chroot).
 pub fn resolve_exec_path(entrypoint: &str, rootfs_path: &str) -> String {
     let root = rootfs_path.trim_end_matches('/');
@@ -27,7 +38,7 @@ pub fn resolve_exec_path(entrypoint: &str, rootfs_path: &str) -> String {
 
     for p in candidates {
         let path = std::path::Path::new(&p);
-        if !path.exists() {
+        if !path.exists() && !path.is_symlink() {
             continue;
         }
         if let Ok(target) = std::fs::read_link(path) {
@@ -51,6 +62,97 @@ pub fn resolve_exec_path(entrypoint: &str, rootfs_path: &str) -> String {
     }
 }
 
+/// True when the container process has pivot_root/chroot into its OCI rootfs.
+pub fn container_fs_isolated(container_pid: u32, rootfs_path: &str) -> bool {
+    let root = rootfs_path.trim_end_matches('/');
+    let link = format!("/proc/{container_pid}/root");
+    std::fs::read_link(&link)
+        .ok()
+        .and_then(|p| p.canonicalize().ok())
+        .map(|p| p.to_string_lossy().trim_end_matches('/').to_string())
+        .or_else(|| {
+            std::fs::read_link(&link)
+                .ok()
+                .map(|p| p.to_string_lossy().trim_end_matches('/').to_string())
+        })
+        .map(|target| target == root)
+        .unwrap_or(false)
+}
+
+/// Read the PT_INTERP path from an ELF binary (e.g. `/lib/ld-musl-x86_64.so.1`).
+fn read_elf_interpreter(path: &str) -> Option<String> {
+    let data = std::fs::read(path).ok()?;
+    if data.len() < 64 || data.get(0..4)? != b"\x7fELF" {
+        return None;
+    }
+    let elf_class = *data.get(4)?;
+    let (e_phoff, phentsize, phnum): (usize, usize, usize) = if elf_class == 2 {
+        let e_phoff = u64::from_le_bytes(data.get(32..40)?.try_into().ok()?) as usize;
+        let phentsize = u16::from_le_bytes(data.get(54..56)?.try_into().ok()?) as usize;
+        let phnum = u16::from_le_bytes(data.get(56..58)?.try_into().ok()?) as usize;
+        (e_phoff, phentsize, phnum)
+    } else if elf_class == 1 {
+        let e_phoff = u32::from_le_bytes(data.get(28..32)?.try_into().ok()?) as usize;
+        let phentsize = u16::from_le_bytes(data.get(42..44)?.try_into().ok()?) as usize;
+        let phnum = u16::from_le_bytes(data.get(44..46)?.try_into().ok()?) as usize;
+        (e_phoff, phentsize, phnum)
+    } else {
+        return None;
+    };
+    if phentsize < 8 || e_phoff + phnum.saturating_mul(phentsize) > data.len() {
+        return None;
+    }
+    for i in 0..phnum {
+        let off = e_phoff + i * phentsize;
+        let p_type = u32::from_le_bytes(data.get(off..off + 4)?.try_into().ok()?);
+        if p_type != 3 {
+            continue;
+        }
+        let (p_offset, p_filesz): (usize, usize) = if elf_class == 2 {
+            let p_offset = u64::from_le_bytes(data.get(off + 8..off + 16)?.try_into().ok()?) as usize;
+            let p_filesz = u64::from_le_bytes(data.get(off + 32..off + 40)?.try_into().ok()?) as usize;
+            (p_offset, p_filesz)
+        } else {
+            let p_offset = u32::from_le_bytes(data.get(off + 4..off + 8)?.try_into().ok()?) as usize;
+            let p_filesz = u32::from_le_bytes(data.get(off + 16..off + 20)?.try_into().ok()?) as usize;
+            (p_offset, p_filesz)
+        };
+        if p_filesz == 0 || p_offset + p_filesz > data.len() {
+            return None;
+        }
+        let bytes = &data[p_offset..p_offset + p_filesz];
+        let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+        return Some(String::from_utf8_lossy(&bytes[..end]).into_owned());
+    }
+    None
+}
+
+/// Run a rootfs ELF via its recorded dynamic linker (degraded / host-path exec).
+pub fn wrap_dynamic_linker(
+    exec_path: &str,
+    prog_args: Vec<String>,
+    rootfs_path: &str,
+) -> (String, Vec<String>) {
+    let root = rootfs_path.trim_end_matches('/');
+    if !exec_path.starts_with(root) {
+        return (exec_path.to_string(), prog_args);
+    }
+    let Some(interp) = read_elf_interpreter(exec_path) else {
+        return (exec_path.to_string(), prog_args);
+    };
+    let loader = if interp.starts_with('/') {
+        format!("{root}{interp}")
+    } else {
+        format!("{root}/{interp}")
+    };
+    if !std::path::Path::new(&loader).exists() {
+        return (exec_path.to_string(), prog_args);
+    }
+    let mut args = vec![exec_path.to_string()];
+    args.extend(prog_args);
+    (loader, args)
+}
+
 /// Build exec path and argv (Alpine busybox applets: `sleep` → `busybox sleep …`).
 pub fn build_container_argv(
     entrypoint: &str,
@@ -58,14 +160,47 @@ pub fn build_container_argv(
     rootfs_path: &str,
 ) -> (String, Vec<String>) {
     let exec_path = resolve_exec_path(entrypoint, rootfs_path);
-    let argv = if exec_path.ends_with("/busybox") && !entrypoint.contains("busybox") {
+    let argv = busybox_argv(&exec_path, entrypoint, args);
+    (exec_path, argv)
+}
+
+/// Map a host path under `rootfs_path` to the path seen after setns into the container mount namespace.
+pub fn host_path_in_container_root(host_path: &str, rootfs_path: &str) -> String {
+    let root = rootfs_path.trim_end_matches('/');
+    if let Some(rest) = host_path.strip_prefix(root) {
+        if rest.is_empty() {
+            "/".to_string()
+        } else if rest.starts_with('/') {
+            rest.to_string()
+        } else {
+            format!("/{rest}")
+        }
+    } else if host_path.starts_with('/') {
+        host_path.to_string()
+    } else {
+        format!("/bin/{host_path}")
+    }
+}
+
+/// Paths for exec after setns(CLONE_NEWNS): resolve on the host, execute using in-container paths.
+pub fn build_container_argv_in_mount_ns(
+    entrypoint: &str,
+    args: &[String],
+    rootfs_path: &str,
+) -> (String, Vec<String>) {
+    let (host_exec, argv) = build_container_argv(entrypoint, args, rootfs_path);
+    let exec_path = host_path_in_container_root(&host_exec, rootfs_path);
+    (exec_path, argv)
+}
+
+fn busybox_argv(exec_path: &str, entrypoint: &str, args: &[String]) -> Vec<String> {
+    if exec_path.ends_with("/busybox") && !entrypoint.contains("busybox") {
         let mut v = vec![entrypoint.to_string()];
         v.extend(args.iter().cloned());
         v
     } else {
         args.to_vec()
-    };
-    (exec_path, argv)
+    }
 }
 
 pub fn prepare_rootfs(rootfs_path: &str) -> Result<()> {
@@ -265,7 +400,7 @@ pub fn child_enter_ns_fork(
     ack_r: OwnedFd,
     volumes: &[crate::container::volumes::ResolvedVolume],
     isolate_net: bool,
-) -> Result<()> {
+) -> Result<RootfsIsolation> {
     // Do not include CLONE_NEWPID: Go runtimes (whoami, http-echo) fail to spawn threads
     // with EINVAL in a PID namespace when filesystem isolation falls back to host mounts.
     let mut flags = CloneFlags::CLONE_NEWUSER
@@ -313,14 +448,17 @@ pub fn child_enter_ns_fork(
 
     // Try full isolation: bind mount + pivot_root.
     if enter_rootfs(rootfs_path, false).is_ok() {
-        return Ok(());
+        return Ok(RootfsIsolation::Pivot);
     }
 
     // Fallback 1: chroot (works in some environments without full mount namespace)
     eprintln!("z8s: pivot_root unavailable, trying chroot isolation");
-    if chroot(rootfs_path).is_ok() {
-        chdir("/").context("chdir / after chroot failed")?;
-        return Ok(());
+    match chroot(rootfs_path) {
+        Ok(()) => {
+            chdir("/").context("chdir / after chroot failed")?;
+            return Ok(RootfsIsolation::Chroot);
+        }
+        Err(e) => eprintln!("z8s: chroot({rootfs_path}) failed: {e}"),
     }
 
     // Fallback 2: user-namespace-only isolation (no filesystem isolation).
@@ -332,14 +470,14 @@ pub fn child_enter_ns_fork(
     if !volumes.is_empty() {
         crate::container::volumes::bind_mount_volumes_degraded(volumes);
     }
-    Ok(())
+    Ok(RootfsIsolation::Degraded)
 }
 
 pub fn child_enter_ns_root(
     rootfs_path: &str,
     volumes: &[crate::container::volumes::ResolvedVolume],
     isolate_net: bool,
-) -> Result<()> {
+) -> Result<RootfsIsolation> {
     let mut flags = CloneFlags::CLONE_NEWNS | CloneFlags::CLONE_NEWUTS;
     if isolate_net {
         flags |= CloneFlags::CLONE_NEWNET;
@@ -366,7 +504,8 @@ pub fn child_enter_ns_root(
     chroot(rootfs_path).context("Failed to chroot")?;
     chdir("/").context("Failed to chdir to /")?;
 
-    mount_filesystems_root()
+    mount_filesystems_root()?;
+    Ok(RootfsIsolation::Chroot)
 }
 
 fn enter_rootfs(rootfs_path: &str, is_root: bool) -> Result<()> {

@@ -112,7 +112,13 @@ impl ImageManager {
                     Self::copy_dir(Path::new(&cache_path), Path::new(&container_rootfs))?;
                     Self::copy_oci_config(&cache_path, &container_rootfs);
                     // Backfill OCI config for caches created before we stored Entrypoint/Cmd
-                    if !Path::new(&cache_path).join(OCI_CONFIG_FILE).exists() {
+                    let oci_cfg = Path::new(&cache_path).join(OCI_CONFIG_FILE);
+                    let needs_guess = !oci_cfg.exists()
+                        || crate::container::oci_config::read_image_config(&cache_path)
+                            .entrypoint
+                            .as_ref()
+                            .is_none_or(|ep| ep.is_empty());
+                    if needs_guess {
                         let guessed = crate::container::oci_config::guess_image_config(&cache_path);
                         save_image_config(
                             &cache_path,
@@ -159,10 +165,19 @@ impl ImageManager {
             .as_ref()
             .map(|c| (c.entrypoint.clone(), c.cmd.clone()))
             .unwrap_or((None, None));
+        let needs_guess = image_ep.as_ref().is_none_or(|ep| ep.is_empty());
         save_image_config(&cache_path, image_ep, image_cmd);
 
         for (i, layer) in layers.iter().enumerate() {
             self.unpack_layer(layer, &cache_path, i)?;
+        }
+        if needs_guess {
+            let guessed = crate::container::oci_config::guess_image_config(&cache_path);
+            save_image_config(
+                &cache_path,
+                guessed.entrypoint.clone(),
+                guessed.cmd.clone(),
+            );
         }
         std::fs::write(&cache_meta, image_ref)?;
 

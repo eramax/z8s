@@ -32,6 +32,31 @@ impl PortPublish {
             task.abort();
         }
     }
+
+    /// Publish additional container ports on the same process (e.g. after a Service is applied).
+    pub fn append_ports(&mut self, container_pid: u32, container_ports: &[u16]) {
+        for &cp in container_ports {
+            if self.map.contains_key(&cp) {
+                continue;
+            }
+            let host_port = HOST_PORT_COUNTER.fetch_add(1, Ordering::Relaxed);
+            self.map.insert(cp, host_port);
+            let c = self.cancel.clone();
+            let task = tokio::spawn(async move {
+                if let Err(e) = run_forwarder(host_port, container_pid, cp, c).await {
+                    warn!(
+                        "port forward 127.0.0.1:{} → pid {}:{} stopped: {}",
+                        host_port, container_pid, cp, e
+                    );
+                }
+            });
+            self.tasks.push(task);
+            info!(
+                "Published (late) container port {} → 127.0.0.1:{} (pid {})",
+                cp, host_port, container_pid
+            );
+        }
+    }
 }
 
 impl Drop for PortPublish {
