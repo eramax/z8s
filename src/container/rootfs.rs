@@ -267,12 +267,14 @@ pub fn prepare_rootfs(rootfs_path: &str) -> Result<()> {
             .with_context(|| format!("Failed to create /{} in rootfs", dir))?;
     }
 
+    use std::os::unix::fs::PermissionsExt;
     let dev_nodes: &[&str] = &[
         "null", "zero", "full", "random", "urandom", "tty", "console", "ptmx",
     ];
     for name in dev_nodes {
         let path = rootfs.join("dev").join(name);
         let _ = std::fs::write(&path, []);
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666));
     }
 
     let resolv_conf = rootfs.join("etc/resolv.conf");
@@ -522,14 +524,19 @@ pub fn child_enter_ns_root(
     volumes: &[crate::container::volumes::ResolvedVolume],
     isolate_net: bool,
 ) -> Result<RootfsIsolation> {
+    // Do NOT include CLONE_NEWPID: unshare(CLONE_NEWPID) only affects future fork()s from
+    // this child, not the child itself. The kernel then requires a fresh /proc mount scoped
+    // to the new PID namespace before the exec'd process can fork workers. Without a proper
+    // double-fork / subreaper setup (which requires z8s to be PID 1), multi-process daemons
+    // like nginx get ENOMEM when spawning workers. CLONE_NEWNS + chroot/pivot_root provides
+    // sufficient filesystem isolation without breaking fork() inside the container.
     let mut flags = CloneFlags::CLONE_NEWNS
-        | CloneFlags::CLONE_NEWPID
         | CloneFlags::CLONE_NEWUTS
         | CloneFlags::CLONE_NEWIPC;
     if isolate_net {
         flags |= CloneFlags::CLONE_NEWNET;
     }
-    unshare(flags).context("Failed to unshare mount/pid/uts/ipc")?;
+    unshare(flags).context("Failed to unshare mount/uts/ipc")?;
 
     if isolate_net {
         crate::network::port_publish::setup_loopback();
@@ -686,31 +693,29 @@ fn mount_rootfs_components(
     }
 
     // Bind-mount device nodes from host into rootfs/dev (mknod is blocked in userns)
-    if !is_root {
-        let dev = rootfs.join("dev");
-        std::fs::create_dir_all(&dev).ok();
-        let dev_nodes: &[&str] = &[
-            "null", "zero", "full", "random", "urandom", "tty", "console", "ptmx",
-        ];
-        for name in dev_nodes {
-            let src = Path::new("/dev").join(name);
-            let dst = dev.join(name);
-            if nix::unistd::access(&src, nix::unistd::AccessFlags::R_OK).is_ok() {
-                std::fs::create_dir_all(dst.parent().unwrap()).ok();
-                let _ = mount(
-                    Some(&src),
-                    &dst,
-                    None::<&str>,
-                    MsFlags::MS_BIND,
-                    None::<&str>,
-                );
-            }
+    let dev = rootfs.join("dev");
+    std::fs::create_dir_all(&dev).ok();
+    let dev_nodes: &[&str] = &[
+        "null", "zero", "full", "random", "urandom", "tty", "console", "ptmx",
+    ];
+    for name in dev_nodes {
+        let src = Path::new("/dev").join(name);
+        let dst = dev.join(name);
+        if nix::unistd::access(&src, nix::unistd::AccessFlags::R_OK).is_ok() {
+            std::fs::create_dir_all(dst.parent().unwrap()).ok();
+            let _ = mount(
+                Some(&src),
+                &dst,
+                None::<&str>,
+                MsFlags::MS_BIND,
+                None::<&str>,
+            );
         }
-        let _ = std::os::unix::fs::symlink("/proc/self/fd", dev.join("fd"));
-        let _ = std::os::unix::fs::symlink("/proc/self/fd/0", dev.join("stdin"));
-        let _ = std::os::unix::fs::symlink("/proc/self/fd/1", dev.join("stdout"));
-        let _ = std::os::unix::fs::symlink("/proc/self/fd/2", dev.join("stderr"));
     }
+    let _ = std::os::unix::fs::symlink("/proc/self/fd", dev.join("fd"));
+    let _ = std::os::unix::fs::symlink("/proc/self/fd/0", dev.join("stdin"));
+    let _ = std::os::unix::fs::symlink("/proc/self/fd/1", dev.join("stdout"));
+    let _ = std::os::unix::fs::symlink("/proc/self/fd/2", dev.join("stderr"));
 
     Ok(())
 }
@@ -761,19 +766,8 @@ fn mount_filesystems(is_root: bool) -> Result<()> {
             None::<&str>,
         )
         .context("Failed to mount /sys")?;
-
-        mount(
-            Some("devtmpfs"),
-            "/dev",
-            Some("devtmpfs"),
-            MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
-            None::<&str>,
-        )
-        .context("Failed to mount /dev")?;
     } else {
         // In user namespace: /proc and /sys already bind-mounted before pivot_root.
-        // /dev device nodes were pre-created in prepare_rootfs (outside userns).
-        // No tmpfs mount on /dev — mknod is blocked in user namespaces on this kernel.
     }
 
     mount(

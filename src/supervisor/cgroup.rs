@@ -18,7 +18,18 @@ impl CgroupManager {
             return Ok(Self { base_path, enabled: false });
         }
         match fs::create_dir_all(&base_path) {
-            Ok(_) => Ok(Self { base_path, enabled: true }),
+            Ok(_) => {
+                // Enable controllers so child (pod) cgroups inherit pids, memory, cpu.
+                // Without this subtree_control entry, pids.max won't exist in pod cgroups
+                // and multi-process daemons (e.g. nginx) fail with ENOMEM on fork().
+                let subtree = format!("{}/cgroup.subtree_control", base_path);
+                for ctrl in &["+pids", "+memory", "+cpu"] {
+                    if let Err(e) = fs::write(&subtree, ctrl) {
+                        debug!("Could not enable cgroup controller {} ({}): {}", ctrl, subtree, e);
+                    }
+                }
+                Ok(Self { base_path, enabled: true })
+            }
             Err(e) => {
                 warn!("Cannot write cgroup dir (need root?): {} — running without resource limits", e);
                 Ok(Self { base_path, enabled: false })
@@ -35,6 +46,13 @@ impl CgroupManager {
                 warn!("Cannot create pod cgroup (no root?): {} — continuing without cgroup", e);
                 return Ok(String::new());
             }
+        }
+        // Lift the pids limit so multi-process daemons (nginx workers, etc.) can fork freely.
+        let pids_path = format!("{}/pids.max", cg_path);
+        if let Err(e) = fs::write(&pids_path, "max") {
+            debug!("Could not set pids.max ({}): {} — continuing", pids_path, e);
+        } else {
+            debug!("Set pids.max=max for cgroup {}", cg_path);
         }
         Ok(cg_path)
     }

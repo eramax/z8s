@@ -158,19 +158,50 @@ fn connect_tcp_in_netns(container_pid: u32, port: u16) -> std::io::Result<TcpStr
 
 /// Bring up loopback inside a fresh network namespace.
 pub fn setup_loopback() {
+    info!("Bringing up loopback interface inside network namespace");
+    let mut success = false;
     unsafe {
         let fd = nix::libc::socket(nix::libc::AF_INET, nix::libc::SOCK_DGRAM | nix::libc::SOCK_CLOEXEC, 0);
-        if fd < 0 {
-            return;
+        if fd >= 0 {
+            let mut ifr: nix::libc::ifreq = std::mem::zeroed();
+            std::ptr::copy_nonoverlapping(b"lo\0".as_ptr(), ifr.ifr_name.as_mut_ptr() as *mut u8, 3);
+            if nix::libc::ioctl(fd, nix::libc::SIOCGIFFLAGS, &mut ifr) == 0 {
+                let flags = ifr.ifr_ifru.ifru_flags as i16;
+                ifr.ifr_ifru.ifru_flags =
+                    flags | (nix::libc::IFF_UP as i16) | (nix::libc::IFF_RUNNING as i16);
+                if nix::libc::ioctl(fd, nix::libc::SIOCSIFFLAGS, &mut ifr) == 0 {
+                    success = true;
+                    info!("Successfully brought up loopback via ioctl");
+                } else {
+                    warn!("Failed SIOCSIFFLAGS ioctl: {}", std::io::Error::last_os_error());
+                }
+            } else {
+                warn!("Failed SIOCGIFFLAGS ioctl: {}", std::io::Error::last_os_error());
+            }
+            nix::libc::close(fd);
+        } else {
+            warn!("Failed to open AF_INET socket: {}", std::io::Error::last_os_error());
         }
-        let mut ifr: nix::libc::ifreq = std::mem::zeroed();
-        std::ptr::copy_nonoverlapping(b"lo\0".as_ptr(), ifr.ifr_name.as_mut_ptr() as *mut u8, 3);
-        if nix::libc::ioctl(fd, nix::libc::SIOCGIFFLAGS, &mut ifr) == 0 {
-            let flags = ifr.ifr_ifru.ifru_flags as i16;
-            ifr.ifr_ifru.ifru_flags =
-                flags | (nix::libc::IFF_UP as i16) | (nix::libc::IFF_RUNNING as i16);
-            let _ = nix::libc::ioctl(fd, nix::libc::SIOCSIFFLAGS, &mut ifr);
+    }
+
+    if !success {
+        info!("Attempting fallback loopback activation via ip link set lo up");
+        match std::process::Command::new("ip")
+            .arg("link")
+            .arg("set")
+            .arg("lo")
+            .arg("up")
+            .status()
+        {
+            Ok(status) if status.success() => {
+                info!("Successfully brought up loopback via ip link command");
+            }
+            Ok(status) => {
+                warn!("ip link command exited with non-zero status: {:?}", status.code());
+            }
+            Err(e) => {
+                warn!("Failed to execute ip link command: {}", e);
+            }
         }
-        nix::libc::close(fd);
     }
 }

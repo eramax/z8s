@@ -79,6 +79,14 @@ fn launch_pasta_for_pid(pid: u32) {
     info!("Launching pasta for PID {}", pid);
     match std::process::Command::new("pasta")
         .arg("--quiet")
+        .arg("-t")
+        .arg("none")
+        .arg("-u")
+        .arg("none")
+        .arg("-T")
+        .arg("none")
+        .arg("-U")
+        .arg("none")
         .arg(pid.to_string())
         .status()
     {

@@ -5,7 +5,7 @@
 //!
 //! Options:
 //!   --port <PORT>             API server port            [default: 6443]
-//!   --service-cidr <CIDR>     ClusterIP allocation range  [default: 127.96.0.0/16]
+//!   --service-cidr <CIDR>     ClusterIP allocation range  [default: 10.96.0.0/16]
 //!   --cluster-domain <DOM>    In-cluster DNS domain       [default: cluster.local]
 //!   --dns-port <PORT>         Force DNS port (53 or 5353) [default: auto]
 //!   --manifests-dir <PATH>    Directory to watch          [default: /etc/z8s/manifests]
@@ -65,7 +65,7 @@ impl Config {
     fn default() -> Self {
         Self {
             api_port: 6443,
-            service_cidr_base: [127, 96, 0, 0],
+            service_cidr_base: [10, 96, 0, 0],
             service_cidr_prefix: 16,
             cluster_domain: "cluster.local".to_string(),
             dns_port: None,
@@ -165,7 +165,7 @@ USAGE:
 
 OPTIONS:
     --port <PORT>             API server listen port        [default: 6443]
-    --service-cidr <CIDR>     ClusterIP allocation CIDR     [default: 127.96.0.0/16]
+    --service-cidr <CIDR>     ClusterIP allocation CIDR     [default: 10.96.0.0/16]
     --cluster-domain <DOMAIN> In-cluster DNS search domain  [default: cluster.local]
     --dns-port <PORT>         Force DNS listen port         [default: auto: try 53, then 5353]
     --manifests-dir <PATH>    Manifests directory to watch  [default: /etc/z8s/manifests]
@@ -173,7 +173,7 @@ OPTIONS:
     --help                    Show this help
 
 EXAMPLES:
-    # Default — listens on :6443, ClusterIPs in 127.96.0.0/16
+    # Default — listens on :6443, ClusterIPs in 10.96.0.0/16
     z8s
 
     # Custom port and CIDR
