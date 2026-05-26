@@ -45,6 +45,24 @@ async fn main() -> Result<()> {
         );
     }
 
+    let apparmor_restricted = std::fs::read_to_string(
+        "/proc/sys/kernel/apparmor_restrict_unprivileged_userns",
+    )
+    .ok()
+    .and_then(|s| s.trim().parse::<u32>().ok())
+    .unwrap_or(0)
+        == 1;
+
+    if apparmor_restricted && !crate::container::rootfs::is_root() {
+        warn!(
+            "AppArmor restricts unprivileged user namespaces \
+             (kernel.apparmor_restrict_unprivileged_userns=1). \
+             Containers will run in degraded mode without filesystem isolation. \
+             Run z8s as root, or install the AppArmor profile: \
+             sudo apparmor_parser -r /etc/apparmor.d/z8s"
+        );
+    }
+
     let store = Arc::new(ResourceStore::new());
 
     let cgroup_manager = Arc::new(CgroupManager::new().unwrap_or_else(|e| {

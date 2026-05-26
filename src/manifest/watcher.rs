@@ -32,19 +32,18 @@ impl ManifestWatcher {
             info!("Created manifests directory: {}", self.dir);
             return Ok(());
         }
+        self.load_dir_recursive(dir).await
+    }
 
-        let mut entries = std::fs::read_dir(dir)
-            .context(format!("Failed to read manifests directory: {}", self.dir))?;
-
-        while let Some(entry) = entries.next().transpose()? {
-            let path = entry.path();
-            if path.extension().map_or(false, |e| e == "yaml" || e == "yml") {
-                if let Err(e) = self.process_file(&path).await {
-                    error!("Failed to process {}: {}", path.display(), e);
-                }
+    /// Recursively load all YAML manifests from a directory tree (iterative BFS).
+    async fn load_dir_recursive(&self, root: &Path) -> Result<()> {
+        // Collect yaml paths first (sync traversal), then process async
+        let yaml_paths = collect_yaml_paths(root);
+        for path in yaml_paths {
+            if let Err(e) = self.process_file(&path).await {
+                error!("Failed to process {}: {}", path.display(), e);
             }
         }
-
         Ok(())
     }
 
@@ -97,7 +96,7 @@ impl ManifestWatcher {
         .context("Failed to create file watcher")?;
 
         watcher
-            .watch(Path::new(&dir), RecursiveMode::NonRecursive)
+            .watch(Path::new(&dir), RecursiveMode::Recursive)
             .context(format!("Failed to watch directory: {}", dir))?;
 
         info!("Watching manifests directory: {}", dir);
@@ -157,6 +156,27 @@ impl ManifestWatcher {
 
         Ok(())
     }
+}
+
+/// BFS walk of `root`, collecting paths to all `.yaml`/`.yml` files (skip hidden dirs).
+fn collect_yaml_paths(root: &Path) -> Vec<std::path::PathBuf> {
+    let mut result = Vec::new();
+    let mut dirs = vec![root.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if path.file_name().map_or(false, |n| !n.to_string_lossy().starts_with('.')) {
+                    dirs.push(path);
+                }
+            } else if path.extension().map_or(false, |e| e == "yaml" || e == "yml") {
+                result.push(path);
+            }
+        }
+    }
+    result.sort(); // deterministic order
+    result
 }
 
 fn set_default_namespace(resource: &AnyResource) -> AnyResource {

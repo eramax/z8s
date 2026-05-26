@@ -65,18 +65,38 @@ impl ImageManager {
         }
     }
 
+    /// Recursively copy a directory tree without spawning an external process.
+    /// Preserves permissions and symlinks; skips special files (devices/fifos)
+    /// which require root to create and are not needed for container rootfs copies.
     fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
-        let status = std::process::Command::new("cp")
-            .arg("-a")
-            .arg(src.as_os_str())
-            .arg(dst.as_os_str())
-            .status()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-        if !status.success() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("cp -a failed with {}", status),
-            ));
+        std::fs::create_dir_all(dst)?;
+        if let Ok(m) = std::fs::symlink_metadata(src) {
+            std::fs::set_permissions(dst, m.permissions()).ok();
+        }
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
+            let src_child = entry.path();
+            let dst_child = dst.join(entry.file_name());
+            let meta = std::fs::symlink_metadata(&src_child)?;
+            let ft = meta.file_type();
+            if ft.is_symlink() {
+                let target = std::fs::read_link(&src_child)?;
+                // Remove stale entry at dst so symlink creation succeeds
+                if dst_child.exists() || std::fs::symlink_metadata(&dst_child).is_ok() {
+                    if dst_child.is_dir() {
+                        std::fs::remove_dir_all(&dst_child).ok();
+                    } else {
+                        std::fs::remove_file(&dst_child).ok();
+                    }
+                }
+                std::os::unix::fs::symlink(&target, &dst_child)?;
+            } else if ft.is_dir() {
+                Self::copy_dir(&src_child, &dst_child)?;
+            } else if ft.is_file() {
+                std::fs::copy(&src_child, &dst_child)?;
+                std::fs::set_permissions(&dst_child, meta.permissions()).ok();
+            }
+            // Skip block/char/fifo — not needed for rootfs clones and require root
         }
         Ok(())
     }
@@ -215,9 +235,55 @@ impl ImageManager {
         archive.set_preserve_mtime(true);
         archive.set_preserve_permissions(true);
 
-        archive
-            .unpack(target)
-            .context(format!("Failed to unpack layer {}", index))?;
+        let target_path = Path::new(target);
+
+        // Iterate entry-by-entry so we can handle OCI whiteout files.
+        // Whiteout files encode layer deletions from the overlayfs model:
+        //   .wh.<name>        — delete <name> (file or directory) from lower layers
+        //   .wh..wh..opq      — opaque: delete all non-whiteout children in this dir
+        for entry_result in archive.entries().context(format!("Failed to read layer {} archive", index))? {
+            let mut entry = entry_result
+                .context(format!("Corrupt entry in layer {}", index))?;
+
+            let path = entry.path()
+                .context("Entry has non-UTF8 path")?
+                .into_owned();
+
+            let filename = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+
+            if filename == ".wh..wh..opq" {
+                // Opaque whiteout: clear the directory (except other .wh. markers)
+                let dir = path.parent().map(|p| target_path.join(p)).unwrap_or_else(|| target_path.to_path_buf());
+                if let Ok(children) = std::fs::read_dir(&dir) {
+                    for child in children.flatten() {
+                        if !child.file_name().to_string_lossy().starts_with(".wh.") {
+                            let cp = child.path();
+                            if cp.is_dir() {
+                                std::fs::remove_dir_all(&cp).ok();
+                            } else {
+                                std::fs::remove_file(&cp).ok();
+                            }
+                        }
+                    }
+                }
+            } else if let Some(real_name) = filename.strip_prefix(".wh.") {
+                // File/dir whiteout: delete the named path from lower layers
+                let dir = path.parent().map(|p| target_path.join(p)).unwrap_or_else(|| target_path.to_path_buf());
+                let real = dir.join(real_name);
+                if real.is_dir() {
+                    std::fs::remove_dir_all(&real).ok();
+                } else {
+                    std::fs::remove_file(&real).ok();
+                }
+            } else {
+                // Normal entry: extract relative to target (strips leading '/' for safety)
+                entry.unpack_in(target)
+                    .with_context(|| format!("Failed to unpack {:?} in layer {}", path, index))?;
+            }
+        }
 
         Ok(())
     }

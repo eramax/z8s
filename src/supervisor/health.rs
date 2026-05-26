@@ -35,19 +35,38 @@ impl HealthChecker {
     }
 
     pub async fn check_http(action: &HTTPGetAction, timeout: Duration) -> HealthStatus {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
         let host = action.host.as_deref().unwrap_or("localhost");
         let port = int_or_string_port(&action.port);
         let path = action.path.as_deref().unwrap_or("/");
 
+        // Build host header including custom headers from the probe spec
+        let mut extra_headers = String::new();
+        for h in action.http_headers.as_deref().unwrap_or(&[]) {
+            extra_headers.push_str(&format!("{}: {}\r\n", h.name, h.value));
+        }
+
         let result = tokio::time::timeout(timeout, async {
-            let mut stream = TcpStream::connect(format!("{}:{}", host, port)).await?;
-            let req = format!("GET {} HTTP/1.0\r\nHost: {}\r\nConnection: close\r\n\r\n", path, host);
-            stream.write_all(req.as_bytes()).await?;
-            let mut resp = Vec::with_capacity(16);
-            stream.read_buf(&mut resp).await?;
-            Ok::<bool, std::io::Error>(resp.starts_with(b"HTTP/1") && resp.windows(3).any(|w| w == b"200"))
+            let stream = TcpStream::connect(format!("{}:{}", host, port)).await?;
+            let mut reader = BufReader::new(stream);
+            let req = format!(
+                "GET {} HTTP/1.0\r\nHost: {}\r\nConnection: close\r\n{}\r\n",
+                path, host, extra_headers
+            );
+            reader.get_mut().write_all(req.as_bytes()).await?;
+
+            // Read the status line only — sufficient to determine success/failure
+            let mut status_line = String::new();
+            reader.read_line(&mut status_line).await?;
+
+            // Accept 2xx and 3xx as healthy (matches Kubernetes behaviour)
+            let code: u16 = status_line
+                .split_whitespace()
+                .nth(1)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            Ok::<bool, std::io::Error>(code >= 200 && code < 400)
         })
         .await;
 

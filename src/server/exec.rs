@@ -352,7 +352,7 @@ fn build_command(
     if let Some((root, container_pid)) = rootfs_pid {
         let ns_fds = try_open_namespace_fds(container_pid);
         let fs_isolated = rootfs::container_fs_isolated(container_pid, root);
-        let use_mnt_ns = isolated_net && fs_isolated;
+        let use_mnt_ns = fs_isolated;
         let (exec_path, prog_args) = if use_mnt_ns {
             rootfs::build_container_argv_in_mount_ns(cmd, &args_owned, root)
         } else {

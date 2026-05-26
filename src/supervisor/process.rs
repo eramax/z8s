@@ -172,6 +172,10 @@ impl ProcessSupervisor {
 
         let pod_uid = resource.uid();
         let pod_name = resource.name().to_string();
+
+        // Clean stale emptyDir data from a previous run (e.g. after crash before stop_pod)
+        crate::container::volumes::cleanup_emptydir(&pod_uid);
+
         // Guard against concurrent start by multiple reconcile rounds
         {
             let running = self.running.lock().await;
@@ -619,6 +623,18 @@ impl ProcessSupervisor {
     ) -> Result<RunningContainer> {
         let ContainerSpawnCtx { entrypoint, cmd_args, env_vars, rootfs_path, container_id, pod_uid, image, container, volumes, run_as_user, run_as_group } = ctx;
         let isolate_net = use_isolated_network(container, service_ports);
+        let privileged = container
+            .security_context
+            .as_ref()
+            .and_then(|sc| sc.privileged)
+            .unwrap_or(false);
+        let extra_caps: Vec<String> = container
+            .security_context
+            .as_ref()
+            .and_then(|sc| sc.capabilities.as_ref())
+            .and_then(|c| c.add.as_ref())
+            .cloned()
+            .unwrap_or_default();
         let (stdout_r, stdout_w) = nix::unistd::pipe().context("Failed to create stdout pipe")?;
         let (stderr_r, stderr_w) = nix::unistd::pipe().context("Failed to create stderr pipe")?;
 
@@ -724,6 +740,11 @@ impl ProcessSupervisor {
                 }
 
                 raise_nproc_limit();
+                rootfs::drop_capabilities(privileged, &extra_caps);
+                if isolation != rootfs::RootfsIsolation::Degraded {
+                    rootfs::apply_landlock();
+                }
+                rootfs::apply_seccomp(privileged);
 
                 let (exec_path, prog_args) = Self::argv_for_isolation(
                     &entrypoint_owned,
@@ -795,6 +816,18 @@ impl ProcessSupervisor {
     ) -> Result<RunningContainer> {
         let ContainerSpawnCtx { entrypoint, cmd_args, env_vars, rootfs_path, container_id, pod_uid, image, container, volumes, run_as_user, run_as_group } = ctx;
         let isolate_net = use_isolated_network(container, service_ports);
+        let privileged = container
+            .security_context
+            .as_ref()
+            .and_then(|sc| sc.privileged)
+            .unwrap_or(false);
+        let extra_caps: Vec<String> = container
+            .security_context
+            .as_ref()
+            .and_then(|sc| sc.capabilities.as_ref())
+            .and_then(|c| c.add.as_ref())
+            .cloned()
+            .unwrap_or_default();
         let (stdout_r, stdout_w) = nix::unistd::pipe()
             .context("Failed to create stdout pipe")?;
         let (stderr_r, stderr_w) = nix::unistd::pipe()
@@ -949,6 +982,11 @@ impl ProcessSupervisor {
                 }
 
                 raise_nproc_limit();
+                rootfs::drop_capabilities(privileged, &extra_caps);
+                if isolation != rootfs::RootfsIsolation::Degraded {
+                    rootfs::apply_landlock();
+                }
+                rootfs::apply_seccomp(privileged);
 
                 let (exec_path, prog_args) = Self::argv_for_isolation(
                     &entrypoint_owned,
@@ -1180,7 +1218,10 @@ impl ProcessSupervisor {
     pub async fn stop_pod(&self, resource: &AnyResource) {
         let pod_name = resource.name();
         for container in &extract_containers(resource) {
-            self.stop_container(&format!("{}-{}", pod_name, container.name)).await;
+            let cid = format!("{}-{}", pod_name, container.name);
+            self.stop_container(&cid).await;
+            // Clear restart backoff so the next explicit start begins fresh
+            self.restart_counts.lock().await.remove(&cid);
         }
         let pod_uid = resource.uid();
         self.cgroup_manager.remove_cgroup(&pod_uid).ok();
@@ -1235,6 +1276,18 @@ impl ProcessSupervisor {
 
     pub async fn get_restart_count(&self, container_id: &str) -> u32 {
         self.restart_counts.lock().await.get(container_id).copied().unwrap_or(0)
+    }
+
+    /// Returns restart count per container name for a given pod (strips the pod-name prefix).
+    pub async fn pod_restart_counts(&self, pod_name: &str) -> std::collections::HashMap<String, u32> {
+        let prefix = format!("{}-", pod_name);
+        self.restart_counts.lock().await.iter()
+            .filter(|(k, _)| k.starts_with(&prefix))
+            .map(|(k, &v)| {
+                let cname = k.strip_prefix(&prefix).unwrap_or(k.as_str()).to_string();
+                (cname, v)
+            })
+            .collect()
     }
 
     pub async fn reconcile(&self) {
@@ -1315,15 +1368,32 @@ impl ProcessSupervisor {
             self.running.lock().await.remove(&container_id);
 
             if should_restart {
-                // Increment restart count and let reconcile loop restart via Pending state
                 let mut counts = self.restart_counts.lock().await;
                 let count = counts.entry(container_id.clone()).or_insert(0);
                 *count += 1;
+                let restart_count = *count;
                 drop(counts);
 
                 if !pod_uid.is_empty() {
-                    // Reset to Pending so reconcile restarts the pod
-                    self.store.update_state(&pod_uid, ResourceState::Pending).await;
+                    // Exponential backoff: 0s, 10s, 20s, 40s, … capped at 300s (CrashLoopBackOff)
+                    let delay_secs: u64 = if restart_count <= 1 {
+                        0
+                    } else {
+                        std::cmp::min(10u64 << (restart_count - 2).min(5), 300)
+                    };
+
+                    let store = self.store.clone();
+                    let uid = pod_uid.clone();
+                    tokio::spawn(async move {
+                        if delay_secs > 0 {
+                            info!(
+                                "CrashLoopBackOff: restarting {} in {}s (restart #{})",
+                                uid, delay_secs, restart_count
+                            );
+                            tokio::time::sleep(Duration::from_secs(delay_secs)).await;
+                        }
+                        store.update_state(&uid, ResourceState::Pending).await;
+                    });
                 }
             } else {
                 // No restart — set terminal state

@@ -142,9 +142,14 @@ fn connect_tcp_in_netns(container_pid: u32, port: u16) -> std::io::Result<TcpStr
         nix::sched::setns(&net_fd, CloneFlags::CLONE_NEWNET)
             .map_err(|e| std::io::Error::other(format!("setns net: {e}")))?;
         drop(net_fd);
-        let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port))?;
-        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-        stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+        // Connect with a short timeout; keep the stream non-blocking for tokio.
+        // Do NOT set read/write timeouts — that would break long-lived connections
+        // (WebSockets, streaming logs, kubectl exec).
+        let stream = TcpStream::connect_timeout(
+            &format!("127.0.0.1:{}", port).parse().map_err(std::io::Error::other)?,
+            Duration::from_secs(5),
+        )?;
+        stream.set_nonblocking(true)?;
         Ok(stream)
     })
     .join()

@@ -483,7 +483,10 @@ fn resource_to_pod_json_with_status(
     resource: &AnyResource,
     state: &ResourceState,
     is_ready: bool,
+    restart_counts: &std::collections::HashMap<String, u32>,
 ) -> serde_json::Value {
+    use k8s_openapi::api::core::v1::{ContainerStateTerminated, ContainerStateWaiting};
+
     let pod = match resource {
         AnyResource::Pod(p) => p,
         _ => return serde_json::Value::Null,
@@ -501,10 +504,10 @@ fn resource_to_pod_json_with_status(
 
     let status = PodStatus {
         phase: Some(phase.into()),
-        host_ip: Some("10.0.0.1".into()),
-        host_ips: Some(vec![HostIP { ip: "10.0.0.1".into() }]),
-        pod_ip: Some("10.42.0.1".into()),
-        pod_ips: Some(vec![PodIP { ip: "10.42.0.1".into() }]),
+        host_ip: Some("127.0.0.1".into()),
+        host_ips: Some(vec![HostIP { ip: "127.0.0.1".into() }]),
+        pod_ip: Some("127.0.0.1".into()),
+        pod_ips: Some(vec![PodIP { ip: "127.0.0.1".into() }]),
         start_time: Some(time.clone()),
         conditions: Some(vec![
             pod_condition("Initialized", "True", &time),
@@ -515,24 +518,60 @@ fn resource_to_pod_json_with_status(
         container_statuses: pod.spec.as_ref().map(|s| {
             s.containers
                 .iter()
-                .map(|c| ContainerStatus {
-                    name: c.name.clone(),
-                    image: c.image.clone().unwrap_or_default(),
-                    image_id: c.image.clone().map(|i| format!("z8s://{}", i)).unwrap_or_default(),
-                    ready: is_ready,
-                    restart_count: 0,
-                    container_id: Some(format!("z8s://{}", c.name)),
-                    state: Some(ContainerState {
-                        running: Some(ContainerStateRunning {
-                            started_at: Some(time.clone()),
-                        }),
+                .map(|c| {
+                    let restarts = restart_counts.get(&c.name).copied().unwrap_or(0) as i32;
+                    // CrashLoopBackOff when restarting repeatedly and not currently ready
+                    let crash_loop = restarts >= 3 && !is_ready;
+                    let cstate = Some(match state {
+                        ResourceState::Running if !crash_loop => ContainerState {
+                            running: Some(ContainerStateRunning { started_at: Some(time.clone()) }),
+                            ..Default::default()
+                        },
+                        ResourceState::Succeeded | ResourceState::Terminated => ContainerState {
+                            terminated: Some(ContainerStateTerminated {
+                                exit_code: 0,
+                                reason: Some("Completed".into()),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        },
+                        ResourceState::Failed(msg) => ContainerState {
+                            terminated: Some(ContainerStateTerminated {
+                                exit_code: 1,
+                                reason: Some("Error".into()),
+                                message: Some(msg.clone()),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        },
+                        _ => ContainerState {
+                            waiting: Some(ContainerStateWaiting {
+                                reason: Some(if crash_loop { "CrashLoopBackOff" } else { "ContainerCreating" }.into()),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        },
+                    });
+                    ContainerStatus {
+                        name: c.name.clone(),
+                        image: c.image.clone().unwrap_or_default(),
+                        image_id: c.image.clone().map(|i| format!("z8s://{}", i)).unwrap_or_default(),
+                        ready: is_ready && matches!(state, ResourceState::Running),
+                        restart_count: restarts,
+                        container_id: Some(format!("z8s://{}", c.name)),
+                        state: cstate,
+                        started: Some(matches!(state, ResourceState::Running) && !crash_loop),
                         ..Default::default()
-                    }),
-                    started: Some(true),
-                    ..Default::default()
+                    }
                 })
                 .collect()
         }),
+        message: if let ResourceState::Failed(msg) = state { Some(msg.clone()) } else { None },
+        reason: if restart_counts.values().any(|&v| v >= 3) && !is_ready {
+            Some("CrashLoopBackOff".into())
+        } else {
+            None
+        },
         qos_class: Some("Burstable".into()),
         ..Default::default()
     };
@@ -705,7 +744,8 @@ async fn list_pods_in_ns(
                 }
             }
             let ready = state.supervisor.is_pod_ready(t.resource.name()).await;
-            items.push(resource_to_pod_json_with_status(&t.resource, &t.state, ready));
+            let restarts = state.supervisor.pod_restart_counts(t.resource.name()).await;
+            items.push(resource_to_pod_json_with_status(&t.resource, &t.state, ready, &restarts));
         }
     }
     if accepts_table(&headers) {
@@ -727,7 +767,8 @@ async fn get_pod(
     for t in &trackers {
         if t.resource.namespace() == namespace && t.resource.name() == name {
             let ready = state.supervisor.is_pod_ready(t.resource.name()).await;
-            return Ok(Json(resource_to_pod_json_with_status(&t.resource, &t.state, ready)));
+            let restarts = state.supervisor.pod_restart_counts(t.resource.name()).await;
+            return Ok(Json(resource_to_pod_json_with_status(&t.resource, &t.state, ready, &restarts)));
         }
     }
     Err(ApiError::not_found(format!("pod \"{}\" not found", name)))
@@ -797,7 +838,8 @@ async fn pod_handler(
                 .map(|t| t.state)
                 .unwrap_or(ResourceState::Pending);
             let is_ready = state.supervisor.is_pod_ready(&pod_name).await;
-            Ok(Json(resource_to_pod_json_with_status(&resource, &tracker_state, is_ready)).into_response())
+            let restarts = state.supervisor.pod_restart_counts(&pod_name).await;
+            Ok(Json(resource_to_pod_json_with_status(&resource, &tracker_state, is_ready, &restarts)).into_response())
         }
         _ => Err(ApiError::method_not_allowed("method not allowed".into())),
     }
@@ -853,7 +895,8 @@ async fn create_pod(
         .map(|t| t.state)
         .unwrap_or(ResourceState::Pending);
     let is_ready = state.supervisor.is_pod_ready(resource.name()).await;
-    Ok((StatusCode::CREATED, Json(resource_to_pod_json_with_status(&resource, &tracker_state, is_ready))).into_response())
+    let restarts = state.supervisor.pod_restart_counts(resource.name()).await;
+    Ok((StatusCode::CREATED, Json(resource_to_pod_json_with_status(&resource, &tracker_state, is_ready, &restarts))).into_response())
 }
 
 // ── Deployments ───────────────────────────────────────────────────────────────

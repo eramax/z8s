@@ -4,7 +4,7 @@ use tokio::net::UdpSocket;
 use tracing::{debug, info, warn};
 
 const TTL: u32 = 30;
-const MAX_UDP: usize = 512;
+const MAX_UDP: usize = 4096;
 
 pub async fn run_dns(store: Arc<ResourceStore>) -> Option<u16> {
     for port in [53u16, 5353] {
@@ -148,6 +148,18 @@ fn a_record(name: &str, ip: [u8; 4]) -> Vec<u8> {
     rr
 }
 
+fn cname_record(name: &str, target: &str) -> Vec<u8> {
+    let encoded_target = encode_name(target);
+    let mut rr = Vec::new();
+    rr.extend_from_slice(&encode_name(name));
+    rr.extend_from_slice(&5u16.to_be_bytes());   // TYPE CNAME
+    rr.extend_from_slice(&1u16.to_be_bytes());   // CLASS IN
+    rr.extend_from_slice(&TTL.to_be_bytes());
+    rr.extend_from_slice(&(encoded_target.len() as u16).to_be_bytes());
+    rr.extend_from_slice(&encoded_target);
+    rr
+}
+
 // ── Resolution logic ──────────────────────────────────────────────────────────
 
 async fn handle_query(
@@ -188,14 +200,27 @@ async fn handle_query(
     }
 
     // Try to resolve as a service name
-    if let Some(cluster_ip) = resolve_service(&name, store).await {
-        let ip_bytes = parse_ipv4(&cluster_ip)?;
-        let answers = if qtype == 28 {
-            vec![] // AAAA request — no AAAA, return NOERROR empty
-        } else {
-            vec![a_record(&name, ip_bytes)]
-        };
-        return Some(make_response(id, rd, question_bytes, &answers, 0));
+    match resolve_service(&name, store).await {
+        ServiceResolution::ClusterIP(cluster_ip) => {
+            let ip_bytes = parse_ipv4(&cluster_ip)?;
+            let answers = if qtype == 28 {
+                vec![] // AAAA — no IPv6, NOERROR empty
+            } else {
+                vec![a_record(&name, ip_bytes)]
+            };
+            return Some(make_response(id, rd, question_bytes, &answers, 0));
+        }
+        ServiceResolution::ExternalName(external_name) => {
+            // For ExternalName services return CNAME pointing to external_name.
+            // If it looks like an IP, return it as an A record directly.
+            if let Some(ip_bytes) = parse_ipv4(&external_name) {
+                let answers = if qtype == 28 { vec![] } else { vec![a_record(&name, ip_bytes)] };
+                return Some(make_response(id, rd, question_bytes, &answers, 0));
+            }
+            let answers = if qtype == 28 { vec![] } else { vec![cname_record(&name, &external_name)] };
+            return Some(make_response(id, rd, question_bytes, &answers, 0));
+        }
+        ServiceResolution::None => {}
     }
 
     // Not a service name — forward if RD set, else NXDOMAIN
@@ -206,10 +231,18 @@ async fn handle_query(
     }
 }
 
-/// Resolve a DNS name to a ClusterIP.
-async fn resolve_service(name: &str, store: &ResourceStore) -> Option<String> {
+enum ServiceResolution {
+    ClusterIP(String),
+    ExternalName(String),
+    None,
+}
+
+/// Resolve a DNS name to a service endpoint.
+async fn resolve_service(name: &str, store: &ResourceStore) -> ServiceResolution {
     let name = name.trim_end_matches('.');
-    let (svc_name, ns_hint) = parse_service_name(name)?;
+    let Some((svc_name, ns_hint)) = parse_service_name(name) else {
+        return ServiceResolution::None;
+    };
     let trackers = store.get_by_kind("Service").await;
 
     for t in &trackers {
@@ -226,14 +259,30 @@ async fn resolve_service(name: &str, store: &ResourceStore) -> Option<String> {
                 }
             }
 
-            let ip = svc.spec.as_ref().and_then(|s| s.cluster_ip.as_deref()).unwrap_or("None");
-            if ip == "None" || ip.is_empty() {
-                return None;
+            let spec = match svc.spec.as_ref() {
+                Some(s) => s,
+                None => continue,
+            };
+
+            // ExternalName service — return CNAME to external_name
+            if spec.type_.as_deref() == Some("ExternalName") {
+                if let Some(ext) = spec.external_name.as_deref() {
+                    if !ext.is_empty() {
+                        return ServiceResolution::ExternalName(ext.to_string());
+                    }
+                }
+                return ServiceResolution::None;
             }
-            return Some(ip.to_string());
+
+            // Regular ClusterIP service
+            let ip = spec.cluster_ip.as_deref().unwrap_or("None");
+            if ip == "None" || ip.is_empty() {
+                return ServiceResolution::None;
+            }
+            return ServiceResolution::ClusterIP(ip.to_string());
         }
     }
-    None
+    ServiceResolution::None
 }
 
 /// Parse a DNS name into (service_name, optional_namespace).

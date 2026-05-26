@@ -5,7 +5,7 @@ use nix::sys::stat::{makedev, mknod, Mode, SFlag};
 use nix::unistd::{chdir, chroot, getgid, getuid, pivot_root, Uid};
 use std::os::fd::OwnedFd;
 use std::path::Path;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 pub fn is_root() -> bool {
     Uid::effective().is_root()
@@ -429,16 +429,19 @@ pub fn child_enter_ns_fork(
         anyhow::bail!("child: invalid ack byte: {}", ack[0]);
     }
 
-    // Best-effort: prevent bind-mount propagation back to host.
-    // May be blocked in restricted environments (e.g. nested containers, seccomp).
+    // In user namespaces the kernel marks inherited mounts MNT_LOCKED, so MS_PRIVATE
+    // on "/" fails with EPERM. MS_SLAVE succeeds and is sufficient: it prevents
+    // bind-mounts from propagating to the host peer group while still allowing
+    // mount events to flow inward from the host. make_parent_mount_private() then
+    // makes only the direct parent of rootfs private before we pivot into it.
     if let Err(e) = mount(
         None::<&str>,
         "/",
         None::<&str>,
-        MsFlags::MS_PRIVATE | MsFlags::MS_REC,
+        MsFlags::MS_SLAVE | MsFlags::MS_REC,
         None::<&str>,
     ) {
-        warn!("mount MS_PRIVATE on / failed ({e}) — attempting chroot fallback");
+        warn!("mount MS_SLAVE on / failed ({e}) — attempting chroot fallback");
     }
 
     // Bind-mount pod volumes before pivot_root (host paths are still visible)
@@ -478,11 +481,11 @@ pub fn child_enter_ns_root(
     volumes: &[crate::container::volumes::ResolvedVolume],
     isolate_net: bool,
 ) -> Result<RootfsIsolation> {
-    let mut flags = CloneFlags::CLONE_NEWNS | CloneFlags::CLONE_NEWUTS;
+    let mut flags = CloneFlags::CLONE_NEWNS | CloneFlags::CLONE_NEWUTS | CloneFlags::CLONE_NEWIPC;
     if isolate_net {
         flags |= CloneFlags::CLONE_NEWNET;
     }
-    unshare(flags).context("Failed to unshare mount/uts")?;
+    unshare(flags).context("Failed to unshare mount/uts/ipc")?;
 
     if isolate_net {
         crate::network::port_publish::setup_loopback();
@@ -492,15 +495,22 @@ pub fn child_enter_ns_root(
         None::<&str>,
         "/",
         None::<&str>,
-        MsFlags::MS_PRIVATE | MsFlags::MS_REC,
+        MsFlags::MS_SLAVE | MsFlags::MS_REC,
         None::<&str>,
     )
-    .context("Failed to set private mount propagation")?;
+    .context("Failed to set slave mount propagation")?;
 
     if !volumes.is_empty() {
         crate::container::volumes::bind_mount_volumes(rootfs_path, volumes);
     }
 
+    // Try pivot_root for stronger isolation (is_root=true: mount proc/sys/dev fresh)
+    if enter_rootfs(rootfs_path, true).is_ok() {
+        return Ok(RootfsIsolation::Pivot);
+    }
+
+    // Fallback: chroot
+    warn!("pivot_root failed in root mode, falling back to chroot");
     chroot(rootfs_path).context("Failed to chroot")?;
     chdir("/").context("Failed to chdir to /")?;
 
@@ -508,11 +518,68 @@ pub fn child_enter_ns_root(
     Ok(RootfsIsolation::Chroot)
 }
 
+/// Parse /proc/self/mountinfo to make the parent mount of `rootfs` MS_PRIVATE.
+/// This is required before bind-mounting rootfs so the bind doesn't propagate
+/// to shared peer groups on the host (youki technique for user namespaces).
+fn make_parent_mount_private(rootfs: &Path) -> Result<()> {
+    let mountinfo = std::fs::read_to_string("/proc/self/mountinfo")
+        .context("Failed to read /proc/self/mountinfo")?;
+
+    let rootfs_str = rootfs.to_string_lossy();
+    let mut best_mount: Option<String> = None;
+    let mut best_len: usize = 0;
+    let mut best_is_shared = false;
+
+    for line in mountinfo.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        // Field 5 (0-indexed 4) is the mount point
+        let mount_point = match parts.get(4) {
+            Some(p) => *p,
+            None => continue,
+        };
+
+        let mp = mount_point.trim_end_matches('/');
+        let mp_matches = if mp.is_empty() {
+            rootfs_str.starts_with('/')
+        } else {
+            rootfs_str == mp
+                || rootfs_str.starts_with(&format!("{mp}/"))
+        };
+
+        if mp_matches && mp.len() >= best_len {
+            // Optional fields are everything after field 6 up to the " - " separator
+            let is_shared = if let Some(dash_pos) = line.find(" - ") {
+                line[..dash_pos].split_whitespace().skip(6).any(|f| f.starts_with("shared:"))
+            } else {
+                line.split_whitespace().skip(6).any(|f| f.starts_with("shared:"))
+            };
+
+            best_mount = Some(mount_point.to_string());
+            best_len = mp.len();
+            best_is_shared = is_shared;
+        }
+    }
+
+    if let Some(mp) = best_mount {
+        if best_is_shared {
+            debug!("Making parent mount private: {}", mp);
+            mount(None::<&str>, mp.as_str(), None::<&str>, MsFlags::MS_PRIVATE, None::<&str>)
+                .with_context(|| format!("Failed to make parent mount private: {mp}"))?;
+        }
+    }
+
+    Ok(())
+}
+
 fn enter_rootfs(rootfs_path: &str, is_root: bool) -> Result<()> {
     let rootfs = Path::new(rootfs_path);
     if !rootfs.exists() {
         anyhow::bail!("Rootfs does not exist: {}", rootfs_path);
     }
+
+    // Make parent mount private before binding rootfs so the bind doesn't
+    // propagate to peer groups on the host (required in user namespaces).
+    make_parent_mount_private(rootfs).ok();
 
     mount(
         Some(rootfs),
@@ -739,6 +806,100 @@ fn mount_filesystems_root() -> Result<()> {
 
     info!("Container filesystem mounted (root mode)");
     Ok(())
+}
+
+/// Drop excess capabilities from all 5 cap sets.
+/// Non-privileged containers retain the OCI default cap set plus any caps
+/// listed in `securityContext.capabilities.add` (e.g. ["NET_ADMIN", "SYS_PTRACE"]).
+pub fn drop_capabilities(privileged: bool, extra_caps: &[String]) {
+    if privileged {
+        return;
+    }
+    use caps::{CapSet, Capability};
+    use std::collections::HashSet;
+
+    let mut keep: HashSet<Capability> = [
+        Capability::CAP_CHOWN,
+        Capability::CAP_DAC_OVERRIDE,
+        Capability::CAP_FSETID,
+        Capability::CAP_FOWNER,
+        Capability::CAP_MKNOD,
+        Capability::CAP_NET_RAW,
+        Capability::CAP_SETGID,
+        Capability::CAP_SETUID,
+        Capability::CAP_SETFCAP,
+        Capability::CAP_SETPCAP,
+        Capability::CAP_NET_BIND_SERVICE,
+        Capability::CAP_SYS_CHROOT,
+        Capability::CAP_KILL,
+        Capability::CAP_AUDIT_WRITE,
+    ]
+    .iter()
+    .cloned()
+    .collect();
+
+    // Add capabilities from securityContext.capabilities.add
+    // Kubernetes uses names without the "CAP_" prefix (e.g. "NET_ADMIN")
+    for name in extra_caps {
+        let normalized = if name.to_uppercase().starts_with("CAP_") {
+            name.to_uppercase()
+        } else {
+            format!("CAP_{}", name.to_uppercase())
+        };
+        if let Ok(cap) = normalized.parse::<Capability>() {
+            keep.insert(cap);
+        }
+    }
+
+    for cap in caps::all() {
+        if !keep.contains(&cap) {
+            caps::drop(None, CapSet::Bounding, cap).ok();
+        }
+    }
+
+    let permitted = caps::read(None, CapSet::Permitted).unwrap_or_default();
+    let new_caps: HashSet<Capability> = permitted.into_iter().filter(|c| keep.contains(c)).collect();
+
+    caps::set(None, CapSet::Effective, &new_caps).ok();
+    caps::set(None, CapSet::Permitted, &new_caps).ok();
+    caps::clear(None, CapSet::Inheritable).ok();
+    caps::clear(None, CapSet::Ambient).ok();
+
+    debug!("Capabilities restricted to OCI default set (+{} extra)", extra_caps.len());
+}
+
+/// Restrict the process to its rootfs (now "/") using Linux Landlock LSM.
+/// Best-effort: silently skipped on kernels older than 5.13.
+pub fn apply_landlock() {
+    if let Err(e) = try_apply_landlock() {
+        debug!("Landlock not applied ({})", e);
+    }
+}
+
+fn try_apply_landlock() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    use landlock::{Access, AccessFs, ABI, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr};
+
+    let abi = ABI::V3;
+    let access_fs = AccessFs::from_all(abi);
+
+    Ruleset::default()
+        .handle_access(access_fs)?
+        .create()?
+        .add_rule(PathBeneath::new(PathFd::new("/")?, access_fs))?
+        .restrict_self()?;
+
+    debug!("Landlock filesystem restriction applied");
+    Ok(())
+}
+
+/// Placeholder for seccomp BPF filter application.
+/// Full implementation requires the syscallz crate (libseccomp-dev).
+pub fn apply_seccomp(privileged: bool) {
+    if privileged {
+        return;
+    }
+    // TODO: Phase 1.5 — load etc/seccomp/default.json and apply via libseccomp/syscallz
+    debug!("seccomp: filter not yet applied (deferred to Phase 1.5)");
 }
 
 pub fn setup_exec_mounts(rootfs: &str) -> Result<()> {

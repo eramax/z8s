@@ -327,6 +327,15 @@ pub fn bind_mount_volumes(rootfs_path: &str, volumes: &[ResolvedVolume]) {
         let src = Path::new(&vol.host_path);
         let dst_path = Path::new(&dst);
 
+        // Clean stale entry so create_dir_all / bind-mount don't fail on dangling symlinks
+        if dst_path.exists() || dst_path.is_symlink() {
+            if dst_path.is_symlink() || dst_path.is_file() {
+                std::fs::remove_file(dst_path).ok();
+            } else if dst_path.is_dir() && is_emptydir_host_path(&vol.host_path) {
+                std::fs::remove_dir_all(dst_path).ok();
+            }
+        }
+
         if src.is_dir() {
             std::fs::create_dir_all(dst_path).ok();
         } else if let Some(parent) = dst_path.parent() {
