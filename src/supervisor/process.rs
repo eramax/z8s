@@ -57,6 +57,7 @@ pub struct ProcessSupervisor {
     pub image_manager: Arc<ImageManager>,
     pub cgroup_manager: Arc<CgroupManager>,
     pub store: Arc<ResourceStore>,
+    restart_counts: Arc<Mutex<HashMap<String, u32>>>,
 }
 
 impl ProcessSupervisor {
@@ -76,6 +77,7 @@ impl ProcessSupervisor {
             image_manager,
             cgroup_manager,
             store,
+            restart_counts: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -827,17 +829,25 @@ impl ProcessSupervisor {
         Vec::new()
     }
 
+    pub async fn get_restart_count(&self, container_id: &str) -> u32 {
+        self.restart_counts.lock().await.get(container_id).copied().unwrap_or(0)
+    }
+
     pub async fn reconcile(&self) {
-        self.reap_zombies();
+        let reaped = self.reap_zombies();
+        if !reaped.is_empty() {
+            self.handle_exited_containers(reaped).await;
+        }
         let resources = self.store.get_all().await;
         for tracker in &resources {
             if !matches!(&tracker.resource, AnyResource::Pod(_)) {
                 continue;
             }
             let uid = tracker.resource.uid();
+            let pod_name = tracker.resource.name().to_string();
             let is_running = {
                 let running = self.running.lock().await;
-                running.values().any(|rc| rc.instance.container_id.starts_with(&uid))
+                running.keys().any(|cid| cid.starts_with(&format!("{}-", pod_name)))
             };
             if tracker.state == ResourceState::Pending && !is_running {
                 if let Err(e) = self.start_pod(&tracker.resource).await {
@@ -848,7 +858,86 @@ impl ProcessSupervisor {
         }
     }
 
-    fn reap_zombies(&self) {
+    async fn handle_exited_containers(&self, reaped: Vec<(u32, i32)>) {
+        // Map pid → exit_code for quick lookup
+        let reaped_map: HashMap<u32, i32> = reaped.into_iter().collect();
+
+        // Find containers whose PID was reaped
+        let dead: Vec<(String, u32, i32)> = {
+            let running = self.running.lock().await;
+            running.values()
+                .filter_map(|rc| {
+                    let pid = rc.instance.pid?;
+                    let code = *reaped_map.get(&pid)?;
+                    Some((rc.instance.container_id.clone(), pid, code))
+                })
+                .collect()
+        };
+
+        for (container_id, pid, exit_code) in dead {
+            let trackers = self.store.get_all().await;
+            // Find the pod whose name is a prefix of this container_id
+            let pod_tracker = trackers.iter().find(|t| {
+                if !matches!(&t.resource, AnyResource::Pod(_)) { return false; }
+                let pod_name = t.resource.name();
+                container_id.starts_with(&format!("{}-", pod_name))
+            });
+
+            let restart_policy = pod_tracker
+                .and_then(|t| {
+                    if let AnyResource::Pod(pod) = &t.resource {
+                        pod.spec.as_ref()?.restart_policy.clone()
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_else(|| "Always".to_string());
+
+            let pod_uid = pod_tracker.map(|t| t.resource.uid()).unwrap_or_default();
+
+            let should_restart = match restart_policy.as_str() {
+                "Always" => true,
+                "OnFailure" => exit_code != 0,
+                "Never" => false,
+                _ => true,
+            };
+
+            info!(
+                "Container {} (PID {}) exited with code {}; restartPolicy={}, restart={}",
+                container_id, pid, exit_code, restart_policy, should_restart
+            );
+
+            // Remove dead container from running map
+            self.running.lock().await.remove(&container_id);
+
+            if should_restart {
+                // Increment restart count and let reconcile loop restart via Pending state
+                let mut counts = self.restart_counts.lock().await;
+                let count = counts.entry(container_id.clone()).or_insert(0);
+                *count += 1;
+                drop(counts);
+
+                if !pod_uid.is_empty() {
+                    // Reset to Pending so reconcile restarts the pod
+                    self.store.update_state(&pod_uid, ResourceState::Pending).await;
+                }
+            } else {
+                // No restart — set terminal state
+                if !pod_uid.is_empty() {
+                    if exit_code == 0 {
+                        self.store.update_state(&pod_uid, ResourceState::Succeeded).await;
+                    } else {
+                        self.store
+                            .update_state(&pod_uid, ResourceState::Failed(format!("exit code {}", exit_code)))
+                            .await;
+                    }
+                }
+            }
+        }
+    }
+
+    fn reap_zombies(&self) -> Vec<(u32, i32)> {
+        let mut reaped = Vec::new();
         loop {
             match nix::sys::wait::waitpid(
                 nix::unistd::Pid::from_raw(-1),
@@ -856,14 +945,17 @@ impl ProcessSupervisor {
             ) {
                 Ok(nix::sys::wait::WaitStatus::Exited(pid, status)) => {
                     info!("Reaped zombie child {} (exit code {})", pid, status);
+                    reaped.push((pid.as_raw() as u32, status));
                 }
                 Ok(nix::sys::wait::WaitStatus::Signaled(pid, sig, _)) => {
                     info!("Reaped zombie child {} (signal {:?})", pid, sig);
+                    reaped.push((pid.as_raw() as u32, -(sig as i32)));
                 }
                 Ok(nix::sys::wait::WaitStatus::StillAlive) => break,
                 Err(nix::errno::Errno::ECHILD) => break,
                 _ => break,
             }
         }
+        reaped
     }
 }

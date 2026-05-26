@@ -65,6 +65,7 @@ impl AnyResource {
 pub enum ResourceState {
     Pending,
     Running,
+    Succeeded,
     Failed(String),
     Terminated,
 }

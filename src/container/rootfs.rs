@@ -31,19 +31,21 @@ pub fn prepare_rootfs(rootfs_path: &str) -> Result<()> {
     }
 
     let resolv_conf = rootfs.join("etc/resolv.conf");
-    if !resolv_conf.exists() {
+    let content = if crate::network::dns_port().is_some() {
+        "nameserver 127.0.0.1\nsearch default.svc.cluster.local svc.cluster.local cluster.local\noptions ndots:5\n".to_string()
+    } else {
         let host_resolv = std::fs::read_to_string("/etc/resolv.conf").unwrap_or_default();
-        let content = if host_resolv.trim().is_empty()
+        if host_resolv.trim().is_empty()
             || host_resolv.contains("127.0.0.53")
             || host_resolv.contains("systemd-resolved")
         {
             "nameserver 1.1.1.1\nnameserver 8.8.8.8\n".to_string()
         } else {
             host_resolv
-        };
-        std::fs::write(&resolv_conf, content)
-            .context("Failed to write /etc/resolv.conf")?;
-    }
+        }
+    };
+    std::fs::write(&resolv_conf, content)
+        .context("Failed to write /etc/resolv.conf")?;
 
     let hosts = rootfs.join("etc/hosts");
     if !hosts.exists() {
@@ -510,23 +512,19 @@ pub fn setup_exec_mounts(rootfs: &str) -> Result<()> {
     let etc_path = root_path.join("etc");
     let _ = std::fs::create_dir_all(&etc_path);
     let resolv = etc_path.join("resolv.conf");
-    let existing = std::fs::read_to_string(&resolv).unwrap_or_default();
-    if existing.trim().is_empty()
-        || existing.contains("127.0.0.53")
-        || existing.contains("systemd-resolved")
-    {
+    let content = if crate::network::dns_port().is_some() {
+        "nameserver 127.0.0.1\nsearch default.svc.cluster.local svc.cluster.local cluster.local\noptions ndots:5\n".to_string()
+    } else {
         let host_resolv = std::fs::read_to_string("/etc/resolv.conf").unwrap_or_else(|_| {
             "nameserver 1.1.1.1\nnameserver 8.8.8.8\n".to_string()
         });
-        let content = if host_resolv.contains("127.0.0.53")
-            || host_resolv.contains("systemd-resolved")
-        {
+        if host_resolv.contains("127.0.0.53") || host_resolv.contains("systemd-resolved") {
             "nameserver 1.1.1.1\nnameserver 8.8.8.8\n".to_string()
         } else {
             host_resolv
-        };
-        let _ = std::fs::write(&resolv, content);
-    }
+        }
+    };
+    let _ = std::fs::write(&resolv, content);
 
     Ok(())
 }

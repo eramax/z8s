@@ -470,6 +470,7 @@ fn resource_to_pod_json_with_status(
     let phase = match state {
         ResourceState::Pending => "Pending",
         ResourceState::Running => "Running",
+        ResourceState::Succeeded => "Succeeded",
         ResourceState::Failed(_) => "Failed",
         ResourceState::Terminated => "Succeeded",
     };

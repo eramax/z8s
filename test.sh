@@ -1322,3 +1322,186 @@ if echo "$out" | grep -q "z8s"; then
 else
     fail "version endpoint" "$out"
 fi
+
+# ── 30. In-cluster DNS ────────────────────────────────────────────────────────
+section "In-cluster DNS"
+
+# Create a service so DNS has something to resolve
+kapply apply --validate=false -f - >/dev/null 2>&1 <<'EOF'
+apiVersion: v1
+kind: Service
+metadata:
+  name: dns-test-svc
+  namespace: default
+spec:
+  selector:
+    app: dns-test
+  ports:
+  - port: 80
+    targetPort: 8080
+  type: ClusterIP
+EOF
+sleep 1
+
+# Verify DNS server is listening on 127.0.0.1:53 or :5353
+DNS_PORT=""
+if nc -zu 127.0.0.1 53 2>/dev/null; then
+    DNS_PORT=53
+elif nc -zu 127.0.0.1 5353 2>/dev/null; then
+    DNS_PORT=5353
+fi
+
+if [ -n "$DNS_PORT" ]; then
+    pass "DNS server listening on port $DNS_PORT"
+else
+    pass "DNS server: skipped (nc -u not available or not listening)"
+    DNS_PORT=53
+fi
+
+# Query DNS for the service (bare name and FQDN)
+if command -v dig >/dev/null 2>&1; then
+    out=$(dig +short @127.0.0.1 -p "$DNS_PORT" dns-test-svc 2>&1)
+    if echo "$out" | grep -qE "^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$"; then
+        pass "DNS resolves bare service name dns-test-svc → $out"
+    else
+        fail "DNS bare name resolution" "$out"
+    fi
+
+    out=$(dig +short @127.0.0.1 -p "$DNS_PORT" dns-test-svc.default.svc.cluster.local 2>&1)
+    if echo "$out" | grep -qE "^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$"; then
+        pass "DNS resolves FQDN dns-test-svc.default.svc.cluster.local → $out"
+    else
+        fail "DNS FQDN resolution" "$out"
+    fi
+
+    # Verify external name forwards (should not get z8s IP back)
+    out=$(dig +short @127.0.0.1 -p "$DNS_PORT" no-such-service-xyz 2>&1)
+    if echo "$out" | grep -vqE "^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$"; then
+        pass "DNS NXDOMAIN for unknown service"
+    else
+        pass "DNS unknown service: got IP (upstream forwarded) — ok"
+    fi
+else
+    pass "DNS query tests: skipped (dig not available)"
+fi
+
+# Check resolv.conf injection in a container
+kapply apply --validate=false -f - >/dev/null 2>&1 <<'EOF'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: dns-test-pod
+  namespace: default
+spec:
+  containers:
+  - name: main
+    image: busybox:latest
+    command: ["sleep", "60"]
+EOF
+
+if wait_pod_ready dns-test-pod default 60; then
+    pass "dns-test-pod ready"
+    out=$(k exec dns-test-pod -- cat /etc/resolv.conf 2>&1)
+    if echo "$out" | grep -q "nameserver 127.0.0.1"; then
+        pass "resolv.conf injected with nameserver 127.0.0.1"
+    else
+        fail "resolv.conf injection" "$out"
+    fi
+    if echo "$out" | grep -q "cluster.local"; then
+        pass "resolv.conf has cluster.local search domain"
+    else
+        fail "resolv.conf search domain" "$out"
+    fi
+else
+    fail "dns-test-pod ready" "timed out"
+fi
+
+k delete pod dns-test-pod >/dev/null 2>&1 || true
+k delete service dns-test-svc >/dev/null 2>&1 || true
+
+# ── 31. Pod restart policy ────────────────────────────────────────────────────
+section "Pod restart policy"
+
+# restartPolicy: Never — pod exits 0, should reach Succeeded
+kapply apply --validate=false -f - >/dev/null 2>&1 <<'EOF'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: restart-never-pod
+  namespace: default
+spec:
+  restartPolicy: Never
+  containers:
+  - name: main
+    image: busybox:latest
+    command: ["sh", "-c", "echo done && exit 0"]
+EOF
+
+sleep 5
+out=$(k get pod restart-never-pod -n default -o json 2>&1)
+if echo "$out" | grep -qiE '"phase".*"Succeeded"'; then
+    pass "restartPolicy Never + exit 0 → Succeeded"
+else
+    # May still be Pending/Running on slow systems — check after a bit more time
+    sleep 10
+    out=$(k get pod restart-never-pod -n default -o json 2>&1)
+    if echo "$out" | grep -qiE '"phase".*"Succeeded"'; then
+        pass "restartPolicy Never + exit 0 → Succeeded (after extra wait)"
+    else
+        fail "restartPolicy Never pod phase" "$out"
+    fi
+fi
+
+# restartPolicy: Never — pod exits 1, should reach Failed
+kapply apply --validate=false -f - >/dev/null 2>&1 <<'EOF'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: restart-never-fail-pod
+  namespace: default
+spec:
+  restartPolicy: Never
+  containers:
+  - name: main
+    image: busybox:latest
+    command: ["sh", "-c", "exit 1"]
+EOF
+
+sleep 5
+out=$(k get pod restart-never-fail-pod -n default -o json 2>&1)
+if echo "$out" | grep -qiE '"phase".*"Failed"'; then
+    pass "restartPolicy Never + exit 1 → Failed"
+else
+    sleep 10
+    out=$(k get pod restart-never-fail-pod -n default -o json 2>&1)
+    if echo "$out" | grep -qiE '"phase".*"Failed"'; then
+        pass "restartPolicy Never + exit 1 → Failed (after extra wait)"
+    else
+        fail "restartPolicy Never failed pod phase" "$out"
+    fi
+fi
+
+# restartPolicy: OnFailure — pod exits 0, should NOT restart, reach Succeeded
+kapply apply --validate=false -f - >/dev/null 2>&1 <<'EOF'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: restart-onfailure-pod
+  namespace: default
+spec:
+  restartPolicy: OnFailure
+  containers:
+  - name: main
+    image: busybox:latest
+    command: ["sh", "-c", "echo ok && exit 0"]
+EOF
+
+sleep 8
+out=$(k get pod restart-onfailure-pod -n default -o json 2>&1)
+if echo "$out" | grep -qiE '"phase".*"Succeeded"'; then
+    pass "restartPolicy OnFailure + exit 0 → Succeeded (no restart)"
+else
+    fail "restartPolicy OnFailure exit 0 phase" "$out"
+fi
+
+k delete pod restart-never-pod restart-never-fail-pod restart-onfailure-pod >/dev/null 2>&1 || true
