@@ -23,6 +23,9 @@ chrono = "0.4"
 axum = { version = "0.8", default-features = false, features = ["json", "tokio", "http1", "ws", "query"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+
 [profile.release]
 opt-level = "z"
 lto = true

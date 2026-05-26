@@ -72,11 +72,11 @@ pub struct AppState {
     pub events: EventStore,
 }
 
-pub async fn run_server(
+pub async fn build_app_state(
     store: Arc<ResourceStore>,
     supervisor: Arc<ProcessSupervisor>,
     network: Arc<crate::network::NetworkManager>,
-) {
+) -> AppState {
     let namespaces: NamespaceStore = Arc::new(RwLock::new(HashMap::new()));
     {
         let mut ns = namespaces.write().await;
@@ -97,9 +97,11 @@ pub async fn run_server(
         ));
     }
 
-    let state = AppState { store, supervisor, network, namespaces, events };
+    AppState { store, supervisor, network, namespaces, events }
+}
 
-    let app = Router::new()
+pub fn build_router(state: AppState) -> Router {
+    Router::new()
         .route("/", get(root_handler))
         .route("/api", get(api_versions))
         .route("/api/v1", get(api_v1_resources))
@@ -170,8 +172,16 @@ pub async fn run_server(
         .route("/readyz", get(readyz))
         .route("/livez", get(livez))
         .fallback(fallback_handler)
-        .with_state(state);
+        .with_state(state)
+}
 
+pub async fn run_server(
+    store: Arc<ResourceStore>,
+    supervisor: Arc<ProcessSupervisor>,
+    network: Arc<crate::network::NetworkManager>,
+) {
+    let state = build_app_state(store, supervisor, network).await;
+    let app = build_router(state);
     let addr = format!("0.0.0.0:{}", Z8S_PORT);
     info!("Starting k8s API server on {}", addr);
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
@@ -2115,4 +2125,364 @@ async fn delete_pvc(
         }
     }
     Err(ApiError::not_found(format!("persistentvolumeclaim \"{}/{}\" not found", namespace, name)))
+}
+
+// ── E2E tests ─────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt; // oneshot
+
+    async fn make_app() -> axum::Router {
+        let store = Arc::new(ResourceStore::new());
+        let cgroup = Arc::new(
+            crate::supervisor::cgroup::CgroupManager::new()
+                .unwrap_or_else(|_| crate::supervisor::cgroup::CgroupManager::new().unwrap()),
+        );
+        let image = Arc::new(
+            crate::container::image::ImageManager::new()
+                .unwrap_or_else(|_| crate::container::image::ImageManager::new().unwrap()),
+        );
+        let supervisor = Arc::new(crate::supervisor::process::ProcessSupervisor::new(
+            image, cgroup, store.clone(),
+        ));
+        let network = Arc::new(crate::network::NetworkManager::new(
+            store.clone(),
+            supervisor.clone(),
+        ));
+        let state = build_app_state(store, supervisor, network).await;
+        build_router(state)
+    }
+
+    async fn make_app_with_store() -> (axum::Router, Arc<ResourceStore>) {
+        let store = Arc::new(ResourceStore::new());
+        let cgroup = Arc::new(
+            crate::supervisor::cgroup::CgroupManager::new()
+                .unwrap_or_else(|_| crate::supervisor::cgroup::CgroupManager::new().unwrap()),
+        );
+        let image = Arc::new(
+            crate::container::image::ImageManager::new()
+                .unwrap_or_else(|_| crate::container::image::ImageManager::new().unwrap()),
+        );
+        let supervisor = Arc::new(crate::supervisor::process::ProcessSupervisor::new(
+            image, cgroup, store.clone(),
+        ));
+        let network = Arc::new(crate::network::NetworkManager::new(
+            store.clone(),
+            supervisor.clone(),
+        ));
+        let state = build_app_state(store.clone(), supervisor, network).await;
+        (build_router(state), store)
+    }
+
+    fn json_body(body: &str) -> Body {
+        Body::from(body.to_string())
+    }
+
+    // ── Health endpoints ──────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn healthz_returns_ok() {
+        let app = make_app().await;
+        let resp = app
+            .oneshot(Request::builder().uri("/healthz").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn readyz_returns_ok() {
+        let app = make_app().await;
+        let resp = app
+            .oneshot(Request::builder().uri("/readyz").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn version_returns_json() {
+        let app = make_app().await;
+        let resp = app
+            .oneshot(Request::builder().uri("/version").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(v.get("gitVersion").is_some());
+    }
+
+    // ── ConfigMap CRUD ────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn create_and_get_configmap() {
+        let app = make_app().await;
+        let cm_json = r#"{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"test-cm","namespace":"default"},"data":{"key":"value"}}"#;
+
+        let (app, _) = make_app_with_store().await;
+
+        let create_resp = app.clone()
+            .oneshot(Request::builder()
+                .method("POST")
+                .uri("/api/v1/namespaces/default/configmaps")
+                .header("content-type", "application/json")
+                .body(json_body(cm_json))
+                .unwrap())
+            .await
+            .unwrap();
+        assert!(
+            create_resp.status() == StatusCode::CREATED || create_resp.status() == StatusCode::OK,
+            "expected 201 or 200, got {}",
+            create_resp.status()
+        );
+
+        let get_resp = app
+            .oneshot(Request::builder()
+                .uri("/api/v1/namespaces/default/configmaps/test-cm")
+                .body(Body::empty())
+                .unwrap())
+            .await
+            .unwrap();
+        assert_eq!(get_resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(get_resp.into_body(), usize::MAX).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["metadata"]["name"], "test-cm");
+        assert_eq!(v["data"]["key"], "value");
+    }
+
+    #[tokio::test]
+    async fn get_nonexistent_configmap_returns_404() {
+        let app = make_app().await;
+        let resp = app
+            .oneshot(Request::builder()
+                .uri("/api/v1/namespaces/default/configmaps/missing")
+                .body(Body::empty())
+                .unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn configmaps_in_different_namespaces_do_not_collide() {
+        let (app, store) = make_app_with_store().await;
+
+        // Apply both directly via store
+        let cm_a: ConfigMap = serde_json::from_value(serde_json::json!({
+            "apiVersion": "v1", "kind": "ConfigMap",
+            "metadata": {"name": "shared", "namespace": "ns-a"},
+            "data": {"env": "production"}
+        })).unwrap();
+        let cm_b: ConfigMap = serde_json::from_value(serde_json::json!({
+            "apiVersion": "v1", "kind": "ConfigMap",
+            "metadata": {"name": "shared", "namespace": "ns-b"},
+            "data": {"env": "staging"}
+        })).unwrap();
+        store.apply(AnyResource::ConfigMap(cm_a)).await.unwrap();
+        store.apply(AnyResource::ConfigMap(cm_b)).await.unwrap();
+
+        let all = store.get_by_kind("ConfigMap").await;
+        assert_eq!(all.len(), 2, "both configmaps must coexist in store");
+
+        let resp_a = app.clone()
+            .oneshot(Request::builder()
+                .uri("/api/v1/namespaces/ns-a/configmaps/shared")
+                .body(Body::empty()).unwrap())
+            .await.unwrap();
+        assert_eq!(resp_a.status(), StatusCode::OK);
+        let body_a = axum::body::to_bytes(resp_a.into_body(), usize::MAX).await.unwrap();
+        let v_a: serde_json::Value = serde_json::from_slice(&body_a).unwrap();
+        assert_eq!(v_a["data"]["env"], "production");
+
+        let resp_b = app
+            .oneshot(Request::builder()
+                .uri("/api/v1/namespaces/ns-b/configmaps/shared")
+                .body(Body::empty()).unwrap())
+            .await.unwrap();
+        assert_eq!(resp_b.status(), StatusCode::OK);
+        let body_b = axum::body::to_bytes(resp_b.into_body(), usize::MAX).await.unwrap();
+        let v_b: serde_json::Value = serde_json::from_slice(&body_b).unwrap();
+        assert_eq!(v_b["data"]["env"], "staging");
+    }
+
+    // ── Label selectors ───────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn label_selector_filters_pods() {
+        let (app, store) = make_app_with_store().await;
+
+        // Insert two pods with different labels directly into store
+        let pod_a: k8s_openapi::api::core::v1::Pod = serde_json::from_value(serde_json::json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "pod-a", "namespace": "default", "labels": {"app": "web"}},
+            "spec": {"containers": [{"name": "c", "image": "alpine"}]}
+        })).unwrap();
+        let pod_b: k8s_openapi::api::core::v1::Pod = serde_json::from_value(serde_json::json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "pod-b", "namespace": "default", "labels": {"app": "db"}},
+            "spec": {"containers": [{"name": "c", "image": "postgres"}]}
+        })).unwrap();
+        store.apply(AnyResource::Pod(pod_a)).await.unwrap();
+        store.apply(AnyResource::Pod(pod_b)).await.unwrap();
+
+        // No selector — should return both
+        let resp = app.clone()
+            .oneshot(Request::builder()
+                .uri("/api/v1/namespaces/default/pods")
+                .body(Body::empty()).unwrap())
+            .await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["items"].as_array().unwrap().len(), 2);
+
+        // Selector app=web — should return only pod-a
+        let resp = app
+            .oneshot(Request::builder()
+                .uri("/api/v1/namespaces/default/pods?labelSelector=app%3Dweb")
+                .body(Body::empty()).unwrap())
+            .await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let items = v["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["metadata"]["name"], "pod-a");
+    }
+
+    // ── Service creation + targetPort default ─────────────────────────────────
+
+    #[tokio::test]
+    async fn create_service_defaults_target_port() {
+        let app = make_app().await;
+        let svc_json = r#"{"apiVersion":"v1","kind":"Service","metadata":{"name":"my-svc","namespace":"default"},"spec":{"selector":{"app":"web"},"ports":[{"port":80,"protocol":"TCP"}]}}"#;
+
+        let resp = app.clone()
+            .oneshot(Request::builder()
+                .method("POST")
+                .uri("/api/v1/namespaces/default/services")
+                .header("content-type", "application/json")
+                .body(json_body(svc_json))
+                .unwrap())
+            .await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        // targetPort should be set to 80
+        let target_port = &v["spec"]["ports"][0]["targetPort"];
+        assert!(!target_port.is_null(), "targetPort should not be null");
+    }
+
+    #[tokio::test]
+    async fn list_services_returns_service_list_kind() {
+        let app = make_app().await;
+        let resp = app
+            .oneshot(Request::builder()
+                .uri("/api/v1/namespaces/default/services")
+                .body(Body::empty()).unwrap())
+            .await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["kind"], "ServiceList");
+    }
+
+    // ── PV / PVC ──────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn create_and_list_pv() {
+        let app = make_app().await;
+        let pv_json = r#"{"apiVersion":"v1","kind":"PersistentVolume","metadata":{"name":"pv1"},"spec":{"capacity":{"storage":"5Gi"},"accessModes":["ReadWriteOnce"],"hostPath":{"path":"/data"}}}"#;
+
+        let resp = app.clone()
+            .oneshot(Request::builder()
+                .method("POST")
+                .uri("/api/v1/persistentvolumes")
+                .header("content-type", "application/json")
+                .body(json_body(pv_json))
+                .unwrap())
+            .await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let resp = app
+            .oneshot(Request::builder()
+                .uri("/api/v1/persistentvolumes")
+                .body(Body::empty()).unwrap())
+            .await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["kind"], "PersistentVolumeList");
+        assert_eq!(v["items"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn create_and_list_pvc() {
+        let app = make_app().await;
+        let pvc_json = r#"{"apiVersion":"v1","kind":"PersistentVolumeClaim","metadata":{"name":"pvc1","namespace":"default"},"spec":{"accessModes":["ReadWriteOnce"],"resources":{"requests":{"storage":"1Gi"}}}}"#;
+
+        let resp = app.clone()
+            .oneshot(Request::builder()
+                .method("POST")
+                .uri("/api/v1/namespaces/default/persistentvolumeclaims")
+                .header("content-type", "application/json")
+                .body(json_body(pvc_json))
+                .unwrap())
+            .await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let resp = app
+            .oneshot(Request::builder()
+                .uri("/api/v1/namespaces/default/persistentvolumeclaims")
+                .body(Body::empty()).unwrap())
+            .await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["kind"], "PersistentVolumeClaimList");
+        assert_eq!(v["items"].as_array().unwrap().len(), 1);
+    }
+
+    // ── Namespace isolation (API endpoint) ────────────────────────────────────
+
+    #[tokio::test]
+    async fn list_pods_scoped_to_namespace() {
+        let (app, store) = make_app_with_store().await;
+
+        let pod_default: k8s_openapi::api::core::v1::Pod = serde_json::from_value(serde_json::json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "p1", "namespace": "default"},
+            "spec": {"containers": [{"name": "c", "image": "alpine"}]}
+        })).unwrap();
+        let pod_other: k8s_openapi::api::core::v1::Pod = serde_json::from_value(serde_json::json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "p2", "namespace": "other"},
+            "spec": {"containers": [{"name": "c", "image": "alpine"}]}
+        })).unwrap();
+        store.apply(AnyResource::Pod(pod_default)).await.unwrap();
+        store.apply(AnyResource::Pod(pod_other)).await.unwrap();
+
+        let resp = app
+            .oneshot(Request::builder()
+                .uri("/api/v1/namespaces/default/pods")
+                .body(Body::empty()).unwrap())
+            .await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let items = v["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["metadata"]["name"], "p1");
+    }
+
+    // ── Fallback / 404 ────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn unknown_route_returns_404() {
+        let app = make_app().await;
+        let resp = app
+            .oneshot(Request::builder().uri("/not/a/real/path").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
 }
