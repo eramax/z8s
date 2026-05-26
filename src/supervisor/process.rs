@@ -75,6 +75,26 @@ fn attach_port_publish(
     (publish.map.clone(), Some(publish))
 }
 
+fn launch_pasta_for_pid(pid: u32) {
+    info!("Launching pasta for PID {}", pid);
+    match std::process::Command::new("pasta")
+        .arg("--quiet")
+        .arg(pid.to_string())
+        .status()
+    {
+        Ok(status) => {
+            if status.success() {
+                info!("Successfully configured pasta networking for PID {}", pid);
+            } else {
+                warn!("pasta command exited with non-zero status for PID {}", pid);
+            }
+        }
+        Err(e) => {
+            warn!("Failed to launch pasta for PID {}: {}", pid, e);
+        }
+    }
+}
+
 fn resolve_run_as_group(pod_sc: Option<&PodSecurityContext>, container: &Container) -> Option<u32> {
     container
         .security_context
@@ -676,6 +696,10 @@ impl ProcessSupervisor {
                 info!("Container {} started with PID {} (root ns)", container_id, pid);
                 self.cgroup_manager.add_pid_to_cgroup(pod_uid, pid)?;
 
+                if isolate_net {
+                    launch_pasta_for_pid(pid);
+                }
+
                 let log_buffer = Arc::new(Mutex::new(Vec::<String>::new()));
 
                 {
@@ -891,6 +915,10 @@ impl ProcessSupervisor {
                 info!("Container {} started with PID {}", container_id, pid);
 
                 self.cgroup_manager.add_pid_to_cgroup(pod_uid, pid)?;
+
+                if isolate_net {
+                    launch_pasta_for_pid(pid);
+                }
 
                 let log_buffer = Arc::new(Mutex::new(Vec::<String>::new()));
 

@@ -23,21 +23,73 @@ pub enum RootfsIsolation {
 }
 
 /// Resolve binary path when the process runs on the host mount view (no chroot).
+fn get_container_path_from_proc(rootfs_path: &str) -> Option<String> {
+    let root = rootfs_path.trim_end_matches('/');
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return None;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if !name_str.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        let pid = name_str;
+        let proc_root = format!("/proc/{pid}/root");
+        let Ok(target) = std::fs::read_link(&proc_root) else {
+            continue;
+        };
+        if target.to_string_lossy().trim_end_matches('/') == root {
+            // Found a process in this container! Read its environment
+            if let Ok(data) = std::fs::read(format!("/proc/{pid}/environ")) {
+                for var in data.split(|&b| b == 0) {
+                    if var.starts_with(b"PATH=") {
+                        if let Ok(s) = String::from_utf8(var[5..].to_vec()) {
+                            return Some(s);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Resolve binary path when the process runs on the host mount view (no chroot).
 pub fn resolve_exec_path(entrypoint: &str, rootfs_path: &str) -> String {
     let root = rootfs_path.trim_end_matches('/');
-    let candidates: Vec<String> = if entrypoint.starts_with('/') {
-        vec![format!("{root}{entrypoint}")]
-    } else {
-        [
-            format!("{root}/bin/{entrypoint}"),
-            format!("{root}/usr/bin/{entrypoint}"),
-            format!("{root}/usr/local/bin/{entrypoint}"),
-            format!("{root}/sbin/{entrypoint}"),
-            format!("{root}/usr/sbin/{entrypoint}"),
-            format!("{root}/usr/local/sbin/{entrypoint}"),
-        ]
-        .to_vec()
-    };
+    if entrypoint.starts_with('/') {
+        return format!("{root}{entrypoint}");
+    }
+
+    let mut candidates = Vec::new();
+
+    // Try to get actual container PATH first
+    if let Some(container_path) = get_container_path_from_proc(rootfs_path) {
+        for dir in container_path.split(':') {
+            if !dir.is_empty() {
+                candidates.push(format!("{root}/{}/{entrypoint}", dir.trim_start_matches('/')));
+            }
+        }
+    }
+
+    // Standard fallback paths
+    for dir in &["bin", "usr/bin", "usr/local/bin", "sbin", "usr/sbin", "usr/local/sbin"] {
+        candidates.push(format!("{root}/{dir}/{entrypoint}"));
+    }
+
+    // Postgres dynamic paths fallback
+    let pg_dir = format!("{root}/usr/lib/postgresql");
+    if let Ok(entries) = std::fs::read_dir(&pg_dir) {
+        for entry in entries.flatten() {
+            if entry.path().is_dir() {
+                let bin_dir = entry.path().join("bin");
+                if bin_dir.exists() {
+                    candidates.push(format!("{}/{entrypoint}", bin_dir.to_string_lossy()));
+                }
+            }
+        }
+    }
 
     for p in candidates {
         let path = std::path::Path::new(&p);
@@ -446,30 +498,19 @@ pub fn child_enter_ns_fork(
         warn!("mount MS_SLAVE on / failed ({e}) — attempting chroot fallback");
     }
 
-    // Try full isolation: bind mount + pivot_root.
-    if enter_rootfs(rootfs_path, false, volumes).is_ok() {
-        return Ok(RootfsIsolation::Pivot);
-    }
-
-    // Fallback 1: chroot (works in some environments without full mount namespace)
-    eprintln!("z8s: pivot_root unavailable, trying chroot isolation");
-    if !volumes.is_empty() {
-        crate::container::volumes::bind_mount_volumes(rootfs_path, volumes);
-    }
-    match chroot(rootfs_path) {
-        Ok(()) => {
-            chdir("/").context("chdir / after chroot failed")?;
-            return Ok(RootfsIsolation::Chroot);
+    // Non-root user ns: chroot (works if rootfs is bind-mounted inside the user ns)
+    if mount_rootfs_components(rootfs_path, false, volumes).is_ok() {
+        if chroot(rootfs_path).is_ok() {
+            if chdir("/").is_ok() {
+                if mount_filesystems(false).is_ok() {
+                    return Ok(RootfsIsolation::Chroot);
+                }
+            }
         }
-        Err(e) => eprintln!("z8s: chroot({rootfs_path}) failed: {e}"),
     }
 
-    // Fallback 2: user-namespace-only isolation (no filesystem isolation).
-    // The container runs as uid=0 in its own user namespace but on the host
-    // filesystem. This happens in restricted environments (e.g. nested containers)
-    // where mount/chroot syscalls are blocked by the outer runtime's seccomp.
-    // The container process will still use the correct UID mapping.
-    eprintln!("z8s: filesystem isolation unavailable in this environment — running with user-namespace-only isolation");
+    // Fallback: degraded with a loud warning
+    eprintln!("z8s: WARNING: FILESYSTEM ISOLATION UNAVAILABLE IN THIS ENVIRONMENT! RUNNING DEGRADED!");
     if !volumes.is_empty() {
         crate::container::volumes::bind_mount_volumes_degraded(volumes);
     }
@@ -481,11 +522,14 @@ pub fn child_enter_ns_root(
     volumes: &[crate::container::volumes::ResolvedVolume],
     isolate_net: bool,
 ) -> Result<RootfsIsolation> {
-    let mut flags = CloneFlags::CLONE_NEWNS | CloneFlags::CLONE_NEWUTS | CloneFlags::CLONE_NEWIPC;
+    let mut flags = CloneFlags::CLONE_NEWNS
+        | CloneFlags::CLONE_NEWPID
+        | CloneFlags::CLONE_NEWUTS
+        | CloneFlags::CLONE_NEWIPC;
     if isolate_net {
         flags |= CloneFlags::CLONE_NEWNET;
     }
-    unshare(flags).context("Failed to unshare mount/uts/ipc")?;
+    unshare(flags).context("Failed to unshare mount/pid/uts/ipc")?;
 
     if isolate_net {
         crate::network::port_publish::setup_loopback();
@@ -570,7 +614,7 @@ fn make_parent_mount_private(rootfs: &Path) -> Result<()> {
     Ok(())
 }
 
-fn enter_rootfs(
+fn mount_rootfs_components(
     rootfs_path: &str,
     is_root: bool,
     volumes: &[crate::container::volumes::ResolvedVolume],
@@ -597,7 +641,7 @@ fn enter_rootfs(
         crate::container::volumes::bind_mount_volumes(rootfs_path, volumes);
     }
 
-    // Bind-mount /proc and /sys from host into rootfs before pivot_root
+    // Bind-mount /proc and /sys from host into rootfs before pivot_root/chroot
     if !is_root && !nix::unistd::access(Path::new("/proc"), nix::unistd::AccessFlags::R_OK).is_err() {
         let proc_dst = rootfs.join("proc");
         std::fs::create_dir_all(&proc_dst).ok();
@@ -667,6 +711,17 @@ fn enter_rootfs(
         let _ = std::os::unix::fs::symlink("/proc/self/fd/1", dev.join("stdout"));
         let _ = std::os::unix::fs::symlink("/proc/self/fd/2", dev.join("stderr"));
     }
+
+    Ok(())
+}
+
+fn enter_rootfs(
+    rootfs_path: &str,
+    is_root: bool,
+    volumes: &[crate::container::volumes::ResolvedVolume],
+) -> Result<()> {
+    let rootfs = Path::new(rootfs_path);
+    mount_rootfs_components(rootfs_path, is_root, volumes)?;
 
     let old_root = rootfs.join(".z8s_old_root");
     std::fs::create_dir_all(&old_root)?;

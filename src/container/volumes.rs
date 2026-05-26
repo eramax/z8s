@@ -194,8 +194,8 @@ pub fn materialize_secret(sec: &Secret, dir: &str) -> Result<()> {
 pub fn scrub_rootfs_volume_mounts(rootfs_path: &str, volumes: &[ResolvedVolume]) {
     for vol in volumes {
         let dst = Path::new(rootfs_path).join(vol.container_path.trim_start_matches('/'));
-        if dst.exists() {
-            if dst.is_dir() {
+        if dst.exists() || dst.is_symlink() {
+            if dst.is_dir() && !dst.is_symlink() {
                 std::fs::remove_dir_all(&dst).ok();
             } else {
                 std::fs::remove_file(&dst).ok();
@@ -244,6 +244,10 @@ pub fn bind_mount_volumes_degraded(volumes: &[ResolvedVolume]) {
         let dst = degraded_mount_path(&vol.container_path);
         let src = Path::new(&vol.host_path);
         let dst_path = Path::new(&dst);
+
+        if !src.exists() {
+            let _ = std::fs::create_dir_all(src);
+        }
 
         if dst_path.exists() {
             if dst_path.is_symlink() {
@@ -311,8 +315,8 @@ pub fn stage_volumes_in_rootfs(rootfs_path: &str, volumes: &[ResolvedVolume]) {
         let rel = vol.container_path.trim_start_matches('/');
         let dst = Path::new(rootfs_path).join(rel);
         let src = Path::new(&vol.host_path);
-        if dst.exists() {
-            if dst.is_dir() {
+        if dst.exists() || dst.is_symlink() {
+            if dst.is_dir() && !dst.is_symlink() {
                 std::fs::remove_dir_all(&dst).ok();
             } else {
                 std::fs::remove_file(&dst).ok();
@@ -320,6 +324,11 @@ pub fn stage_volumes_in_rootfs(rootfs_path: &str, volumes: &[ResolvedVolume]) {
         }
         if let Some(parent) = dst.parent() {
             std::fs::create_dir_all(parent).ok();
+        }
+        if is_emptydir_host_path(&vol.host_path) {
+            std::fs::create_dir_all(&dst).ok();
+            info!("Created emptyDir directory in rootfs at {}", dst.display());
+            continue;
         }
         if src.is_dir() {
             if std::os::unix::fs::symlink(src, &dst).is_ok() {
@@ -342,6 +351,10 @@ pub fn bind_mount_volumes(rootfs_path: &str, volumes: &[ResolvedVolume]) {
         let dst = format!("{}{}", rootfs_path, vol.container_path);
         let src = Path::new(&vol.host_path);
         let dst_path = Path::new(&dst);
+
+        if !src.exists() {
+            let _ = std::fs::create_dir_all(src);
+        }
 
         // Clean stale entry so create_dir_all / bind-mount don't fail on dangling symlinks
         if dst_path.exists() || dst_path.is_symlink() {
