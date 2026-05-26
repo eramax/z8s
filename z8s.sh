@@ -14,14 +14,17 @@ build() {
 }
 
 start() {
-    if pgrep -f "$BINARY" >/dev/null 2>&1; then
-        echo "z8s already running (use: $0 stop)"
-        pgrep -af "$BINARY" || true
+    if [ -f "$PIDFILE" ] && sudo kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+        echo "z8s already running (PID $(cat "$PIDFILE"), log=$LOGFILE)"
         exit 1
     fi
-    rm -f "$PIDFILE"
+    if sudo pidof -s z8s >/dev/null 2>&1; then
+        echo "z8s already running (stale pidfile removed, but process alive)"
+        sudo pidof z8s || true
+        exit 1
+    fi
+    sudo rm -f "$PIDFILE"
     cd "$WORKDIR"
-    # Remove any stale root-owned log file so the sudo process can recreate it.
     sudo rm -f "$LOGFILE"
     set -m
     sudo sh -c "\"$BINARY\" \"\$@\" >>\"$LOGFILE\" 2>&1" -- "$@" &
@@ -29,12 +32,12 @@ start() {
     PID=$!
     echo "$PID" > "$PIDFILE"
     sleep 1
-    if kill -0 "$PID" 2>/dev/null; then
+    if sudo kill -0 "$PID" 2>/dev/null; then
         echo "z8s started (PID $PID, log=$LOGFILE)"
     else
         echo "z8s failed to start - check $LOGFILE"
         tail -20 "$LOGFILE" >&2
-        rm -f "$PIDFILE"
+        sudo rm -f "$PIDFILE"
         exit 1
     fi
 }
@@ -54,13 +57,13 @@ stop() {
             echo "Force killing..."
             sudo kill -KILL "$PID" 2>/dev/null || true
         fi
-        rm -f "$PIDFILE"
+        sudo rm -f "$PIDFILE"
     fi
-    if pgrep -f "$BINARY" >/dev/null 2>&1; then
+    if sudo pidof z8s >/dev/null 2>&1; then
         echo "Stopping stale z8s processes..."
-        sudo pkill -TERM -f "$BINARY" 2>/dev/null || true
+        sudo pkill z8s 2>/dev/null || true
         sleep 1
-        sudo pkill -KILL -f "$BINARY" 2>/dev/null || true
+        sudo pkill -9 z8s 2>/dev/null || true
     fi
     echo "z8s stopped"
 }
@@ -72,8 +75,10 @@ restart() {
 }
 
 status() {
-    if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+    if [ -f "$PIDFILE" ] && sudo kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
         echo "z8s running (PID $(cat "$PIDFILE"), log=$LOGFILE)"
+    elif sudo pidof -s z8s >/dev/null 2>&1; then
+        echo "z8s running (no pidfile, PID $(sudo pidof -s z8s))"
     else
         echo "z8s not running"
     fi

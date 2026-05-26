@@ -1919,7 +1919,11 @@ fn service_list_to_table(items: &[serde_json::Value]) -> serde_json::Value {
             ps.iter().map(|p| {
                 let port = p["port"].as_i64().unwrap_or(0);
                 let proto = p["protocol"].as_str().unwrap_or("TCP");
-                format!("{}/{}", port, proto)
+                if let Some(np) = p["nodePort"].as_i64() {
+                    format!("{}:{}/{}", port, np, proto)
+                } else {
+                    format!("{}/{}", port, proto)
+                }
             }).collect::<Vec<_>>().join(",")
         }).unwrap_or_default();
         let age = age_from_timestamp(meta["creationTimestamp"].as_str().unwrap_or(""));
