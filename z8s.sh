@@ -6,6 +6,13 @@ LOGFILE="/tmp/z8s.log"
 BINARY="/home/abb/dev/z8s/target/debug/z8s"
 WORKDIR="/home/abb/dev/z8s"
 
+build() {
+    echo "Building z8s..."
+    cd "$WORKDIR"
+    cargo build 2>&1
+    echo "Build complete: $BINARY"
+}
+
 start() {
     if pgrep -f "$BINARY" >/dev/null 2>&1; then
         echo "z8s already running (use: $0 stop)"
@@ -15,10 +22,8 @@ start() {
     rm -f "$PIDFILE"
     cd "$WORKDIR"
     touch "$LOGFILE"
-    # Enable job control so background job gets its own process group
-    # and survives SIGTERM to the parent's process group (e.g. from timeout).
     set -m
-    "$BINARY" >> "$LOGFILE" 2>&1 &
+    sudo "$BINARY" "$@" >> "$LOGFILE" 2>&1 &
     set +m
     PID=$!
     echo "$PID" > "$PIDFILE"
@@ -27,6 +32,7 @@ start() {
         echo "z8s started (PID $PID, log=$LOGFILE)"
     else
         echo "z8s failed to start - check $LOGFILE"
+        tail -20 "$LOGFILE" >&2
         rm -f "$PIDFILE"
         exit 1
     fi
@@ -36,25 +42,24 @@ stop() {
     if [ -f "$PIDFILE" ]; then
         PID=$(cat "$PIDFILE")
         echo "Stopping z8s (PID $PID)..."
-        kill -TERM "$PID" 2>/dev/null || true
+        sudo kill -TERM "$PID" 2>/dev/null || true
         for i in $(seq 1 10); do
-            if ! kill -0 "$PID" 2>/dev/null; then
+            if ! sudo kill -0 "$PID" 2>/dev/null; then
                 break
             fi
             sleep 1
         done
-        if kill -0 "$PID" 2>/dev/null; then
+        if sudo kill -0 "$PID" 2>/dev/null; then
             echo "Force killing..."
-            kill -KILL "$PID" 2>/dev/null || true
+            sudo kill -KILL "$PID" 2>/dev/null || true
         fi
         rm -f "$PIDFILE"
     fi
-    # Always clear stray daemons (old PIDs/orphans still bind :6443 and serve stale code).
     if pgrep -f "$BINARY" >/dev/null 2>&1; then
-        echo "Stopping other z8s processes..."
-        pkill -TERM -f "$BINARY" 2>/dev/null || true
+        echo "Stopping stale z8s processes..."
+        sudo pkill -TERM -f "$BINARY" 2>/dev/null || true
         sleep 1
-        pkill -KILL -f "$BINARY" 2>/dev/null || true
+        sudo pkill -KILL -f "$BINARY" 2>/dev/null || true
     fi
     echo "z8s stopped"
 }
@@ -62,7 +67,7 @@ stop() {
 restart() {
     stop
     sleep 1
-    start
+    start "${@:2}"
 }
 
 status() {
@@ -73,10 +78,17 @@ status() {
     fi
 }
 
+logs() {
+    LINES="${2:-50}"
+    tail -n "$LINES" -f "$LOGFILE"
+}
+
 case "${1:-status}" in
-    start)   start ;;
+    start)   shift; start "$@" ;;
     stop)    stop ;;
-    restart) restart ;;
+    restart) shift; stop; sleep 1; start "$@" ;;
     status)  status ;;
-    *)       echo "Usage: $0 {start|stop|restart|status}" >&2; exit 1 ;;
+    build)   build ;;
+    logs)    logs "$@" ;;
+    *)       echo "Usage: $0 {start|stop|restart|status|build|logs} [z8s-flags...]" >&2; exit 1 ;;
 esac

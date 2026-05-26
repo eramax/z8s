@@ -27,7 +27,9 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 use tracing::info;
 
-pub const Z8S_PORT: u16 = 6443;
+pub fn z8s_port() -> u16 {
+    crate::config::get().api_port
+}
 
 /// Accept either JSON or k8s protobuf request bodies.
 // RFC 7396 JSON Merge Patch: null values delete keys, objects recurse.
@@ -182,7 +184,7 @@ pub async fn run_server(
 ) {
     let state = build_app_state(store, supervisor, network).await;
     let app = build_router(state);
-    let addr = format!("0.0.0.0:{}", Z8S_PORT);
+    let addr = format!("0.0.0.0:{}", z8s_port());
     info!("Starting k8s API server on {}", addr);
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
@@ -1193,7 +1195,12 @@ async fn delete_deployment(
                         if pt.resource.namespace() != namespace { continue; }
                         if let AnyResource::Pod(pod) = &pt.resource {
                             let pod_labels = pod.metadata.labels.clone().unwrap_or_default();
-                            if labels_match(match_labels, &pod_labels) {
+                            // Only cascade-delete pods that belong to this deployment
+                            // (by OwnerReference or naming convention). Standalone pods
+                            // that happen to share the same labels must NOT be removed.
+                            if labels_match(match_labels, &pod_labels)
+                                && crate::controller::pod_owned_by_deployment(pod, &name)
+                            {
                                 info!("Deleting pod {} owned by deployment {}/{}", pt.resource.name(), namespace, name);
                                 state.supervisor.stop_pod(&pt.resource).await;
                                 state.store.delete(&pt.resource).await.ok();
@@ -1381,7 +1388,7 @@ async fn list_nodes() -> Json<List<Node>> {
                     NodeAddress { type_: "Hostname".into(), address: "z8s-node".into() },
                 ]),
                 daemon_endpoints: Some(NodeDaemonEndpoints {
-                    kubelet_endpoint: Some(DaemonEndpoint { port: Z8S_PORT as i32 }),
+                    kubelet_endpoint: Some(DaemonEndpoint { port: z8s_port() as i32 }),
                 }),
                 node_info: Some(NodeSystemInfo {
                     machine_id: "z8s-1".into(),
@@ -1882,14 +1889,8 @@ impl IntoResponse for ApiError {
 
 // ── Services ──────────────────────────────────────────────────────────────────
 
-static SERVICE_IP_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
-
 fn alloc_cluster_ip() -> String {
-    let n = SERVICE_IP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let b3 = ((n >> 8) & 0xFF) as u8;
-    let b4 = (n & 0xFF) as u8;
-    let b4 = if b4 == 0 { 1 } else if b4 == 255 { 254 } else { b4 };
-    format!("127.96.{}.{}", b3, b4)
+    crate::config::get().alloc_cluster_ip()
 }
 
 static NODEPORT_COUNTER: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(30000);

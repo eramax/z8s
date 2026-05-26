@@ -241,7 +241,11 @@ fn spawn_with_pty(
     unsafe {
         child_cmd.as_std_mut().pre_exec(move || {
             if let Some(ref ns) = ns_fds {
-                let _ = enter_container_namespaces(ns, isolated_net, isolated_net);
+                // Try full namespace entry; if user-ns setns fails (common in nested
+                // environments), fall back to entering only mnt+net namespaces.
+                if enter_container_namespaces(ns, isolated_net, isolated_net).is_err() {
+                    let _ = enter_namespaces_no_user(ns, isolated_net, isolated_net);
+                }
                 let _ = nix::unistd::chdir("/");
             }
             let _ = nix::unistd::setsid();
@@ -330,6 +334,28 @@ fn enter_container_namespaces(
     Ok(())
 }
 
+/// Enter mnt/net namespaces without the user namespace step.
+/// Used when the user namespace setns is blocked (e.g. nested containers,
+/// AppArmor restrictions, or multi-threaded caller that already has the
+/// container's user-ns caps via the parent process being the namespace owner).
+fn enter_namespaces_no_user(
+    ns: &ContainerNamespaces,
+    isolated_net: bool,
+    use_mnt_ns: bool,
+) -> Result<(), std::io::Error> {
+    if use_mnt_ns {
+        nix::sched::setns(&ns.mnt, CloneFlags::CLONE_NEWNS).map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::Other, format!("setns(CLONE_NEWNS): {e}"))
+        })?;
+    }
+    if isolated_net {
+        nix::sched::setns(&ns.net, CloneFlags::CLONE_NEWNET).map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::Other, format!("setns(CLONE_NEWNET): {e}"))
+        })?;
+    }
+    Ok(())
+}
+
 fn is_root() -> bool {
     rootfs::is_root()
 }
@@ -375,7 +401,10 @@ fn build_command(
             let iso_net = isolated_net;
             unsafe {
                 c.as_std_mut().pre_exec(move || {
-                    enter_container_namespaces(&ns, iso_net, use_mnt)
+                    if enter_container_namespaces(&ns, iso_net, use_mnt).is_err() {
+                        let _ = enter_namespaces_no_user(&ns, iso_net, use_mnt);
+                    }
+                    Ok(())
                 });
             }
         } else {

@@ -224,7 +224,8 @@ pub fn prepare_rootfs(rootfs_path: &str) -> Result<()> {
 
     let resolv_conf = rootfs.join("etc/resolv.conf");
     let content = if crate::network::dns_port().is_some() {
-        "nameserver 127.0.0.1\nsearch default.svc.cluster.local svc.cluster.local cluster.local\noptions ndots:5\n".to_string()
+        let domain = &crate::config::get().cluster_domain;
+        format!("nameserver 127.0.0.1\nsearch default.svc.{domain} svc.{domain} {domain}\noptions ndots:5\n")
     } else {
         let host_resolv = std::fs::read_to_string("/etc/resolv.conf").unwrap_or_default();
         if host_resolv.trim().is_empty()
@@ -939,7 +940,8 @@ pub fn setup_exec_mounts(rootfs: &str) -> Result<()> {
     let _ = std::fs::create_dir_all(&etc_path);
     let resolv = etc_path.join("resolv.conf");
     let content = if crate::network::dns_port().is_some() {
-        "nameserver 127.0.0.1\nsearch default.svc.cluster.local svc.cluster.local cluster.local\noptions ndots:5\n".to_string()
+        let domain = &crate::config::get().cluster_domain;
+        format!("nameserver 127.0.0.1\nsearch default.svc.{domain} svc.{domain} {domain}\noptions ndots:5\n")
     } else {
         let host_resolv = std::fs::read_to_string("/etc/resolv.conf").unwrap_or_else(|_| {
             "nameserver 1.1.1.1\nnameserver 8.8.8.8\n".to_string()

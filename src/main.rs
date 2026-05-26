@@ -1,4 +1,5 @@
 mod api;
+mod config;
 mod container;
 mod controller;
 mod init;
@@ -24,6 +25,8 @@ use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    crate::config::init();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
@@ -33,7 +36,17 @@ async fn main() -> Result<()> {
         .with_thread_ids(true)
         .init();
 
-    info!("z8s v{} starting...", env!("CARGO_PKG_VERSION"));
+    let cfg = crate::config::get();
+    info!(
+        "z8s v{} starting — port={}, service-cidr={}.{}.{}.{}/{}, domain={}, manifests={}",
+        env!("CARGO_PKG_VERSION"),
+        cfg.api_port,
+        cfg.service_cidr_base[0], cfg.service_cidr_base[1],
+        cfg.service_cidr_base[2], cfg.service_cidr_base[3],
+        cfg.service_cidr_prefix,
+        cfg.cluster_domain,
+        cfg.manifests_dir,
+    );
 
     let pid = std::process::id();
     if pid == 1 {

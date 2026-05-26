@@ -7,6 +7,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{info, warn};
+#[allow(unused_imports)]
+use nix::libc;
 
 /// Wait until at least one backend is ready before binding ClusterIP. On the host
 /// network stack, binding ClusterIP:port before the pod listens can block the pod
@@ -44,6 +46,16 @@ pub async fn run_proxy_addr_when_ready(
     .await;
 }
 
+/// Try to add an IP address as a loopback alias so the service proxy can bind to it.
+/// Works when running as root or with CAP_NET_ADMIN; silently a no-op otherwise.
+fn ensure_loopback_alias(ip: &str) {
+    let _ = std::process::Command::new("ip")
+        .args(["addr", "add", &format!("{}/32", ip), "dev", "lo"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
 pub async fn run_proxy_addr(
     listen_addr: &str,
     selector: BTreeMap<String, String>,
@@ -54,6 +66,9 @@ pub async fn run_proxy_addr(
     svc_name: &str,
     svc_ns: &str,
 ) {
+    // Extract the IP part from listen_addr (e.g. "127.96.0.3:80" → "127.96.0.3")
+    let clusterip = listen_addr.split(':').next().unwrap_or("").to_string();
+
     let listener = loop {
         match TcpListener::bind(listen_addr).await {
             Ok(l) => break l,
@@ -63,6 +78,13 @@ pub async fn run_proxy_addr(
                     svc_ns, svc_name, listen_addr
                 );
                 tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+            Err(e) if e.raw_os_error() == Some(nix::libc::EADDRNOTAVAIL) => {
+                // ClusterIP not assigned to any interface — add it to loopback and retry.
+                if !clusterip.is_empty() {
+                    ensure_loopback_alias(&clusterip);
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
             }
             Err(e) => {
                 warn!("Service proxy {}/{}: failed to bind {}: {}", svc_ns, svc_name, listen_addr, e);

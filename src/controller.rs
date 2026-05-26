@@ -137,7 +137,7 @@ fn labels_match(selector: &BTreeMap<String, String>, labels: &BTreeMap<String, S
     true
 }
 
-fn pod_owned_by_deployment(pod: &Pod, deploy_name: &str) -> bool {
+pub fn pod_owned_by_deployment(pod: &Pod, deploy_name: &str) -> bool {
     if let Some(refs) = &pod.metadata.owner_references {
         if refs.iter().any(|r| {
             r.controller == Some(true) && r.kind == "Deployment" && r.name == deploy_name

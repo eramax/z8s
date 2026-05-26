@@ -115,7 +115,14 @@ impl ResourceStore {
     pub async fn apply(&self, resource: AnyResource) -> Result<()> {
         let uid = resource.uid();
         let mut store = self.resources.write().await;
-        store.insert(uid, ResourceTracker::new(resource));
+        // Preserve the existing state when updating a resource that already exists
+        // (e.g. kubectl apply on a running pod must not reset state to Pending).
+        let existing_state = store.get(&uid).map(|t| t.state.clone());
+        let mut tracker = ResourceTracker::new(resource);
+        if let Some(state) = existing_state {
+            tracker.state = state;
+        }
+        store.insert(uid, tracker);
         Ok(())
     }
 

@@ -17,6 +17,9 @@ const ACCEPTED_LAYER_TYPES: &[&str] = &[
 ];
 
 fn z8s_base_dir() -> String {
+    if let Some(dir) = &crate::config::get().data_dir {
+        return dir.clone();
+    }
     if nix::unistd::Uid::effective().is_root() {
         "/var/lib/z8s".to_string()
     } else {

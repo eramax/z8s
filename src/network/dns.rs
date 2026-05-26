@@ -7,14 +7,20 @@ const TTL: u32 = 30;
 const MAX_UDP: usize = 4096;
 
 pub async fn run_dns(store: Arc<ResourceStore>) -> Option<u16> {
-    for port in [53u16, 5353] {
+    let cfg = crate::config::get();
+    let ports: Vec<u16> = if let Some(p) = cfg.dns_port {
+        vec![p]
+    } else {
+        vec![53, 5353]
+    };
+    for port in ports {
         if let Ok(sock) = UdpSocket::bind(format!("127.0.0.1:{}", port)).await {
             info!("DNS server listening on 127.0.0.1:{}", port);
             tokio::spawn(dns_loop(sock, store));
             return Some(port);
         }
     }
-    warn!("DNS: failed to bind to port 53 or 5353 — in-cluster DNS disabled");
+    warn!("DNS: failed to bind to configured DNS port(s) — in-cluster DNS disabled");
     None
 }
 
@@ -289,20 +295,33 @@ async fn resolve_service(name: &str, store: &ResourceStore) -> ServiceResolution
 fn parse_service_name(name: &str) -> Option<(String, Option<String>)> {
     let parts: Vec<&str> = name.split('.').collect();
     let n = parts.len();
+    let domain = crate::config::get().cluster_domain.clone();
+    let domain_parts: Vec<&str> = domain.split('.').collect();
+    let dn = domain_parts.len();
 
-    // <svc>.<ns>.svc.cluster.local
-    if n >= 5 && parts[n-1] == "local" && parts[n-2] == "cluster" && parts[n-3] == "svc" {
-        let ns = parts[n-4].to_string();
-        let svc = parts[..n-4].join(".");
-        return Some((svc, Some(ns)));
+    // <svc>.<ns>.svc.<cluster-domain>
+    let full_prefix = dn + 2; // +svc +ns
+    if n >= full_prefix + 1 {
+        let tail = &parts[n - dn..];
+        if tail == domain_parts.as_slice() && parts[n - dn - 1] == "svc" {
+            let ns = parts[n - dn - 2].to_string();
+            let svc = parts[..n - dn - 2].join(".");
+            return Some((svc, Some(ns)));
+        }
     }
-    // <svc>.svc.cluster.local
-    if n >= 4 && parts[n-1] == "local" && parts[n-2] == "cluster" && parts[n-3] == "svc" {
-        return Some((parts[0].to_string(), None));
+    // <svc>.svc.<cluster-domain>
+    if n >= dn + 2 {
+        let tail = &parts[n - dn..];
+        if tail == domain_parts.as_slice() && parts[n - dn - 1] == "svc" {
+            return Some((parts[0].to_string(), None));
+        }
     }
-    // <svc>.cluster.local
-    if n >= 3 && parts[n-1] == "local" && parts[n-2] == "cluster" {
-        return Some((parts[0].to_string(), None));
+    // <svc>.<cluster-domain>
+    if n >= dn + 1 {
+        let tail = &parts[n - dn..];
+        if tail == domain_parts.as_slice() {
+            return Some((parts[0].to_string(), None));
+        }
     }
     // bare name
     if n == 1 {

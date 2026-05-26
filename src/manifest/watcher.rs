@@ -7,8 +7,6 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
-const DEFAULT_MANIFESTS_DIR: &str = "/etc/z8s/manifests";
-
 pub struct ManifestWatcher {
     store: Arc<ResourceStore>,
     dir: String,
@@ -19,7 +17,7 @@ impl ManifestWatcher {
     pub fn new(store: Arc<ResourceStore>) -> Self {
         Self {
             store,
-            dir: DEFAULT_MANIFESTS_DIR.to_string(),
+            dir: crate::config::get().manifests_dir.clone(),
             processed: Arc::new(RwLock::new(std::collections::HashSet::new())),
         }
     }
