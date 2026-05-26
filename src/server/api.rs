@@ -1792,7 +1792,7 @@ fn alloc_cluster_ip() -> String {
     let b3 = ((n >> 8) & 0xFF) as u8;
     let b4 = (n & 0xFF) as u8;
     let b4 = if b4 == 0 { 1 } else if b4 == 255 { 254 } else { b4 };
-    format!("10.96.{}.{}", b3, b4)
+    format!("127.96.{}.{}", b3, b4)
 }
 
 static NODEPORT_COUNTER: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(30000);

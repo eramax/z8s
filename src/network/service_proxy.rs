@@ -7,6 +7,47 @@ use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{info, warn};
 
+pub async fn run_proxy_addr(
+    listen_addr: &str,
+    selector: BTreeMap<String, String>,
+    target_port: IntOrString,
+    store: Arc<ResourceStore>,
+    supervisor: Arc<ProcessSupervisor>,
+    counter: Arc<AtomicUsize>,
+    svc_name: &str,
+    svc_ns: &str,
+) {
+    let listener = match TcpListener::bind(listen_addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            warn!("Service proxy {}/{}: failed to bind {}: {}", svc_ns, svc_name, listen_addr, e);
+            return;
+        }
+    };
+    info!("Service proxy {}/{} listening on {}", svc_ns, svc_name, listen_addr);
+
+    loop {
+        match listener.accept().await {
+            Ok((client, _peer)) => {
+                let store = store.clone();
+                let supervisor = supervisor.clone();
+                let counter = counter.clone();
+                let selector = selector.clone();
+                let target_port = target_port.clone();
+                let svc_ns = svc_ns.to_string();
+                let svc_name = svc_name.to_string();
+                tokio::spawn(async move {
+                    handle_connection(client, selector, target_port, store, supervisor, counter, &svc_ns, &svc_name).await;
+                });
+            }
+            Err(e) => {
+                warn!("Service proxy accept error: {}", e);
+                break;
+            }
+        }
+    }
+}
+
 pub async fn run_proxy(
     listen_port: u16,
     selector: BTreeMap<String, String>,

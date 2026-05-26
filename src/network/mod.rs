@@ -67,51 +67,80 @@ impl NetworkManager {
         }
 
         let svc_type = spec.type_.as_deref().unwrap_or("ClusterIP");
+        let cluster_ip = spec.cluster_ip.as_deref().unwrap_or("").to_string();
         let ports = spec.ports.as_deref().unwrap_or(&[]);
 
         let mut proxies = self.proxies.lock().await;
 
         for svc_port in ports {
-            let node_port = svc_port.node_port.map(|p| p as u16);
-            let listen_port = match node_port {
-                Some(p) => p,
-                None if svc_type == "NodePort" => continue, // skip if nodePort missing
-                None => continue, // ClusterIP without iptables — skip actual proxy
-            };
-
             let target_port = svc_port.target_port.clone()
                 .unwrap_or_else(|| IntOrString::Int(svc_port.port));
 
-            let port_key = format!("{}:{}", key, listen_port);
-
-            // Stop existing proxy for this port
-            if let Some(old) = proxies.remove(&port_key) {
-                old.handle.abort();
+            // Bind on ClusterIP:servicePort so pods can reach the service directly
+            if !cluster_ip.is_empty() && cluster_ip != "None" {
+                let listen_addr = format!("{}:{}", cluster_ip, svc_port.port);
+                let port_key = format!("{}:clusterip:{}", key, svc_port.port);
+                if let Some(old) = proxies.remove(&port_key) {
+                    old.handle.abort();
+                }
+                let store = self.store.clone();
+                let supervisor = self.supervisor.clone();
+                let counter = self.counter.clone();
+                let selector_c = selector.clone();
+                let svc_name_c = svc_name.clone();
+                let svc_ns_c = svc_ns.clone();
+                let target_port_c = target_port.clone();
+                let listen_addr_log = listen_addr.clone();
+                let handle = tokio::spawn(async move {
+                    service_proxy::run_proxy_addr(
+                        &listen_addr,
+                        selector_c,
+                        target_port_c,
+                        store,
+                        supervisor,
+                        counter,
+                        &svc_name_c,
+                        &svc_ns_c,
+                    )
+                    .await;
+                });
+                info!("Service proxy {} → ClusterIP {}", key, listen_addr_log);
+                proxies.insert(port_key, RunningProxy { handle });
             }
 
-            let store = self.store.clone();
-            let supervisor = self.supervisor.clone();
-            let counter = self.counter.clone();
-            let selector_c = selector.clone();
-            let svc_name_c = svc_name.clone();
-            let svc_ns_c = svc_ns.clone();
-
-            let handle = tokio::spawn(async move {
-                service_proxy::run_proxy(
-                    listen_port,
-                    selector_c,
-                    target_port,
-                    store,
-                    supervisor,
-                    counter,
-                    &svc_name_c,
-                    &svc_ns_c,
-                )
-                .await;
-            });
-
-            info!("Service proxy {}:{} → NodePort {}", key, svc_port.port, listen_port);
-            proxies.insert(port_key, RunningProxy { handle });
+            // Also bind NodePort for external access
+            if (svc_type == "NodePort" || svc_type == "LoadBalancer") {
+                if let Some(node_port) = svc_port.node_port.map(|p| p as u16) {
+                    let listen_addr = format!("0.0.0.0:{}", node_port);
+                    let port_key = format!("{}:nodeport:{}", key, node_port);
+                    if let Some(old) = proxies.remove(&port_key) {
+                        old.handle.abort();
+                    }
+                    let store = self.store.clone();
+                    let supervisor = self.supervisor.clone();
+                    let counter = self.counter.clone();
+                    let selector_c = selector.clone();
+                    let svc_name_c = svc_name.clone();
+                    let svc_ns_c = svc_ns.clone();
+                    let target_port_c = target_port.clone();
+                    let listen_addr_log = listen_addr.clone();
+                    let handle = tokio::spawn(async move {
+                        service_proxy::run_proxy_addr(
+                            &listen_addr,
+                            selector_c,
+                            target_port_c,
+                            store,
+                            supervisor,
+                            counter,
+                            &svc_name_c,
+                            &svc_ns_c,
+                        )
+                        .await;
+                    });
+                    info!("Service proxy {} → NodePort {}", key, listen_addr_log);
+                    proxies.insert(port_key, RunningProxy { handle });
+                }
+            }
         }
     }
 
