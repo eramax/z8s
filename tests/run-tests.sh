@@ -17,8 +17,8 @@ fail() { local m="$1" d="${2:-}"; echo -e "${RED}FAIL${NC} $m${d:+: $d}"; ERRORS
 section() { echo -e "\n${YELLOW}══ $1 ══${NC}"; }
 sub() { echo -e "${CYAN}  ▸ $1${NC}"; }
 
-k() { kubectl --server="$SERVER" --insecure-skip-tls-verify "$@" 2>&1 || true; }
-kapply() { kubectl --server="$SERVER" --insecure-skip-tls-verify "$@" 2>&1; }
+k() { kubectl --server="$SERVER" "$@" 2>&1 || true; }
+kapply() { kubectl --server="$SERVER" "$@" 2>&1; }
 
 wait_pod_ready() {
     local name="$1" ns="${2:-default}" timeout="${3:-30}"

@@ -2341,6 +2341,7 @@ dependencies = [
  "serde_yaml",
  "tar",
  "tokio",
+ "tower",
  "tracing",
  "tracing-subscriber",
  "uuid",

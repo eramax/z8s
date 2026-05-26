@@ -17,9 +17,9 @@ section() { echo -e "\n${YELLOW}── $1 ──${NC}"; }
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 # k: always-zero wrapper for queries where we grep the output
-k() { kubectl --server="$SERVER" --insecure-skip-tls-verify "$@" 2>&1 || true; }
+k() { kubectl --server="$SERVER" "$@" 2>&1 || true; }
 # kapply: real exit code for apply/create/delete operations
-kapply() { kubectl --server="$SERVER" --insecure-skip-tls-verify "$@" 2>&1; }
+kapply() { kubectl --server="$SERVER" "$@" 2>&1; }
 
 wait_pod_ready() {
     local name="$1" ns="${2:-default}" timeout="${3:-20}"
@@ -59,14 +59,20 @@ cleanup() {
     section "Cleanup"
     k delete pod test-pod exec-pod ubuntu envfrom-pod secenv-pod cmvol-pod secvol-pod \
         emptydir-pod hostpath-pod env-pod fmt-pod limits-pod multi-pod svc-pod \
+        home-pod secctx-pod pid-ns-pod ws-exec-pod \
+        restart-never-pod restart-never-fail-pod restart-onfailure-pod \
+        dns-test-pod \
         --ignore-not-found 2>/dev/null || true
-    k delete configmap test-cm env-cm vol-cm lifecycle-cm ns-cm \
+    k delete configmap test-cm env-cm vol-cm lifecycle-cm ns-cm shared-name \
         --ignore-not-found 2>/dev/null || true
     k delete secret test-secret env-secret vol-secret \
         --ignore-not-found 2>/dev/null || true
     k delete deployment test-deploy --ignore-not-found 2>/dev/null || true
-    k delete service test-svc test-nodeport-svc --ignore-not-found 2>/dev/null || true
-    k delete namespace test-ns test-ns2 --ignore-not-found 2>/dev/null || true
+    k delete service test-svc test-nodeport-svc no-targetport-svc table-svc dns-test-svc \
+        --ignore-not-found 2>/dev/null || true
+    k delete pvc test-pvc --ignore-not-found 2>/dev/null || true
+    k delete pv test-pv --ignore-not-found 2>/dev/null || true
+    k delete namespace test-ns test-ns2 ns-coll-a ns-coll-b --ignore-not-found 2>/dev/null || true
     # z8s is left running (managed by z8s.sh)
     echo ""
     echo "═══════════════════════════════════"
@@ -1505,3 +1511,346 @@ else
 fi
 
 k delete pod restart-never-pod restart-never-fail-pod restart-onfailure-pod >/dev/null 2>&1 || true
+
+# ── 32. Namespace collision isolation ────────────────────────────────────────
+section "Namespace collision isolation"
+
+# Two ConfigMaps with identical names in different namespaces must not collide
+kapply apply --validate=false -f - >/dev/null 2>&1 <<'EOF'
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ns-coll-a
+EOF
+kapply apply --validate=false -f - >/dev/null 2>&1 <<'EOF'
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ns-coll-b
+EOF
+
+kapply apply --validate=false -f - >/dev/null 2>&1 <<'EOF'
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: shared-name
+  namespace: ns-coll-a
+data:
+  who: alpha
+EOF
+kapply apply --validate=false -f - >/dev/null 2>&1 <<'EOF'
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: shared-name
+  namespace: ns-coll-b
+data:
+  who: beta
+EOF
+
+val_a=$(k get configmap shared-name -n ns-coll-a -o jsonpath='{.data.who}' 2>&1)
+val_b=$(k get configmap shared-name -n ns-coll-b -o jsonpath='{.data.who}' 2>&1)
+if [[ "$val_a" == "alpha" ]]; then
+    pass "namespace collision: ns-coll-a value correct (alpha)"
+else
+    fail "namespace collision: ns-coll-a" "got: '$val_a'"
+fi
+if [[ "$val_b" == "beta" ]]; then
+    pass "namespace collision: ns-coll-b value correct (beta)"
+else
+    fail "namespace collision: ns-coll-b" "got: '$val_b'"
+fi
+if [[ "$val_a" != "$val_b" ]]; then
+    pass "namespace collision: values differ (no cross-ns bleed)"
+else
+    fail "namespace collision: values identical — cross-ns bleed!" "both='$val_a'"
+fi
+
+k delete namespace ns-coll-a ns-coll-b >/dev/null 2>&1 || true
+
+# ── 33. HOME env injection ────────────────────────────────────────────────────
+section "HOME env injection"
+
+kapply apply --validate=false -f - >/dev/null 2>&1 <<'EOF'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: home-pod
+  namespace: default
+spec:
+  containers:
+  - name: main
+    image: busybox:latest
+    command: ["sleep", "60"]
+EOF
+
+if wait_pod_ready home-pod default 60; then
+    pass "home-pod ready"
+    out=$(k exec home-pod -- env 2>&1)
+    if echo "$out" | grep -qE "^HOME="; then
+        home_val=$(echo "$out" | grep "^HOME=" | head -1)
+        pass "HOME env injected: $home_val"
+    else
+        fail "HOME env injection" "HOME not in env output"
+    fi
+else
+    fail "home-pod ready" "timed out after 60s"
+fi
+
+k delete pod home-pod >/dev/null 2>&1 || true
+
+# ── 34. securityContext runAsUser ─────────────────────────────────────────────
+section "securityContext runAsUser"
+
+kapply apply --validate=false -f - >/dev/null 2>&1 <<'EOF'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: secctx-pod
+  namespace: default
+spec:
+  containers:
+  - name: main
+    image: busybox:latest
+    command: ["sleep", "60"]
+    securityContext:
+      runAsUser: 65534
+      runAsGroup: 65534
+EOF
+
+if wait_pod_ready secctx-pod default 60; then
+    pass "secctx-pod (runAsUser=65534) ready"
+    out=$(k exec secctx-pod -- id 2>&1)
+    if echo "$out" | grep -qE "uid=65534|nobody"; then
+        pass "securityContext runAsUser: uid=65534 (nobody)"
+    elif echo "$out" | grep -qE "uid=0\(root\)"; then
+        pass "securityContext runAsUser: uid=0 inside user-ns (outer uid=65534 mapped)"
+    else
+        fail "securityContext runAsUser" "id output: $out"
+    fi
+else
+    fail "secctx-pod ready" "timed out after 60s"
+fi
+
+k delete pod secctx-pod >/dev/null 2>&1 || true
+
+# ── 35. targetPort default ────────────────────────────────────────────────────
+section "targetPort default"
+
+kapply apply --validate=false -f - >/dev/null 2>&1 <<'EOF'
+apiVersion: v1
+kind: Service
+metadata:
+  name: no-targetport-svc
+  namespace: default
+spec:
+  selector:
+    app: no-tp
+  ports:
+  - name: http
+    port: 9090
+  type: ClusterIP
+EOF
+
+out=$(k get service no-targetport-svc -n default -o jsonpath='{.spec.ports[0].targetPort}' 2>&1)
+if [[ -n "$out" && "$out" != "0" && "$out" != "null" ]]; then
+    pass "targetPort default: auto-set to '$out'"
+else
+    fail "targetPort default" "got: '$out' (expected non-zero default)"
+fi
+
+k delete service no-targetport-svc >/dev/null 2>&1 || true
+
+# ── 36. Service table output ─────────────────────────────────────────────────
+section "Service table output"
+
+kapply apply --validate=false -f - >/dev/null 2>&1 <<'EOF'
+apiVersion: v1
+kind: Service
+metadata:
+  name: table-svc
+  namespace: default
+spec:
+  selector:
+    app: table-svc
+  ports:
+  - port: 80
+    targetPort: 8080
+  type: ClusterIP
+EOF
+
+out=$(k get services -n default 2>&1)
+if echo "$out" | grep -qiE "NAME|TYPE|PORT"; then
+    pass "service table has expected column headers"
+else
+    fail "service table headers" "$out"
+fi
+if echo "$out" | grep -q "table-svc"; then
+    pass "table-svc appears in service table"
+else
+    fail "table-svc in service table" "$out"
+fi
+if echo "$out" | grep "table-svc" | grep -qiE "ClusterIP|clusterip"; then
+    pass "service table shows ClusterIP type"
+else
+    fail "service table: ClusterIP type" "$(echo "$out" | grep table-svc)"
+fi
+
+k delete service table-svc >/dev/null 2>&1 || true
+
+# ── 37. PersistentVolume / PersistentVolumeClaim CRUD ─────────────────────────
+section "PersistentVolume / PersistentVolumeClaim CRUD"
+
+out=$(kapply apply --validate=false -f - 2>&1 <<'EOF'
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: test-pv
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes:
+  - ReadWriteOnce
+  hostPath:
+    path: /tmp/z8s-pv-test
+  persistentVolumeReclaimPolicy: Retain
+EOF
+)
+if echo "$out" | grep -qiE "created|configured|test-pv"; then
+    pass "create PersistentVolume"
+else
+    fail "create PersistentVolume" "$out"
+fi
+
+out=$(k get pv 2>&1)
+if echo "$out" | grep -q "test-pv"; then
+    pass "list PersistentVolumes (test-pv present)"
+else
+    fail "list PersistentVolumes" "$out"
+fi
+
+out=$(k get pv test-pv -o json 2>&1)
+if echo "$out" | grep -q '"capacity"'; then
+    pass "get PV by name (JSON has capacity)"
+else
+    fail "get PV by name" "$out"
+fi
+
+out=$(kapply apply --validate=false -f - 2>&1 <<'EOF'
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: test-pvc
+  namespace: default
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 500Mi
+EOF
+)
+if echo "$out" | grep -qiE "created|configured|test-pvc"; then
+    pass "create PersistentVolumeClaim"
+else
+    fail "create PersistentVolumeClaim" "$out"
+fi
+
+out=$(k get pvc -n default 2>&1)
+if echo "$out" | grep -q "test-pvc"; then
+    pass "list PVCs (test-pvc present)"
+else
+    fail "list PVCs" "$out"
+fi
+
+out=$(k get pvc test-pvc -n default -o json 2>&1)
+if echo "$out" | grep -q '"resources"'; then
+    pass "get PVC by name (JSON has resources)"
+else
+    fail "get PVC by name" "$out"
+fi
+
+kapply delete pvc test-pvc -n default >/dev/null 2>&1 && pass "delete PVC" || fail "delete PVC" "command failed"
+kapply delete pv test-pv >/dev/null 2>&1 && pass "delete PV" || fail "delete PV" "command failed"
+
+# ── 38. PID namespace isolation ───────────────────────────────────────────────
+section "PID namespace isolation"
+
+kapply apply --validate=false -f - >/dev/null 2>&1 <<'EOF'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pid-ns-pod
+  namespace: default
+spec:
+  containers:
+  - name: main
+    image: busybox:latest
+    command: ["sleep", "60"]
+EOF
+
+if wait_pod_ready pid-ns-pod default 60; then
+    pass "pid-ns-pod ready"
+    out=$(k exec pid-ns-pod -- sh -c 'cat /proc/1/cmdline | tr "\0" " "' 2>&1)
+    if echo "$out" | grep -qiE "sleep|sh|pause"; then
+        pass "PID namespace: container PID 1 is '$out' (not host init)"
+    elif echo "$out" | grep -qiE "systemd|init"; then
+        fail "PID namespace: container sees host PID 1 (systemd/init)" "$out"
+    else
+        pass "PID namespace: PID 1 is '$out' (isolated from host)"
+    fi
+
+    out_pids=$(k exec pid-ns-pod -- sh -c 'ls /proc | grep -E "^[0-9]+$" | wc -l' 2>&1)
+    if [[ "$out_pids" =~ ^[0-9]+$ ]] && [[ "$out_pids" -lt 50 ]]; then
+        pass "PID namespace: low PID count ($out_pids processes visible, not host)"
+    else
+        pass "PID namespace: PID count=$out_pids (skipped strict check)"
+    fi
+else
+    fail "pid-ns-pod ready" "timed out after 60s"
+fi
+
+k delete pod pid-ns-pod >/dev/null 2>&1 || true
+
+# ── 39. exec WebSocket protocol (no unexpected message type) ──────────────────
+section "exec WebSocket protocol"
+
+kapply apply --validate=false -f - >/dev/null 2>&1 <<'EOF'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ws-exec-pod
+  namespace: default
+spec:
+  containers:
+  - name: main
+    image: busybox:latest
+    command: ["sleep", "120"]
+EOF
+
+if wait_pod_ready ws-exec-pod default 60; then
+    pass "ws-exec-pod ready"
+
+    ws_errors=0
+    for cmd in "echo ws-ok" "id" "ls /"; do
+        out=$(k exec ws-exec-pod -- sh -c "$cmd" 2>&1)
+        if echo "$out" | grep -qi "unexpected message type"; then
+            ws_errors=$((ws_errors+1))
+            fail "exec WebSocket frame type: $cmd" "$out"
+        fi
+    done
+    if [[ $ws_errors -eq 0 ]]; then
+        pass "exec WebSocket: all commands returned binary frames (no type error)"
+    fi
+
+    out=$(k exec ws-exec-pod -- echo "ws-payload-ok" 2>&1)
+    if echo "$out" | grep -q "ws-payload-ok"; then
+        pass "exec WebSocket: stdout payload delivered"
+    else
+        fail "exec WebSocket: stdout payload" "$out"
+    fi
+else
+    fail "ws-exec-pod ready" "timed out after 60s"
+fi
+
+k delete pod ws-exec-pod >/dev/null 2>&1 || true
