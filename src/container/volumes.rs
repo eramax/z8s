@@ -98,7 +98,8 @@ fn resolve_volume_source(
     }
 
     if vol.empty_dir.is_some() {
-        let dir = format!("{}/emptydir/{}-{}", base, pod_uid, vol.name);
+        let safe_uid = pod_uid.replace('/', "_");
+        let dir = format!("{}/emptydir/{}-{}", base, safe_uid, vol.name);
         std::fs::create_dir_all(&dir)
             .with_context(|| format!("Failed to create emptydir at {}", dir))?;
         return Ok(Some((dir, false)));
@@ -207,7 +208,18 @@ pub fn bind_mount_volumes(rootfs_path: &str, volumes: &[ResolvedVolume]) {
                 info!("Mounted volume {} → {}", vol.host_path, vol.container_path);
             }
             Err(e) => {
-                warn!("Failed to bind-mount {} → {}: {}", vol.host_path, vol.container_path, e);
+                warn!("Failed to bind-mount {} → {}: {} — trying file copy fallback", vol.host_path, vol.container_path, e);
+                if src.is_dir() {
+                    if let Ok(entries) = std::fs::read_dir(src) {
+                        for entry in entries.flatten() {
+                            let dst_file = dst_path.join(entry.file_name());
+                            if entry.path().is_file() {
+                                std::fs::copy(entry.path(), &dst_file).ok();
+                            }
+                        }
+                        info!("Copied files {} → {}", vol.host_path, vol.container_path);
+                    }
+                }
             }
         }
     }
@@ -216,7 +228,8 @@ pub fn bind_mount_volumes(rootfs_path: &str, volumes: &[ResolvedVolume]) {
 pub fn cleanup_emptydir(pod_uid: &str) {
     let base = base_dir();
     let emptydir_base = format!("{}/emptydir", base);
-    let prefix = format!("{}-", pod_uid);
+    let safe_uid = pod_uid.replace('/', "_");
+    let prefix = format!("{}-", safe_uid);
     let Ok(entries) = std::fs::read_dir(&emptydir_base) else {
         return;
     };

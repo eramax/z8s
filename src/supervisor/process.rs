@@ -29,6 +29,8 @@ struct ContainerSpawnCtx<'a> {
     image: &'a str,
     container: &'a Container,
     volumes: Vec<crate::container::volumes::ResolvedVolume>,
+    run_as_user: Option<u32>,
+    run_as_group: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -269,6 +271,13 @@ impl ProcessSupervisor {
         let entrypoint = cmd[0].clone();
         let cmd_args: Vec<String> = cmd[1..].iter().chain(args.iter()).cloned().collect();
 
+        let run_as_user = container.security_context.as_ref()
+            .and_then(|sc| sc.run_as_user)
+            .map(|u| u as u32);
+        let run_as_group = container.security_context.as_ref()
+            .and_then(|sc| sc.run_as_group)
+            .map(|g| g as u32);
+
         let mut env_vars: Vec<(String, String)> = container
             .env
             .as_ref()
@@ -301,6 +310,15 @@ impl ProcessSupervisor {
             vec![]
         };
 
+        // Inject HOME if not already set
+        if !env_vars.iter().any(|(k, _)| k == "HOME") {
+            let home = match run_as_user {
+                Some(0) | None => "/root".to_string(),
+                Some(_) => "/home/user".to_string(),
+            };
+            env_vars.push(("HOME".to_string(), home));
+        }
+
         let mut child_cmd = if is_native {
             let mut c = Command::new(&entrypoint);
             c.args(&cmd_args);
@@ -320,6 +338,8 @@ impl ProcessSupervisor {
                 image: &image,
                 container,
                 volumes,
+                run_as_user,
+                run_as_group,
             };
             if rootfs::is_root() {
                 return self.spawn_root_ns_container(ctx).await;
@@ -346,7 +366,7 @@ impl ProcessSupervisor {
     }
 
     async fn spawn_root_ns_container(&self, ctx: ContainerSpawnCtx<'_>) -> Result<RunningContainer> {
-        let ContainerSpawnCtx { entrypoint, cmd_args, env_vars, rootfs_path, container_id, pod_uid, image, container, volumes } = ctx;
+        let ContainerSpawnCtx { entrypoint, cmd_args, env_vars, rootfs_path, container_id, pod_uid, image, container, volumes, run_as_user, run_as_group } = ctx;
         let (stdout_r, stdout_w) = nix::unistd::pipe().context("Failed to create stdout pipe")?;
         let (stderr_r, stderr_w) = nix::unistd::pipe().context("Failed to create stderr pipe")?;
 
@@ -433,6 +453,13 @@ impl ProcessSupervisor {
                     std::process::exit(1);
                 }
 
+                if let Some(gid) = run_as_group {
+                    let _ = nix::unistd::setgid(nix::unistd::Gid::from_raw(gid));
+                }
+                if let Some(uid) = run_as_user {
+                    let _ = nix::unistd::setuid(nix::unistd::Uid::from_raw(uid));
+                }
+
                 let mut argv: Vec<std::ffi::CString> =
                     vec![std::ffi::CString::new(entrypoint_owned.clone()).unwrap()];
                 for a in &args_owned {
@@ -458,7 +485,7 @@ impl ProcessSupervisor {
     }
 
     async fn spawn_userns_container(&self, ctx: ContainerSpawnCtx<'_>) -> Result<RunningContainer> {
-        let ContainerSpawnCtx { entrypoint, cmd_args, env_vars, rootfs_path, container_id, pod_uid, image, container, volumes } = ctx;
+        let ContainerSpawnCtx { entrypoint, cmd_args, env_vars, rootfs_path, container_id, pod_uid, image, container, volumes, run_as_user, run_as_group } = ctx;
         let (stdout_r, stdout_w) = nix::unistd::pipe()
             .context("Failed to create stdout pipe")?;
         let (stderr_r, stderr_w) = nix::unistd::pipe()
@@ -587,6 +614,13 @@ impl ProcessSupervisor {
                     nix::sys::stat::Mode::empty(),
                 ) {
                     let _ = nix::unistd::dup2_stdin(fd);
+                }
+
+                if let Some(gid) = run_as_group {
+                    let _ = nix::unistd::setgid(nix::unistd::Gid::from_raw(gid));
+                }
+                if let Some(uid) = run_as_user {
+                    let _ = nix::unistd::setuid(nix::unistd::Uid::from_raw(uid));
                 }
 
                 let mut argv: Vec<std::ffi::CString> = vec![

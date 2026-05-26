@@ -406,13 +406,21 @@ async fn exec_ws(
     }
 }
 
+fn error_frame(msg: &str) -> Message {
+    let status_json = serde_json::json!({
+        "kind": "Status", "apiVersion": "v1", "metadata": {},
+        "status": "Failure", "message": msg, "code": 500
+    });
+    let mut frame = vec![3u8];
+    frame.extend_from_slice(serde_json::to_string(&status_json).unwrap_or_default().as_bytes());
+    Message::Binary(axum::body::Bytes::from(frame))
+}
+
 async fn exec_ws_tty(mut socket: WebSocket, cmd: &str, args: &[&str], rootfs_pid: Option<(&str, u32)>, env_vars: &[(String, String)]) {
     let (master, mut child_cmd) = match spawn_with_pty(cmd, args, rootfs_pid, env_vars) {
         Ok(pair) => pair,
         Err(e) => {
-            let _ = socket
-                .send(Message::Text(format!("error: {}", e).into()))
-                .await;
+            let _ = socket.send(error_frame(&format!("pty setup: {}", e))).await;
             return;
         }
     };
@@ -420,9 +428,7 @@ async fn exec_ws_tty(mut socket: WebSocket, cmd: &str, args: &[&str], rootfs_pid
     let mut child = match child_cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            let _ = socket
-                .send(Message::Text(format!("spawn error: {}", e).into()))
-                .await;
+            let _ = socket.send(error_frame(&format!("spawn error: {}", e))).await;
             return;
         }
     };
@@ -505,9 +511,7 @@ async fn exec_ws_pipes(
     let mut child_cmd = match spawn_with_pipes(cmd, args, rootfs_pid, env_vars) {
         Ok(c) => c,
         Err(e) => {
-            let _ = socket
-                .send(Message::Text(format!("error: {}", e).into()))
-                .await;
+            let _ = socket.send(error_frame(&format!("pipe setup: {}", e))).await;
             return;
         }
     };
@@ -515,9 +519,7 @@ async fn exec_ws_pipes(
     let mut child = match child_cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            let _ = socket
-                .send(Message::Text(format!("spawn error: {}", e).into()))
-                .await;
+            let _ = socket.send(error_frame(&format!("spawn error: {}", e))).await;
             return;
         }
     };

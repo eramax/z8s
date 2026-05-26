@@ -57,7 +57,7 @@ impl AnyResource {
     }
 
     pub fn uid(&self) -> String {
-        format!("{}/{}", self.kind(), self.name())
+        format!("{}/{}/{}", self.kind(), self.namespace(), self.name())
     }
 }
 

@@ -439,7 +439,9 @@ fn fill_pod_metadata(pod: &mut k8s_openapi::api::core::v1::Pod) {
         meta.resource_version = Some("1".into());
     }
     if meta.uid.is_none() {
-        meta.uid = Some(format!("Pod/{}", meta.name.as_deref().unwrap_or("unknown")));
+        let ns = meta.namespace.as_deref().unwrap_or("default");
+        let name = meta.name.as_deref().unwrap_or("unknown");
+        meta.uid = Some(format!("Pod/{}/{}", ns, name));
     }
 }
 
@@ -452,7 +454,9 @@ fn fill_deployment_metadata(deploy: &mut k8s_openapi::api::apps::v1::Deployment)
         meta.resource_version = Some("1".into());
     }
     if meta.uid.is_none() {
-        meta.uid = Some(format!("Deployment/{}", meta.name.as_deref().unwrap_or("unknown")));
+        let ns = meta.namespace.as_deref().unwrap_or("default");
+        let name = meta.name.as_deref().unwrap_or("unknown");
+        meta.uid = Some(format!("Deployment/{}/{}", ns, name));
     }
 }
 
@@ -569,30 +573,108 @@ fn pod_list_to_table(items: &[serde_json::Value]) -> serde_json::Value {
     make_table(columns, rows)
 }
 
+fn parse_label_selector(raw: &str) -> Vec<(String, Option<String>)> {
+    if raw.is_empty() {
+        return vec![];
+    }
+    raw.split(',')
+        .filter(|s| !s.is_empty())
+        .map(|req| {
+            let req = urlpath_decode(req.trim());
+            if let Some((k, v)) = req.split_once('=') {
+                (k.trim().to_string(), Some(v.trim_start_matches('=').to_string()))
+            } else {
+                (req, None)
+            }
+        })
+        .collect()
+}
+
+fn urlpath_decode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (
+                (bytes[i + 1] as char).to_digit(16),
+                (bytes[i + 2] as char).to_digit(16),
+            ) {
+                out.push((hi as u8 * 16 + lo as u8) as char);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
+}
+
+fn labels_match_selector(
+    selector: &[(String, Option<String>)],
+    labels: &std::collections::BTreeMap<String, String>,
+) -> bool {
+    for (key, val) in selector {
+        match val {
+            Some(v) => {
+                if labels.get(key).map(|s| s.as_str()) != Some(v.as_str()) {
+                    return false;
+                }
+            }
+            None => {
+                if !labels.contains_key(key) {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
 async fn list_pods_all(
     State(state): State<AppState>,
+    axum::extract::RawQuery(raw_query): axum::extract::RawQuery,
     headers: axum::http::HeaderMap,
 ) -> Result<axum::response::Response, ApiError> {
-    list_pods_in_ns(state, None, headers).await
+    list_pods_in_ns(state, None, raw_query.as_deref().unwrap_or(""), headers).await
 }
 
 async fn list_pods(
     State(state): State<AppState>,
     Path(namespace): Path<String>,
+    axum::extract::RawQuery(raw_query): axum::extract::RawQuery,
     headers: axum::http::HeaderMap,
 ) -> Result<axum::response::Response, ApiError> {
-    list_pods_in_ns(state, Some(namespace), headers).await
+    list_pods_in_ns(state, Some(namespace), raw_query.as_deref().unwrap_or(""), headers).await
 }
 
 async fn list_pods_in_ns(
     state: AppState,
     namespace: Option<String>,
+    raw_query: &str,
     headers: axum::http::HeaderMap,
 ) -> Result<axum::response::Response, ApiError> {
+    let label_selector: Vec<(String, Option<String>)> = raw_query
+        .split('&')
+        .find_map(|part| {
+            let part = urlpath_decode(part);
+            part.strip_prefix("labelSelector=").map(|v| parse_label_selector(v))
+        })
+        .unwrap_or_default();
+
     let trackers = state.store.get_by_kind("Pod").await;
     let mut items = Vec::new();
     for t in &trackers {
         if namespace.as_deref().map_or(true, |ns| t.resource.namespace() == ns) {
+            if !label_selector.is_empty() {
+                if let AnyResource::Pod(pod) = &t.resource {
+                    let labels = pod.metadata.labels.clone().unwrap_or_default();
+                    if !labels_match_selector(&label_selector, &labels) {
+                        continue;
+                    }
+                }
+            }
             let ready = state.supervisor.is_pod_ready(t.resource.name()).await;
             items.push(resource_to_pod_json_with_status(&t.resource, &t.state, ready));
         }
@@ -1691,29 +1773,68 @@ fn alloc_node_port() -> i32 {
     NODEPORT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as i32
 }
 
-async fn list_services_all(State(state): State<AppState>) -> Json<serde_json::Value> {
-    list_services_in_ns(&state, None).await
+fn service_list_to_table(items: &[serde_json::Value]) -> serde_json::Value {
+    let columns = serde_json::json!([
+        {"name": "Name", "type": "string", "priority": 0},
+        {"name": "Type", "type": "string", "priority": 0},
+        {"name": "Cluster-IP", "type": "string", "priority": 0},
+        {"name": "External-IP", "type": "string", "priority": 0},
+        {"name": "Port(s)", "type": "string", "priority": 0},
+        {"name": "Age", "type": "string", "priority": 0},
+    ]);
+    let rows: Vec<serde_json::Value> = items.iter().map(|item| {
+        let meta = &item["metadata"];
+        let spec = &item["spec"];
+        let name = meta["name"].as_str().unwrap_or("");
+        let svc_type = spec["type"].as_str().unwrap_or("ClusterIP");
+        let cluster_ip = spec["clusterIP"].as_str().unwrap_or("<none>");
+        let external_ip = "<none>";
+        let ports = spec["ports"].as_array().map(|ps| {
+            ps.iter().map(|p| {
+                let port = p["port"].as_i64().unwrap_or(0);
+                let proto = p["protocol"].as_str().unwrap_or("TCP");
+                format!("{}/{}", port, proto)
+            }).collect::<Vec<_>>().join(",")
+        }).unwrap_or_default();
+        let age = age_from_timestamp(meta["creationTimestamp"].as_str().unwrap_or(""));
+        serde_json::json!({
+            "cells": [name, svc_type, cluster_ip, external_ip, ports, age],
+            "object": item,
+        })
+    }).collect();
+    make_table(columns, rows)
+}
+
+async fn list_services_all(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    list_services_in_ns(&state, None, headers).await
 }
 
 async fn list_services(
     State(state): State<AppState>,
     Path(namespace): Path<String>,
-) -> Json<serde_json::Value> {
-    list_services_in_ns(&state, Some(namespace)).await
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    list_services_in_ns(&state, Some(namespace), headers).await
 }
 
-async fn list_services_in_ns(state: &AppState, namespace: Option<String>) -> Json<serde_json::Value> {
+async fn list_services_in_ns(state: &AppState, namespace: Option<String>, headers: axum::http::HeaderMap) -> axum::response::Response {
     let trackers = state.store.get_by_kind("Service").await;
     let items: Vec<serde_json::Value> = trackers.iter()
         .filter(|t| namespace.as_deref().map_or(true, |ns| t.resource.namespace() == ns))
         .filter_map(|t| serde_json::to_value(&t.resource).ok())
         .collect();
+    if accepts_table(&headers) {
+        return (StatusCode::OK, Json(service_list_to_table(&items))).into_response();
+    }
     Json(serde_json::json!({
         "apiVersion": "v1",
         "kind": "ServiceList",
         "metadata": make_list_meta(),
         "items": items
-    }))
+    })).into_response()
 }
 
 async fn get_service(
@@ -1747,19 +1868,20 @@ async fn create_service(
         svc.metadata.creation_timestamp = Some(now_time());
     }
 
-    // Fill in ClusterIP and NodePort if missing
+    // Fill in ClusterIP, NodePort, and targetPort defaults if missing
     if let Some(spec) = svc.spec.as_mut() {
         let svc_type = spec.type_.as_deref().unwrap_or("ClusterIP");
         if spec.cluster_ip.as_deref().unwrap_or("").is_empty() && svc_type != "ExternalName" {
             spec.cluster_ip = Some(alloc_cluster_ip());
             spec.cluster_ips = spec.cluster_ip.clone().map(|ip| vec![ip]);
         }
-        if svc_type == "NodePort" || svc_type == "LoadBalancer" {
-            if let Some(ports) = spec.ports.as_mut() {
-                for p in ports.iter_mut() {
-                    if p.node_port.is_none() {
-                        p.node_port = Some(alloc_node_port());
-                    }
+        if let Some(ports) = spec.ports.as_mut() {
+            for p in ports.iter_mut() {
+                if p.target_port.is_none() {
+                    p.target_port = Some(k8s_openapi::apimachinery::pkg::util::intstr::IntOrString::Int(p.port));
+                }
+                if (svc_type == "NodePort" || svc_type == "LoadBalancer") && p.node_port.is_none() {
+                    p.node_port = Some(alloc_node_port());
                 }
             }
         }
