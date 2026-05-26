@@ -779,7 +779,8 @@ impl ProcessSupervisor {
                     let _ = nix::unistd::dup2_stdin(fd);
                 }
 
-                let isolation = match rootfs::child_enter_ns_root(&rootfs_owned, &volumes, isolate_net)
+                let pod_hostname = container_id.rsplit_once('-').map_or(container_id, |(pod, _)| pod);
+                let isolation = match rootfs::child_enter_ns_root(&rootfs_owned, &volumes, isolate_net, pod_hostname)
                 {
                     Ok(i) => i,
                     Err(e) => {
@@ -1003,12 +1004,14 @@ impl ProcessSupervisor {
                 drop(sync_r);
                 drop(ack_w);
 
+                let pod_hostname = container_id.rsplit_once('-').map_or(container_id, |(pod, _)| pod);
                 let isolation = match rootfs::child_enter_ns_fork(
                     &rootfs_owned,
                     sync_w,
                     ack_r,
                     &volumes,
                     isolate_net,
+                    pod_hostname,
                 ) {
                     Ok(i) => i,
                     Err(e) => {

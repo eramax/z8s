@@ -177,7 +177,6 @@ async fn handle_connection(
 
     let idx = counter.fetch_add(1, Ordering::Relaxed) % endpoints.len();
     let endpoint = &endpoints[idx];
-    info!("Service {}/{}: endpoint {} → {}:{}", svc_ns, svc_name, idx, endpoint.host, endpoint.port);
 
     let mut backend = match TcpStream::connect(format!("{}:{}", endpoint.host, endpoint.port)).await {
         Ok(s) => s,

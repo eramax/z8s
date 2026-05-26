@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use nix::mount::{mount, umount, MsFlags};
 use nix::sched::{unshare, CloneFlags};
 use nix::sys::stat::{makedev, mknod, Mode, SFlag};
-use nix::unistd::{chdir, chroot, getgid, getuid, pivot_root, Uid};
+use nix::unistd::{chdir, chroot, getgid, getuid, pivot_root, sethostname, Uid};
 use std::os::fd::OwnedFd;
 use std::path::Path;
 use tracing::{debug, info, warn};
@@ -456,6 +456,7 @@ pub fn child_enter_ns_fork(
     ack_r: OwnedFd,
     volumes: &[crate::container::volumes::ResolvedVolume],
     isolate_net: bool,
+    hostname: &str,
 ) -> Result<RootfsIsolation> {
     // Do not include CLONE_NEWPID: Go runtimes (whoami, http-echo) fail to spawn threads
     // with EINVAL in a PID namespace when filesystem isolation falls back to host mounts.
@@ -467,6 +468,7 @@ pub fn child_enter_ns_fork(
         flags |= CloneFlags::CLONE_NEWNET;
     }
     unshare(flags).context("Failed to unshare user/mount/uts/ipc namespaces")?;
+    sethostname(hostname).context("Failed to set container hostname")?;
 
     if isolate_net {
         crate::network::port_publish::setup_loopback();
@@ -523,6 +525,7 @@ pub fn child_enter_ns_root(
     rootfs_path: &str,
     volumes: &[crate::container::volumes::ResolvedVolume],
     isolate_net: bool,
+    hostname: &str,
 ) -> Result<RootfsIsolation> {
     // Do NOT include CLONE_NEWPID: unshare(CLONE_NEWPID) only affects future fork()s from
     // this child, not the child itself. The kernel then requires a fresh /proc mount scoped
@@ -537,6 +540,7 @@ pub fn child_enter_ns_root(
         flags |= CloneFlags::CLONE_NEWNET;
     }
     unshare(flags).context("Failed to unshare mount/uts/ipc")?;
+    sethostname(hostname).context("Failed to set container hostname")?;
 
     if isolate_net {
         crate::network::port_publish::setup_loopback();
