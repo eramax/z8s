@@ -31,7 +31,10 @@ pub fn resolve_exec_path(entrypoint: &str, rootfs_path: &str) -> String {
         [
             format!("{root}/bin/{entrypoint}"),
             format!("{root}/usr/bin/{entrypoint}"),
+            format!("{root}/usr/local/bin/{entrypoint}"),
             format!("{root}/sbin/{entrypoint}"),
+            format!("{root}/usr/sbin/{entrypoint}"),
+            format!("{root}/usr/local/sbin/{entrypoint}"),
         ]
         .to_vec()
     };
@@ -58,25 +61,23 @@ pub fn resolve_exec_path(entrypoint: &str, rootfs_path: &str) -> String {
     } else if entrypoint.starts_with('/') {
         format!("{root}{entrypoint}")
     } else {
-        format!("{root}/bin/{entrypoint}")
+        entrypoint.to_string()
     }
 }
 
 /// True when the container process has pivot_root/chroot into its OCI rootfs.
 pub fn container_fs_isolated(container_pid: u32, rootfs_path: &str) -> bool {
-    let root = rootfs_path.trim_end_matches('/');
-    let link = format!("/proc/{container_pid}/root");
-    std::fs::read_link(&link)
-        .ok()
-        .and_then(|p| p.canonicalize().ok())
-        .map(|p| p.to_string_lossy().trim_end_matches('/').to_string())
-        .or_else(|| {
-            std::fs::read_link(&link)
-                .ok()
-                .map(|p| p.to_string_lossy().trim_end_matches('/').to_string())
-        })
-        .map(|target| target == root)
-        .unwrap_or(false)
+    use std::os::unix::fs::MetadataExt;
+    let proc_root = format!("/proc/{container_pid}/root");
+    let proc_meta = match std::fs::metadata(&proc_root) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    let rootfs_meta = match std::fs::metadata(rootfs_path) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    proc_meta.dev() == rootfs_meta.dev() && proc_meta.ino() == rootfs_meta.ino()
 }
 
 /// Read the PT_INTERP path from an ELF binary (e.g. `/lib/ld-musl-x86_64.so.1`).
@@ -178,7 +179,7 @@ pub fn host_path_in_container_root(host_path: &str, rootfs_path: &str) -> String
     } else if host_path.starts_with('/') {
         host_path.to_string()
     } else {
-        format!("/bin/{host_path}")
+        host_path.to_string()
     }
 }
 
@@ -445,18 +446,16 @@ pub fn child_enter_ns_fork(
         warn!("mount MS_SLAVE on / failed ({e}) — attempting chroot fallback");
     }
 
-    // Bind-mount pod volumes before pivot_root (host paths are still visible)
-    if !volumes.is_empty() && !rootfs_path.is_empty() {
-        crate::container::volumes::bind_mount_volumes(rootfs_path, volumes);
-    }
-
     // Try full isolation: bind mount + pivot_root.
-    if enter_rootfs(rootfs_path, false).is_ok() {
+    if enter_rootfs(rootfs_path, false, volumes).is_ok() {
         return Ok(RootfsIsolation::Pivot);
     }
 
     // Fallback 1: chroot (works in some environments without full mount namespace)
     eprintln!("z8s: pivot_root unavailable, trying chroot isolation");
+    if !volumes.is_empty() {
+        crate::container::volumes::bind_mount_volumes(rootfs_path, volumes);
+    }
     match chroot(rootfs_path) {
         Ok(()) => {
             chdir("/").context("chdir / after chroot failed")?;
@@ -501,17 +500,16 @@ pub fn child_enter_ns_root(
     )
     .context("Failed to set slave mount propagation")?;
 
-    if !volumes.is_empty() {
-        crate::container::volumes::bind_mount_volumes(rootfs_path, volumes);
-    }
-
     // Try pivot_root for stronger isolation (is_root=true: mount proc/sys/dev fresh)
-    if enter_rootfs(rootfs_path, true).is_ok() {
+    if enter_rootfs(rootfs_path, true, volumes).is_ok() {
         return Ok(RootfsIsolation::Pivot);
     }
 
     // Fallback: chroot
     warn!("pivot_root failed in root mode, falling back to chroot");
+    if !volumes.is_empty() {
+        crate::container::volumes::bind_mount_volumes(rootfs_path, volumes);
+    }
     chroot(rootfs_path).context("Failed to chroot")?;
     chdir("/").context("Failed to chdir to /")?;
 
@@ -572,7 +570,11 @@ fn make_parent_mount_private(rootfs: &Path) -> Result<()> {
     Ok(())
 }
 
-fn enter_rootfs(rootfs_path: &str, is_root: bool) -> Result<()> {
+fn enter_rootfs(
+    rootfs_path: &str,
+    is_root: bool,
+    volumes: &[crate::container::volumes::ResolvedVolume],
+) -> Result<()> {
     let rootfs = Path::new(rootfs_path);
     if !rootfs.exists() {
         anyhow::bail!("Rootfs does not exist: {}", rootfs_path);
@@ -590,6 +592,10 @@ fn enter_rootfs(rootfs_path: &str, is_root: bool) -> Result<()> {
         None::<&str>,
     )
     .context("Failed to bind mount rootfs")?;
+
+    if !volumes.is_empty() {
+        crate::container::volumes::bind_mount_volumes(rootfs_path, volumes);
+    }
 
     // Bind-mount /proc and /sys from host into rootfs before pivot_root
     if !is_root && !nix::unistd::access(Path::new("/proc"), nix::unistd::AccessFlags::R_OK).is_err() {

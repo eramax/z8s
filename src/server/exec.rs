@@ -360,6 +360,19 @@ fn is_root() -> bool {
     rootfs::is_root()
 }
 
+fn read_container_path(pid: u32) -> String {
+    if let Ok(data) = std::fs::read(format!("/proc/{pid}/environ")) {
+        for var in data.split(|&b| b == 0) {
+            if var.starts_with(b"PATH=") {
+                if let Ok(s) = String::from_utf8(var[5..].to_vec()) {
+                    return s;
+                }
+            }
+        }
+    }
+    std::env::var("PATH").unwrap_or_else(|_| "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string())
+}
+
 fn build_command(
     cmd: &str,
     args: &[&str],
@@ -369,13 +382,32 @@ fn build_command(
 ) -> Command {
     let mut apply_env = |c: &mut Command| {
         c.env_clear();
+        let mut has_path = false;
         for (k, v) in env_vars {
             c.env(k, v);
+            if k == "PATH" {
+                has_path = true;
+            }
+        }
+        if !has_path {
+            let fallback_path = std::env::var("PATH").unwrap_or_else(|_| "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string());
+            if let Some((_, pid)) = rootfs_pid {
+                c.env("PATH", read_container_path(pid));
+            } else {
+                c.env("PATH", fallback_path);
+            }
         }
     };
     let args_owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
 
     if let Some((root, container_pid)) = rootfs_pid {
+        use std::os::unix::fs::MetadataExt;
+        let (c_uid, c_gid) = if let Ok(m) = std::fs::metadata(format!("/proc/{container_pid}")) {
+            (Some(m.uid()), Some(m.gid()))
+        } else {
+            (None, None)
+        };
+
         let ns_fds = try_open_namespace_fds(container_pid);
         let fs_isolated = rootfs::container_fs_isolated(container_pid, root);
         let use_mnt_ns = fs_isolated;
@@ -403,6 +435,12 @@ fn build_command(
                 c.as_std_mut().pre_exec(move || {
                     if enter_container_namespaces(&ns, iso_net, use_mnt).is_err() {
                         let _ = enter_namespaces_no_user(&ns, iso_net, use_mnt);
+                    }
+                    if let Some(g) = c_gid {
+                        let _ = nix::unistd::setgid(nix::unistd::Gid::from_raw(g));
+                    }
+                    if let Some(u) = c_uid {
+                        let _ = nix::unistd::setuid(nix::unistd::Uid::from_raw(u));
                     }
                     Ok(())
                 });

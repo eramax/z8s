@@ -17,8 +17,8 @@ fail() { local m="$1" d="${2:-}"; echo -e "${RED}FAIL${NC} $m${d:+: $d}"; ERRORS
 section() { echo -e "\n${YELLOW}══ $1 ══${NC}"; }
 sub() { echo -e "${CYAN}  ▸ $1${NC}"; }
 
-k() { kubectl --server="$SERVER" "$@" 2>&1 || true; }
-kapply() { kubectl --server="$SERVER" "$@" 2>&1; }
+k() { /home/abb/.local/bin/kubectl --server="$SERVER" "$@" 2>&1 || true; }
+kapply() { /home/abb/.local/bin/kubectl --server="$SERVER" "$@" 2>&1; }
 
 wait_pod_ready() {
     local name="$1" ns="${2:-default}" timeout="${3:-30}"
@@ -42,7 +42,10 @@ wait_deploy_ready() {
     while [[ $(date +%s) -lt $deadline ]]; do
         local ready
         ready=$(k get deployment "$name" -n "$ns" -o jsonpath='{.status.readyReplicas}' 2>/dev/null)
-        if [[ "${ready:-0}" -ge "$replicas" ]]; then
+        if [[ ! "$ready" =~ ^[0-9]+$ ]]; then
+            ready=0
+        fi
+        if [[ "$ready" -ge "$replicas" ]]; then
             return 0
         fi
         sleep 1
@@ -394,20 +397,20 @@ if echo "$out" | grep -q "DB_PASSWORD=test-pass"; then pass "ubuntu (z8s-test): 
 sub "Python pod — HTTP server"
 PYTHON_OK=0
 for try in 1 2 3; do
-    out=$(k exec python-pod -- wget -q -O- http://127.0.0.1:18080/ 2>&1) || true
+    out=$(k exec python-pod -- python3 -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:18080/').read().decode())" 2>&1) || true
     if echo "$out" | grep -qiE "directory listing|http|html"; then
         pass "python: HTTP server responds (try $try)"
         PYTHON_OK=1
         break
     fi
-    if echo "$out" | grep -qiE "no such file|not found|wget: "; then
+    if echo "$out" | grep -qiE "no such file|not found|urllib|error"; then
         sleep 2
         continue
     fi
     sleep 2
 done
 if [[ $PYTHON_OK -eq 0 ]]; then
-    out=$(k exec python-pod -- wget -q -O- http://127.0.0.1:8080/ 2>&1) || true
+    out=$(k exec python-pod -- python3 -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8080/').read().decode())" 2>&1) || true
     if echo "$out" | grep -qiE "directory listing|http|html"; then
         pass "python: HTTP server check — $out"
     else

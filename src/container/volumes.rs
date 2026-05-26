@@ -69,8 +69,13 @@ pub fn prepare_volumes(
 
         match resolve_volume_source(vol, namespace, pod_uid, &base, get_configmap, get_secret) {
             Ok(Some((host_path, _))) => {
+                let final_host_path = if let Some(sub) = &mount.sub_path {
+                    Path::new(&host_path).join(sub).to_string_lossy().to_string()
+                } else {
+                    host_path
+                };
                 resolved.push(ResolvedVolume {
-                    host_path,
+                    host_path: final_host_path,
                     container_path: mount.mount_path.clone(),
                     read_only: mount.read_only.unwrap_or(false),
                 });
@@ -102,6 +107,8 @@ fn resolve_volume_source(
         let dir = format!("{}/emptydir/{}-{}", base, safe_uid, vol.name);
         std::fs::create_dir_all(&dir)
             .with_context(|| format!("Failed to create emptydir at {}", dir))?;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).ok();
         return Ok(Some((dir, false)));
     }
 
@@ -255,6 +262,9 @@ pub fn bind_mount_volumes_degraded(volumes: &[ResolvedVolume]) {
             std::fs::create_dir_all(dst_path).ok();
         } else if let Some(parent) = dst_path.parent() {
             std::fs::create_dir_all(parent).ok();
+            if !dst_path.exists() {
+                let _ = std::fs::write(dst_path, []);
+            }
         }
 
         if mount(Some(src), dst_path, None::<&str>, flags, None::<&str>).is_ok() {
@@ -317,6 +327,12 @@ pub fn stage_volumes_in_rootfs(rootfs_path: &str, volumes: &[ResolvedVolume]) {
             } else if copy_tree(src, &dst).is_ok() {
                 info!("Copied volume into rootfs {} → {}", vol.host_path, dst.display());
             }
+        } else if src.is_file() {
+            if std::os::unix::fs::symlink(src, &dst).is_ok() {
+                info!("Staged volume file in rootfs {} → {}", vol.host_path, dst.display());
+            } else if std::fs::copy(src, &dst).is_ok() {
+                info!("Copied volume file into rootfs {} → {}", vol.host_path, dst.display());
+            }
         }
     }
 }
@@ -340,6 +356,9 @@ pub fn bind_mount_volumes(rootfs_path: &str, volumes: &[ResolvedVolume]) {
             std::fs::create_dir_all(dst_path).ok();
         } else if let Some(parent) = dst_path.parent() {
             std::fs::create_dir_all(parent).ok();
+            if !dst_path.exists() {
+                let _ = std::fs::write(dst_path, []);
+            }
         }
 
         let flags = MsFlags::MS_BIND | MsFlags::MS_REC;
