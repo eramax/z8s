@@ -223,8 +223,11 @@ impl NetworkManager {
                 if !is_running {
                     continue;
                 }
+                let pod_ip = pod.status.as_ref()
+                    .and_then(|s| s.pod_ip.as_deref())
+                    .unwrap_or("127.0.0.1");
                 addresses.push(EndpointAddress {
-                    ip: "127.0.0.1".to_string(),
+                    ip: pod_ip.to_string(),
                     hostname: None,
                     node_name: Some("z8s-node".to_string()),
                     target_ref: Some(ObjectReference {
@@ -271,6 +274,93 @@ impl NetworkManager {
                 ..Default::default()
             },
             subsets: Some(subsets),
+        }
+    }
+
+    /// Generate an EndpointSlice object for a service (used by kubectl describe svc).
+    pub async fn compute_endpointslice(
+        &self,
+        svc: &Service,
+    ) -> k8s_openapi::api::discovery::v1::EndpointSlice {
+        use k8s_openapi::api::discovery::v1::{Endpoint as DiscoveryEndpoint, EndpointConditions, EndpointPort as DiscoveryEndpointPort, EndpointSlice};
+        use k8s_openapi::api::core::v1::ObjectReference;
+
+        let svc_name = svc.metadata.name.as_deref().unwrap_or_default().to_string();
+        let svc_ns = svc.metadata.namespace.as_deref().unwrap_or("default").to_string();
+        let selector = svc.spec.as_ref()
+            .and_then(|s| s.selector.as_ref())
+            .cloned()
+            .unwrap_or_default();
+
+        let mut endpoints = Vec::new();
+
+        let pod_trackers = self.store.get_by_kind("Pod").await;
+        for t in &pod_trackers {
+            if let crate::api::AnyResource::Pod(pod) = &t.resource {
+                if pod.metadata.namespace.as_deref().unwrap_or("default") != svc_ns {
+                    continue;
+                }
+                let pod_labels: BTreeMap<String, String> = pod.metadata.labels.clone().unwrap_or_default();
+                if !selector.iter().all(|(k, v)| pod_labels.get(k) == Some(v)) {
+                    continue;
+                }
+                let pod_name = pod.metadata.name.as_deref().unwrap_or_default();
+                let is_ready = self.supervisor.is_pod_ready(pod_name).await;
+                if !is_ready {
+                    continue;
+                }
+                let pod_ip = pod.status.as_ref()
+                    .and_then(|s| s.pod_ip.as_deref())
+                    .unwrap_or("127.0.0.1");
+                endpoints.push(DiscoveryEndpoint {
+                    addresses: vec![pod_ip.to_string()],
+                    conditions: Some(EndpointConditions {
+                        ready: Some(true),
+                        serving: Some(true),
+                        terminating: Some(false),
+                    }),
+                    hostname: None,
+                    node_name: Some("z8s-node".to_string()),
+                    target_ref: Some(ObjectReference {
+                        kind: Some("Pod".to_string()),
+                        name: Some(pod_name.to_string()),
+                        namespace: Some(svc_ns.clone()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                });
+            }
+        }
+
+        let ports: Option<Vec<DiscoveryEndpointPort>> = svc.spec.as_ref()
+            .and_then(|s| s.ports.as_ref())
+            .map(|ps| {
+                ps.iter().map(|p| DiscoveryEndpointPort {
+                    name: p.name.clone(),
+                    port: p.target_port.as_ref()
+                        .and_then(|tp| match tp {
+                            IntOrString::Int(i) => Some(*i),
+                            IntOrString::String(_) => None,
+                        })
+                        .or(Some(p.port)),
+                    protocol: p.protocol.clone(),
+                    ..Default::default()
+                }).collect()
+            });
+
+        let slice_name = format!("{}-z8s", svc_name);
+        EndpointSlice {
+            address_type: "IPv4".to_string(),
+            endpoints,
+            metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+                name: Some(slice_name),
+                namespace: Some(svc_ns),
+                labels: Some(BTreeMap::from([
+                    ("kubernetes.io/service-name".to_string(), svc_name.clone()),
+                ])),
+                ..Default::default()
+            },
+            ports,
         }
     }
 }

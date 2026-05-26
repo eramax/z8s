@@ -16,6 +16,7 @@ use k8s_openapi::api::core::v1::{
     NodeCondition, NodeDaemonEndpoints, NodeSpec, NodeStatus, NodeSystemInfo,
     ObjectReference, PodCondition, PodIP, PodStatus, Secret, Service, ServiceStatus,
 };
+use k8s_openapi::api::discovery::v1::EndpointSlice;
 use k8s_openapi::List;
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{
@@ -161,6 +162,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/endpoints", get(list_endpoints_all))
         .route("/api/v1/namespaces/{namespace}/endpoints", get(list_endpoints))
         .route("/api/v1/namespaces/{namespace}/endpoints/{name}", get(get_endpoints))
+        // EndpointSlices (discovery.k8s.io/v1)
+        .route("/apis/discovery.k8s.io/v1", get(api_discovery_v1_resources))
+        .route("/apis/discovery.k8s.io/v1/endpointslices", get(list_endpointslices_all))
+        .route("/apis/discovery.k8s.io/v1/namespaces/{namespace}/endpointslices", get(list_endpointslices))
+        .route("/apis/discovery.k8s.io/v1/namespaces/{namespace}/endpointslices/{name}", get(get_endpointslice))
         // Metrics
         .route("/apis/metrics.k8s.io/v1beta1", get(metrics_api_resources))
         .route("/apis/metrics.k8s.io/v1beta1/nodes", get(metrics_top_nodes))
@@ -368,6 +374,12 @@ async fn api_groups() -> Json<APIGroupList> {
                 preferred_version: Some(gvd("authorization.k8s.io/v1", "v1")),
                 server_address_by_client_cidrs: None,
             },
+            APIGroup {
+                name: "discovery.k8s.io".into(),
+                versions: vec![gvd("discovery.k8s.io/v1", "v1")],
+                preferred_version: Some(gvd("discovery.k8s.io/v1", "v1")),
+                server_address_by_client_cidrs: None,
+            },
         ],
     })
 }
@@ -393,6 +405,15 @@ async fn api_authz_v1_resources() -> Json<APIResourceList> {
         resources: vec![
             api_resource("selfsubjectaccessreviews", "", false, "SelfSubjectAccessReview", &["create"], &[], &[]),
             api_resource("subjectaccessreviews", "", false, "SubjectAccessReview", &["create"], &[], &[]),
+        ],
+    })
+}
+
+async fn api_discovery_v1_resources() -> Json<APIResourceList> {
+    Json(APIResourceList {
+        group_version: "discovery.k8s.io/v1".into(),
+        resources: vec![
+            api_resource("endpointslices", "endpointslice", true, "EndpointSlice", &["get", "list", "watch"], &[], &[]),
         ],
     })
 }
@@ -2126,6 +2147,57 @@ async fn get_endpoints(
         }
     }
     Err(ApiError::not_found(format!("endpoints \"{}/{}\" not found", namespace, name)))
+}
+
+// ── EndpointSlices (discovery.k8s.io/v1) ────────────────────────────────────────
+
+async fn list_endpointslices_all(State(state): State<AppState>) -> Json<serde_json::Value> {
+    list_endpointslices_ns(&state, None).await
+}
+
+async fn list_endpointslices(
+    State(state): State<AppState>,
+    Path(namespace): Path<String>,
+) -> Json<serde_json::Value> {
+    list_endpointslices_ns(&state, Some(namespace)).await
+}
+
+async fn list_endpointslices_ns(state: &AppState, namespace: Option<String>) -> Json<serde_json::Value> {
+    let svc_trackers = state.store.get_by_kind("Service").await;
+    let mut items = Vec::new();
+    for t in &svc_trackers {
+        if namespace.as_deref().map_or(false, |ns| t.resource.namespace() != ns) { continue; }
+        if let AnyResource::Service(svc) = &t.resource {
+            let ep = state.network.compute_endpointslice(svc).await;
+            if let Ok(v) = serde_json::to_value(&ep) { items.push(v); }
+        }
+    }
+    Json(serde_json::json!({
+        "apiVersion": "discovery.k8s.io/v1",
+        "kind": "EndpointSliceList",
+        "metadata": make_list_meta(),
+        "items": items
+    }))
+}
+
+async fn get_endpointslice(
+    State(state): State<AppState>,
+    Path((namespace, name)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    // The endpointslice name includes a suffix; find the matching service
+    let trackers = state.store.get_by_kind("Service").await;
+    for t in &trackers {
+        if t.resource.namespace() != namespace { continue; }
+        let svc_name = t.resource.name();
+        let slice_name = format!("{}-z8s", svc_name);
+        if slice_name == name {
+            if let AnyResource::Service(svc) = &t.resource {
+                let ep = state.network.compute_endpointslice(svc).await;
+                return Ok(Json(serde_json::to_value(&ep).unwrap_or_default()));
+            }
+        }
+    }
+    Err(ApiError::not_found(format!("endpointslices \"{}/{}\" not found", namespace, name)))
 }
 
 // ── PersistentVolumes (cluster-scoped) ────────────────────────────────────────
