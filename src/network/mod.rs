@@ -144,6 +144,30 @@ impl NetworkManager {
         }
     }
 
+    /// Re-bind service proxies when a pod becomes ready (pods often start after their Service).
+    pub async fn sync_services_for_labels(&self, namespace: &str, pod_labels: &BTreeMap<String, String>) {
+        let trackers = self.store.get_by_kind("Service").await;
+        for t in &trackers {
+            if let crate::api::AnyResource::Service(svc) = &t.resource {
+                if svc.metadata.namespace.as_deref().unwrap_or("default") != namespace {
+                    continue;
+                }
+                let selector = svc
+                    .spec
+                    .as_ref()
+                    .and_then(|s| s.selector.as_ref())
+                    .cloned()
+                    .unwrap_or_default();
+                if selector.is_empty() {
+                    continue;
+                }
+                if selector.iter().all(|(k, v)| pod_labels.get(k) == Some(v)) {
+                    self.sync_service(svc).await;
+                }
+            }
+        }
+    }
+
     pub async fn remove_service(&self, ns: &str, name: &str) {
         let prefix = format!("{}/{}", ns, name);
         let mut proxies = self.proxies.lock().await;

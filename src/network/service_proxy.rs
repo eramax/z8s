@@ -56,11 +56,20 @@ pub async fn run_proxy_addr(
     svc_name: &str,
     svc_ns: &str,
 ) {
-    let listener = match TcpListener::bind(listen_addr).await {
-        Ok(l) => l,
-        Err(e) => {
-            warn!("Service proxy {}/{}: failed to bind {}: {}", svc_ns, svc_name, listen_addr, e);
-            return;
+    let listener = loop {
+        match TcpListener::bind(listen_addr).await {
+            Ok(l) => break l,
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                warn!(
+                    "Service proxy {}/{}: {} in use, retrying in 2s",
+                    svc_ns, svc_name, listen_addr
+                );
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+            Err(e) => {
+                warn!("Service proxy {}/{}: failed to bind {}: {}", svc_ns, svc_name, listen_addr, e);
+                return;
+            }
         }
     };
     info!("Service proxy {}/{} listening on {}", svc_ns, svc_name, listen_addr);
@@ -183,18 +192,29 @@ async fn find_endpoints(
             }
 
             let pod_name = pod.metadata.name.as_deref().unwrap_or_default();
-            if !supervisor.is_pod_ready(pod_name).await {
+            if !supervisor.is_pod_alive(pod_name).await {
                 continue;
             }
 
-            // Resolve the target port
-            let port = resolve_container_port(pod, target_port);
-            if let Some(port) = port {
-                endpoints.push(super::ServiceEndpoint {
-                    host: "127.0.0.1".to_string(),
-                    port,
-                });
+            let port = match resolve_container_port(pod, target_port) {
+                Some(p) => p,
+                None => continue,
+            };
+
+            let addr = format!("127.0.0.1:{}", port);
+            if tokio::time::timeout(Duration::from_millis(500), TcpStream::connect(&addr))
+                .await
+                .ok()
+                .and_then(|r| r.ok())
+                .is_none()
+            {
+                continue;
             }
+
+            endpoints.push(super::ServiceEndpoint {
+                host: "127.0.0.1".to_string(),
+                port,
+            });
         }
     }
 

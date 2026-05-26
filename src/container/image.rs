@@ -1,9 +1,12 @@
 use anyhow::{Context, Result};
 use oci_distribution::client::{Client, ClientConfig, ImageLayer};
+use oci_distribution::config::ConfigFile;
 use oci_distribution::secrets::RegistryAuth;
 use oci_distribution::Reference;
 use std::path::Path;
 use tracing::{debug, info};
+
+use crate::container::oci_config::{save_image_config, OCI_CONFIG_FILE};
 
 const ACCEPTED_LAYER_TYPES: &[&str] = &[
     "application/vnd.docker.image.rootfs.diff.tar.gzip",
@@ -54,6 +57,14 @@ impl ImageManager {
         format!("{}/{:016x}", self.cache_dir, hasher.finish())
     }
 
+    fn copy_oci_config(cache_path: &str, container_rootfs: &str) {
+        let src = Path::new(cache_path).join(OCI_CONFIG_FILE);
+        let dst = Path::new(container_rootfs).join(OCI_CONFIG_FILE);
+        if src.exists() {
+            std::fs::copy(src, dst).ok();
+        }
+    }
+
     fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
         let status = std::process::Command::new("cp")
             .arg("-a")
@@ -99,6 +110,17 @@ impl ImageManager {
                         std::fs::remove_dir_all(&container_rootfs)?;
                     }
                     Self::copy_dir(Path::new(&cache_path), Path::new(&container_rootfs))?;
+                    Self::copy_oci_config(&cache_path, &container_rootfs);
+                    // Backfill OCI config for caches created before we stored Entrypoint/Cmd
+                    if !Path::new(&cache_path).join(OCI_CONFIG_FILE).exists() {
+                        let guessed = crate::container::oci_config::guess_image_config(&cache_path);
+                        save_image_config(
+                            &cache_path,
+                            guessed.entrypoint.clone(),
+                            guessed.cmd.clone(),
+                        );
+                        Self::copy_oci_config(&cache_path, &container_rootfs);
+                    }
                     std::fs::write(&meta_path, image_ref)?;
                     return Ok(container_rootfs);
                 }
@@ -127,6 +149,18 @@ impl ImageManager {
 
         let layers = &image_data.layers;
         info!("Unpacking {} layers for {}", layers.len(), image_ref);
+        let config_file: ConfigFile = image_data
+            .config
+            .clone()
+            .try_into()
+            .context("Failed to parse OCI image config")?;
+        let (image_ep, image_cmd) = config_file
+            .config
+            .as_ref()
+            .map(|c| (c.entrypoint.clone(), c.cmd.clone()))
+            .unwrap_or((None, None));
+        save_image_config(&cache_path, image_ep, image_cmd);
+
         for (i, layer) in layers.iter().enumerate() {
             self.unpack_layer(layer, &cache_path, i)?;
         }
@@ -137,6 +171,7 @@ impl ImageManager {
             std::fs::remove_dir_all(&container_rootfs)?;
         }
         Self::copy_dir(Path::new(&cache_path), Path::new(&container_rootfs))?;
+        Self::copy_oci_config(&cache_path, &container_rootfs);
         std::fs::write(&meta_path, image_ref)?;
 
         info!("Image {} unpacked to {}", image_ref, container_rootfs);

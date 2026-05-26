@@ -28,6 +28,26 @@ fn resolve_run_as_user(pod_sc: Option<&PodSecurityContext>, container: &Containe
         .map(|u| u as u32)
 }
 
+/// Resolve the binary path after namespace setup (pivot/chroot may have failed).
+fn resolve_exec_path(entrypoint: &str, rootfs_path: &str) -> String {
+    if std::path::Path::new(entrypoint).exists() {
+        entrypoint.to_string()
+    } else {
+        format!("{}{}", rootfs_path, entrypoint)
+    }
+}
+
+fn raise_nproc_limit() {
+    use nix::sys::resource::{getrlimit, setrlimit, Resource};
+    if let Ok((soft, hard)) = getrlimit(Resource::RLIMIT_NPROC) {
+        let target: u64 = 65535;
+        if soft < target {
+            let new_hard = hard.max(target);
+            let _ = setrlimit(Resource::RLIMIT_NPROC, target, new_hard);
+        }
+    }
+}
+
 fn resolve_run_as_group(pod_sc: Option<&PodSecurityContext>, container: &Container) -> Option<u32> {
     container
         .security_context
@@ -78,6 +98,7 @@ pub struct ProcessSupervisor {
     pub cgroup_manager: Arc<CgroupManager>,
     pub store: Arc<ResourceStore>,
     restart_counts: Arc<Mutex<HashMap<String, u32>>>,
+    network: Arc<std::sync::Mutex<Option<Arc<crate::network::NetworkManager>>>>,
 }
 
 impl ProcessSupervisor {
@@ -98,7 +119,12 @@ impl ProcessSupervisor {
             cgroup_manager,
             store,
             restart_counts: Arc::new(Mutex::new(HashMap::new())),
+            network: Arc::new(std::sync::Mutex::new(None)),
         }
+    }
+
+    pub fn set_network(&self, network: Arc<crate::network::NetworkManager>) {
+        *self.network.lock().unwrap() = Some(network);
     }
 
     pub async fn start_pod(&self, resource: &AnyResource) -> Result<()> {
@@ -153,6 +179,16 @@ impl ProcessSupervisor {
         drop(running);
 
         self.store.update_state(&pod_uid, ResourceState::Running).await;
+
+        if let AnyResource::Pod(pod) = resource {
+            let ns = pod.metadata.namespace.as_deref().unwrap_or("default");
+            let labels = pod.metadata.labels.clone().unwrap_or_default();
+            let net = self.network.lock().unwrap().clone();
+            if let Some(net) = net {
+                net.sync_services_for_labels(ns, &labels).await;
+            }
+        }
+
         Ok(())
     }
 
@@ -274,20 +310,20 @@ impl ProcessSupervisor {
         pod_uid: &str,
     ) -> Result<RunningContainer> {
         let image = container.image.clone().unwrap_or_default();
-        let command = container.command.clone().unwrap_or_default();
-        let args = container.args.clone().unwrap_or_default();
         let is_native = rootfs_path.is_empty();
 
-        let cmd = if !command.is_empty() {
-            command
-        } else if is_native {
-            anyhow::bail!("Native process container '{}' must have a command", container.name);
+        let (entrypoint, cmd_args) = if is_native {
+            let command = container.command.clone().unwrap_or_default();
+            if command.is_empty() {
+                anyhow::bail!("Native process container '{}' must have a command", container.name);
+            }
+            let args = container.args.clone().unwrap_or_default();
+            let ep = command[0].clone();
+            let rest: Vec<String> = command[1..].iter().chain(args.iter()).cloned().collect();
+            (ep, rest)
         } else {
-            vec!["/bin/sh".to_string()]
+            crate::container::oci_config::resolve_argv(container, rootfs_path)
         };
-
-        let entrypoint = cmd[0].clone();
-        let cmd_args: Vec<String> = cmd[1..].iter().chain(args.iter()).cloned().collect();
 
         let pod_sc = match resource {
             AnyResource::Pod(pod) => pod.spec.as_ref().and_then(|s| s.security_context.as_ref()),
@@ -481,8 +517,11 @@ impl ProcessSupervisor {
                     let _ = nix::unistd::setuid(nix::unistd::Uid::from_raw(uid));
                 }
 
+                raise_nproc_limit();
+
+                let exec_path = resolve_exec_path(&entrypoint_owned, &rootfs_owned);
                 let mut argv: Vec<std::ffi::CString> =
-                    vec![std::ffi::CString::new(entrypoint_owned.clone()).unwrap()];
+                    vec![std::ffi::CString::new(exec_path.clone()).unwrap()];
                 for a in &args_owned {
                     argv.push(std::ffi::CString::new(a.as_str()).unwrap());
                 }
@@ -492,7 +531,7 @@ impl ProcessSupervisor {
 
                 let e = nix::unistd::execvpe(&argv[0], &argv, &envp)
                     .expect_err("execvpe returned unexpectedly");
-                eprintln!("z8s: execvpe({}) failed: {}", entrypoint_owned, e);
+                eprintln!("z8s: execvpe({}) failed: {}", exec_path, e);
                 std::process::exit(1);
             }
             Err(e) => {
@@ -644,8 +683,11 @@ impl ProcessSupervisor {
                     let _ = nix::unistd::setuid(nix::unistd::Uid::from_raw(uid));
                 }
 
+                raise_nproc_limit();
+
+                let exec_path = resolve_exec_path(&entrypoint_owned, &rootfs_owned);
                 let mut argv: Vec<std::ffi::CString> = vec![
-                    std::ffi::CString::new(entrypoint_owned.clone()).unwrap()
+                    std::ffi::CString::new(exec_path.clone()).unwrap()
                 ];
                 for a in &args_owned {
                     argv.push(std::ffi::CString::new(a.as_str()).unwrap());
@@ -656,7 +698,7 @@ impl ProcessSupervisor {
 
                 let e = nix::unistd::execvpe(&argv[0], &argv, &envp)
                     .expect_err("execvpe returned unexpectedly");
-                eprintln!("z8s: execvpe({}) failed: {}", entrypoint_owned, e);
+                eprintln!("z8s: execvpe({}) failed: {}", exec_path, e);
                 std::process::exit(1);
             }
             Err(e) => {
@@ -863,17 +905,31 @@ impl ProcessSupervisor {
         self.running.lock().await.keys().any(|cid| cid.starts_with(&prefix))
     }
 
+    pub fn is_pid_alive(pid: u32) -> bool {
+        nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(pid as i32),
+            None,
+        )
+        .is_ok()
+    }
+
+    pub async fn is_pod_alive(&self, pod_name: &str) -> bool {
+        let prefix = format!("{}-", pod_name);
+        let running = self.running.lock().await;
+        running.iter().any(|(cid, rc)| {
+            cid.starts_with(&prefix)
+                && rc.instance.pid.map(Self::is_pid_alive).unwrap_or(false)
+        })
+    }
+
     pub async fn is_pod_ready(&self, pod_name: &str) -> bool {
-        let arcs: Vec<_> = {
-            let running = self.running.lock().await;
-            running
-                .values()
-                .filter(|rc| rc.instance.container_id.starts_with(pod_name))
-                .map(|rc| rc.ready.clone())
-                .collect()
-        };
-        for arc in arcs {
-            if *arc.lock().await {
+        if !self.is_pod_alive(pod_name).await {
+            return false;
+        }
+        let prefix = format!("{}-", pod_name);
+        let running = self.running.lock().await;
+        for (cid, rc) in running.iter() {
+            if cid.starts_with(&prefix) && *rc.ready.lock().await {
                 return true;
             }
         }

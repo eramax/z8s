@@ -208,9 +208,10 @@ pub fn child_enter_ns_fork(
     ack_r: OwnedFd,
     volumes: &[crate::container::volumes::ResolvedVolume],
 ) -> Result<()> {
+    // Do not include CLONE_NEWPID: Go runtimes (whoami, http-echo) fail to spawn threads
+    // with EINVAL in a PID namespace when filesystem isolation falls back to host mounts.
     let flags = CloneFlags::CLONE_NEWUSER
         | CloneFlags::CLONE_NEWNS
-        | CloneFlags::CLONE_NEWPID
         | CloneFlags::CLONE_NEWUTS
         | CloneFlags::CLONE_NEWIPC;
     unshare(flags)
@@ -272,11 +273,9 @@ pub fn child_enter_ns_root(
     volumes: &[crate::container::volumes::ResolvedVolume],
 ) -> Result<()> {
     unshare(
-        CloneFlags::CLONE_NEWNS
-            | CloneFlags::CLONE_NEWPID
-            | CloneFlags::CLONE_NEWUTS,
+        CloneFlags::CLONE_NEWNS | CloneFlags::CLONE_NEWUTS,
     )
-    .context("Failed to unshare mount/pid/uts")?;
+    .context("Failed to unshare mount/uts")?;
 
     mount(
         None::<&str>,
