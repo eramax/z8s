@@ -11,11 +11,17 @@ pub const OCI_CONFIG_FILE: &str = ".z8s-oci-config.json";
 pub struct SavedImageConfig {
     pub entrypoint: Option<Vec<String>>,
     pub cmd: Option<Vec<String>>,
+    pub env: Option<Vec<String>>,
 }
 
-pub fn save_image_config(dir: &str, entrypoint: Option<Vec<String>>, cmd: Option<Vec<String>>) {
+pub fn save_image_config(
+    dir: &str,
+    entrypoint: Option<Vec<String>>,
+    cmd: Option<Vec<String>>,
+    env: Option<Vec<String>>,
+) {
     let path = Path::new(dir).join(OCI_CONFIG_FILE);
-    let saved = SavedImageConfig { entrypoint, cmd };
+    let saved = SavedImageConfig { entrypoint, cmd, env };
     if let Ok(json) = serde_json::to_string(&saved) {
         std::fs::write(path, json).ok();
     }
@@ -54,6 +60,7 @@ pub fn guess_image_config(rootfs_path: &str) -> SavedImageConfig {
             return SavedImageConfig {
                 entrypoint: Some(vec![ep]),
                 cmd: None,
+                env: None,
             };
         }
     }
@@ -78,6 +85,7 @@ pub fn guess_image_config(rootfs_path: &str) -> SavedImageConfig {
             return SavedImageConfig {
                 entrypoint: Some(exes),
                 cmd: None,
+                env: None,
             };
         }
     }

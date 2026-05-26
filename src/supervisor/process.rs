@@ -566,6 +566,30 @@ impl ProcessSupervisor {
             env_vars.push(("HOME".to_string(), home));
         }
 
+        // Merge OCI image environment variables if not native and not overridden by manifest
+        if !is_native {
+            let img_cfg = crate::container::oci_config::read_image_config(rootfs_path);
+            if let Some(img_env) = img_cfg.env {
+                for entry in img_env {
+                    if let Some(pos) = entry.find('=') {
+                        let key = entry[..pos].to_string();
+                        let val = entry[pos + 1..].to_string();
+                        if !env_vars.iter().any(|(k, _)| k == &key) {
+                            env_vars.push((key, val));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Ensure a fallback PATH exists in all containers to prevent "os error 2" during process execution
+        if !env_vars.iter().any(|(k, _)| k == "PATH") {
+            env_vars.push((
+                "PATH".to_string(),
+                "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string(),
+            ));
+        }
+
         let mut child_cmd = if is_native {
             let mut c = Command::new(&entrypoint);
             c.args(&cmd_args);
@@ -1363,6 +1387,20 @@ impl ProcessSupervisor {
                 "Container {} (PID {}) exited with code {}; restartPolicy={}, restart={}",
                 container_id, pid, exit_code, restart_policy, should_restart
             );
+
+            // Print exited container logs to z8s daemon log to assist debugging
+            let log_lines = if let Some(rc) = self.running.lock().await.get(&container_id) {
+                rc.log_buffer.lock().await.clone()
+            } else {
+                Vec::new()
+            };
+            if !log_lines.is_empty() {
+                warn!("--- Container {} logs before exit: ---", container_id);
+                for line in log_lines {
+                    warn!("  {}", line);
+                }
+                warn!("---------------------------------------");
+            }
 
             // Remove dead container from running map
             self.running.lock().await.remove(&container_id);

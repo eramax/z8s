@@ -147,6 +147,7 @@ impl ImageManager {
                             &cache_path,
                             guessed.entrypoint.clone(),
                             guessed.cmd.clone(),
+                            guessed.env.clone(),
                         );
                         Self::copy_oci_config(&cache_path, &container_rootfs);
                     }
@@ -183,13 +184,13 @@ impl ImageManager {
             .clone()
             .try_into()
             .context("Failed to parse OCI image config")?;
-        let (image_ep, image_cmd) = config_file
+        let (image_ep, image_cmd, image_env) = config_file
             .config
             .as_ref()
-            .map(|c| (c.entrypoint.clone(), c.cmd.clone()))
-            .unwrap_or((None, None));
+            .map(|c| (c.entrypoint.clone(), c.cmd.clone(), c.env.clone()))
+            .unwrap_or((None, None, None));
         let needs_guess = image_ep.as_ref().is_none_or(|ep| ep.is_empty());
-        save_image_config(&cache_path, image_ep, image_cmd);
+        save_image_config(&cache_path, image_ep, image_cmd, image_env);
 
         for (i, layer) in layers.iter().enumerate() {
             self.unpack_layer(layer, &cache_path, i)?;
@@ -200,6 +201,7 @@ impl ImageManager {
                 &cache_path,
                 guessed.entrypoint.clone(),
                 guessed.cmd.clone(),
+                guessed.env.clone(),
             );
         }
         std::fs::write(&cache_meta, image_ref)?;
