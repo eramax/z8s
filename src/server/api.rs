@@ -910,8 +910,11 @@ fn resource_to_deploy_json(
     serde_json::to_value(&deploy).unwrap_or_default()
 }
 
-fn pod_managed_by_deployment(pod_name: &str, deploy_name: &str) -> bool {
-    pod_name.starts_with(&format!("{deploy_name}-pod-"))
+fn pod_managed_by_deployment(pod: &k8s_openapi::api::core::v1::Pod, deploy_name: &str) -> bool {
+    pod.metadata
+        .name
+        .as_deref()
+        .map_or(false, |n| n.starts_with(&format!("{deploy_name}-pod-")))
 }
 
 fn count_deployment_pods(
@@ -934,9 +937,8 @@ fn count_deployment_pods(
         .iter()
         .filter(|t| {
             if let AnyResource::Pod(pod) = &t.resource {
-                let pod_name = t.resource.name();
                 pod.metadata.namespace.as_deref() == Some(namespace)
-                    && pod_managed_by_deployment(pod_name, deploy_name)
+                    && pod_managed_by_deployment(pod, deploy_name)
                     && pod.metadata.labels.as_ref().map_or(false, |pl| {
                         labels.iter().all(|(k, v)| pl.get(k) == Some(v))
                     })
@@ -1258,6 +1260,29 @@ async fn delete_namespace(
     }
     let mut ns = state.namespaces.write().await;
     if ns.remove(&name).is_some() {
+        // Cascade: drop namespaced objects from the in-memory store (kubectl expects
+        // namespace delete to remove children; otherwise stale pods skew status).
+        let pod_trackers = state.store.get_by_kind("Pod").await;
+        for t in &pod_trackers {
+            if t.resource.namespace() == name.as_str() {
+                state.supervisor.stop_pod(&t.resource).await;
+                state.store.delete(&t.resource).await.ok();
+            }
+        }
+        for kind in ["Deployment", "Service", "ConfigMap", "Secret"] {
+            let trackers = state.store.get_by_kind(kind).await;
+            for t in &trackers {
+                if t.resource.namespace() == name.as_str() {
+                    if kind == "Service" {
+                        state
+                            .network
+                            .remove_service(&name, t.resource.name())
+                            .await;
+                    }
+                    state.store.delete(&t.resource).await.ok();
+                }
+            }
+        }
         info!("Deleted namespace: {}", name);
         Ok(Json(ok_status()))
     } else {

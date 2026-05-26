@@ -4,6 +4,7 @@ use crate::supervisor::process::ProcessSupervisor;
 use anyhow::{Context, Result};
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::core::v1::Pod;
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::time::{interval, Duration};
@@ -54,9 +55,8 @@ impl DeploymentController {
             .iter()
             .filter(|t| {
                 if let AnyResource::Pod(pod) = &t.resource {
-                    let pod_name = t.resource.name();
                     let pod_labels = pod.metadata.labels.clone().unwrap_or_default();
-                    pod_managed_by_deployment(pod_name, name)
+                    pod_owned_by_deployment(pod, name)
                         && labels_match(&match_labels, &pod_labels)
                         && pod.metadata.namespace.as_deref() == Some(namespace)
                 } else {
@@ -137,8 +137,18 @@ fn labels_match(selector: &BTreeMap<String, String>, labels: &BTreeMap<String, S
     true
 }
 
-fn pod_managed_by_deployment(pod_name: &str, deploy_name: &str) -> bool {
-    pod_name.starts_with(&format!("{deploy_name}-pod-"))
+fn pod_owned_by_deployment(pod: &Pod, deploy_name: &str) -> bool {
+    if let Some(refs) = &pod.metadata.owner_references {
+        if refs.iter().any(|r| {
+            r.controller == Some(true) && r.kind == "Deployment" && r.name == deploy_name
+        }) {
+            return true;
+        }
+    }
+    pod.metadata
+        .name
+        .as_deref()
+        .map_or(false, |n| n.starts_with(&format!("{deploy_name}-pod-")))
 }
 
 fn create_pod_from_template(deploy: &Deployment, name: &str) -> Result<Pod> {
@@ -148,6 +158,15 @@ fn create_pod_from_template(deploy: &Deployment, name: &str) -> Result<Pod> {
     let mut pod = Pod::default();
     pod.metadata = template.metadata.clone().unwrap_or_default();
     pod.metadata.name = Some(name.to_string());
+    let deploy_name = deploy.metadata.name.as_deref().unwrap_or("deployment");
+    pod.metadata.owner_references = Some(vec![OwnerReference {
+        api_version: "apps/v1".into(),
+        kind: "Deployment".into(),
+        name: deploy_name.to_string(),
+        controller: Some(true),
+        block_owner_deletion: Some(true),
+        uid: deploy.metadata.uid.clone().unwrap_or_default(),
+    }]);
 
     let mut labels = pod.metadata.labels.clone().unwrap_or_default();
     labels.extend(spec.selector.match_labels.clone().unwrap_or_default());

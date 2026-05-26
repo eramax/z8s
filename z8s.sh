@@ -7,10 +7,12 @@ BINARY="/home/abb/dev/z8s/target/debug/z8s"
 WORKDIR="/home/abb/dev/z8s"
 
 start() {
-    if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
-        echo "z8s already running (PID $(cat "$PIDFILE"))"
+    if pgrep -f "$BINARY" >/dev/null 2>&1; then
+        echo "z8s already running (use: $0 stop)"
+        pgrep -af "$BINARY" || true
         exit 1
     fi
+    rm -f "$PIDFILE"
     cd "$WORKDIR"
     touch "$LOGFILE"
     # Enable job control so background job gets its own process group
@@ -46,9 +48,13 @@ stop() {
             kill -KILL "$PID" 2>/dev/null || true
         fi
         rm -f "$PIDFILE"
-    else
-        # fallback: kill any running z8s debug binary
-        pkill -f "$BINARY" 2>/dev/null || true
+    fi
+    # Always clear stray daemons (old PIDs/orphans still bind :6443 and serve stale code).
+    if pgrep -f "$BINARY" >/dev/null 2>&1; then
+        echo "Stopping other z8s processes..."
+        pkill -TERM -f "$BINARY" 2>/dev/null || true
+        sleep 1
+        pkill -KILL -f "$BINARY" 2>/dev/null || true
     fi
     echo "z8s stopped"
 }

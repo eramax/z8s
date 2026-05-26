@@ -52,17 +52,11 @@ fn use_isolated_network(container: &Container) -> bool {
     !declared_container_ports(container).is_empty()
 }
 
-fn merge_publish_ports(container: &Container, extra: &[u16], isolated_net: bool) -> Vec<u16> {
+fn merge_publish_ports(container: &Container, isolated_net: bool) -> Vec<u16> {
     if !isolated_net {
         return Vec::new();
     }
-    let mut ports = declared_container_ports(container);
-    for p in extra {
-        if !ports.contains(p) {
-            ports.push(*p);
-        }
-    }
-    ports
+    declared_container_ports(container)
 }
 
 fn attach_port_publish(
@@ -502,7 +496,7 @@ impl ProcessSupervisor {
     async fn spawn_root_ns_container(
         &self,
         ctx: ContainerSpawnCtx<'_>,
-        service_ports: &[u16],
+        _service_ports: &[u16],
     ) -> Result<RunningContainer> {
         let ContainerSpawnCtx { entrypoint, cmd_args, env_vars, rootfs_path, container_id, pod_uid, image, container, volumes, run_as_user, run_as_group } = ctx;
         let isolate_net = use_isolated_network(container);
@@ -562,8 +556,7 @@ impl ProcessSupervisor {
                     published_ports: std::collections::HashMap::new(),
                     isolated_net: isolate_net,
                 };
-                let publish_ports =
-                    merge_publish_ports(container, service_ports, isolate_net);
+                let publish_ports = merge_publish_ports(container, isolate_net);
                 let (published_ports, port_publish) =
                     attach_port_publish(pid, &publish_ports);
                 instance.published_ports = published_ports;
@@ -640,7 +633,7 @@ impl ProcessSupervisor {
     async fn spawn_userns_container(
         &self,
         ctx: ContainerSpawnCtx<'_>,
-        service_ports: &[u16],
+        _service_ports: &[u16],
     ) -> Result<RunningContainer> {
         let ContainerSpawnCtx { entrypoint, cmd_args, env_vars, rootfs_path, container_id, pod_uid, image, container, volumes, run_as_user, run_as_group } = ctx;
         let isolate_net = use_isolated_network(container);
@@ -735,8 +728,7 @@ impl ProcessSupervisor {
                     published_ports: std::collections::HashMap::new(),
                     isolated_net: isolate_net,
                 };
-                let publish_ports =
-                    merge_publish_ports(container, service_ports, isolate_net);
+                let publish_ports = merge_publish_ports(container, isolate_net);
                 let (published_ports, port_publish) =
                     attach_port_publish(pid, &publish_ports);
                 instance.published_ports = published_ports;
@@ -835,7 +827,7 @@ impl ProcessSupervisor {
         image: &str,
         container: &Container,
         env_vars: &[(String, String)],
-        service_ports: &[u16],
+        _service_ports: &[u16],
     ) -> Result<RunningContainer> {
         let pid = child.id().expect("No PID for spawned process");
 
@@ -880,7 +872,7 @@ impl ProcessSupervisor {
             published_ports: std::collections::HashMap::new(),
             isolated_net: isolate_net,
         };
-        let publish_ports = merge_publish_ports(container, service_ports, isolate_net);
+        let publish_ports = merge_publish_ports(container, isolate_net);
         let (published_ports, port_publish) = attach_port_publish(pid, &publish_ports);
         instance.published_ports = published_ports;
 
@@ -950,18 +942,24 @@ impl ProcessSupervisor {
         })
     }
 
-    /// Host port on 127.0.0.1 that forwards into the pod's network namespace.
-    pub async fn published_host_port(&self, pod_name: &str, container_port: u16) -> Option<u16> {
+    /// Port the service proxy should dial on 127.0.0.1 for this pod.
+    pub async fn backend_connect_port(&self, pod_name: &str, container_port: u16) -> u16 {
         let prefix = format!("{}-", pod_name);
         let running = self.running.lock().await;
         for (cid, rc) in running.iter() {
             if cid.starts_with(&prefix) {
-                if let Some(p) = rc.instance.published_ports.get(&container_port) {
-                    return Some(*p);
+                if rc.instance.isolated_net {
+                    return rc
+                        .instance
+                        .published_ports
+                        .get(&container_port)
+                        .copied()
+                        .unwrap_or(container_port);
                 }
+                return container_port;
             }
         }
-        None
+        container_port
     }
 
     fn set_resource_limits(&self, pod_uid: &str, containers: &[Container]) -> Result<()> {

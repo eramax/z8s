@@ -199,10 +199,7 @@ async fn find_endpoints(
                 None => continue,
             };
 
-            let connect_port = supervisor
-                .published_host_port(pod_name, port)
-                .await
-                .unwrap_or(port);
+            let connect_port = supervisor.backend_connect_port(pod_name, port).await;
 
             let addr = format!("127.0.0.1:{}", connect_port);
             if tokio::time::timeout(Duration::from_millis(500), TcpStream::connect(&addr))
