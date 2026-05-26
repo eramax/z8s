@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: python-deploy
+  namespace: default
+  labels:
+    app: python
+    type: deployment
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: python
+  template:
+    metadata:
+      labels:
+        app: python
+    spec:
+      containers:
+      - name: python
+        image: python:3-slim
+        command: ["python3", "-m", "http.server", "8080"]
+        env:
+        - name: APP_ENV
+          value: production
+        volumeMounts:
+        - name: config
+          mountPath: /etc/config
+      volumes:
+      - name: config
+        configMap:
+          name: app-config
+          items:
+          - key: config.yaml
+            path: app-config.yaml

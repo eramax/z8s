@@ -1,0 +1,40 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ubuntu-deploy
+  namespace: z8s-test
+  labels:
+    app: ubuntu
+    type: deployment
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ubuntu
+  template:
+    metadata:
+      labels:
+        app: ubuntu
+    spec:
+      securityContext:
+        runAsUser: 1001
+        runAsNonRoot: true
+      containers:
+      - name: ubuntu
+        image: ubuntu:latest
+        command: ["sleep", "infinity"]
+        env:
+        - name: DEPLOY_NAME
+          value: ubuntu-deploy
+        envFrom:
+        - configMapRef:
+            name: app-config
+        - secretRef:
+            name: app-secret
+        volumeMounts:
+        - name: secret-volume
+          mountPath: /etc/secret
+      volumes:
+      - name: secret-volume
+        secret:
+          secretName: app-secret
