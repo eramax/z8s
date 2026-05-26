@@ -277,11 +277,11 @@ impl NetworkManager {
         }
     }
 
-    /// Generate an EndpointSlice object for a service (used by kubectl describe svc).
-    pub async fn compute_endpointslice(
+    /// Generate EndpointSlice objects for a service — one per pod with its published host port.
+    pub async fn compute_endpointslices(
         &self,
         svc: &Service,
-    ) -> k8s_openapi::api::discovery::v1::EndpointSlice {
+    ) -> Vec<k8s_openapi::api::discovery::v1::EndpointSlice> {
         use k8s_openapi::api::discovery::v1::{Endpoint as DiscoveryEndpoint, EndpointConditions, EndpointPort as DiscoveryEndpointPort, EndpointSlice};
         use k8s_openapi::api::core::v1::ObjectReference;
 
@@ -292,7 +292,7 @@ impl NetworkManager {
             .cloned()
             .unwrap_or_default();
 
-        let mut endpoints = Vec::new();
+        let mut slices = Vec::new();
 
         let pod_trackers = self.store.get_by_kind("Pod").await;
         for t in &pod_trackers {
@@ -312,55 +312,61 @@ impl NetworkManager {
                 let pod_ip = pod.status.as_ref()
                     .and_then(|s| s.pod_ip.as_deref())
                     .unwrap_or("127.0.0.1");
-                endpoints.push(DiscoveryEndpoint {
-                    addresses: vec![pod_ip.to_string()],
-                    conditions: Some(EndpointConditions {
-                        ready: Some(true),
-                        serving: Some(true),
-                        terminating: Some(false),
-                    }),
-                    hostname: None,
-                    node_name: Some("z8s-node".to_string()),
-                    target_ref: Some(ObjectReference {
-                        kind: Some("Pod".to_string()),
-                        name: Some(pod_name.to_string()),
-                        namespace: Some(svc_ns.clone()),
+
+                // Use the actual host-side connect port per pod
+                let host_port = match svc.spec.as_ref().and_then(|s| s.ports.as_ref()).and_then(|ps| ps.first()) {
+                    Some(p) => {
+                        let cp = match p.target_port.as_ref().cloned().unwrap_or_else(|| IntOrString::Int(p.port)) {
+                            IntOrString::Int(i) => i as u16,
+                            IntOrString::String(_) => p.port as u16,
+                        };
+                        self.supervisor.backend_connect_port(pod_name, cp).await
+                    }
+                    None => 80,
+                };
+
+                let slice_name = format!("{}-{}-z8s", svc_name, pod_name);
+                slices.push(EndpointSlice {
+                    address_type: "IPv4".to_string(),
+                    endpoints: vec![DiscoveryEndpoint {
+                        addresses: vec![pod_ip.to_string()],
+                        conditions: Some(EndpointConditions {
+                            ready: Some(true),
+                            serving: Some(true),
+                            terminating: Some(false),
+                        }),
+                        hostname: None,
+                        node_name: Some("z8s-node".to_string()),
+                        target_ref: Some(ObjectReference {
+                            kind: Some("Pod".to_string()),
+                            name: Some(pod_name.to_string()),
+                            namespace: Some(svc_ns.clone()),
+                            ..Default::default()
+                        }),
                         ..Default::default()
-                    }),
-                    ..Default::default()
+                    }],
+                    metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+                        name: Some(slice_name),
+                        namespace: Some(svc_ns.clone()),
+                        labels: Some(BTreeMap::from([
+                            ("kubernetes.io/service-name".to_string(), svc_name.clone()),
+                        ])),
+                        ..Default::default()
+                    },
+                    ports: svc.spec.as_ref()
+                        .and_then(|s| s.ports.as_ref())
+                        .map(|ps| {
+                            ps.iter().map(|p| DiscoveryEndpointPort {
+                                name: p.name.clone(),
+                                port: Some(host_port as i32),
+                                protocol: p.protocol.clone(),
+                                ..Default::default()
+                            }).collect()
+                        }),
                 });
             }
         }
 
-        let ports: Option<Vec<DiscoveryEndpointPort>> = svc.spec.as_ref()
-            .and_then(|s| s.ports.as_ref())
-            .map(|ps| {
-                ps.iter().map(|p| DiscoveryEndpointPort {
-                    name: p.name.clone(),
-                    port: p.target_port.as_ref()
-                        .and_then(|tp| match tp {
-                            IntOrString::Int(i) => Some(*i),
-                            IntOrString::String(_) => None,
-                        })
-                        .or(Some(p.port)),
-                    protocol: p.protocol.clone(),
-                    ..Default::default()
-                }).collect()
-            });
-
-        let slice_name = format!("{}-z8s", svc_name);
-        EndpointSlice {
-            address_type: "IPv4".to_string(),
-            endpoints,
-            metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
-                name: Some(slice_name),
-                namespace: Some(svc_ns),
-                labels: Some(BTreeMap::from([
-                    ("kubernetes.io/service-name".to_string(), svc_name.clone()),
-                ])),
-                ..Default::default()
-            },
-            ports,
-        }
+        slices
     }
 }

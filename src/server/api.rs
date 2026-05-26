@@ -2168,8 +2168,9 @@ async fn list_endpointslices_ns(state: &AppState, namespace: Option<String>) -> 
     for t in &svc_trackers {
         if namespace.as_deref().map_or(false, |ns| t.resource.namespace() != ns) { continue; }
         if let AnyResource::Service(svc) = &t.resource {
-            let ep = state.network.compute_endpointslice(svc).await;
-            if let Ok(v) = serde_json::to_value(&ep) { items.push(v); }
+            for ep in state.network.compute_endpointslices(svc).await {
+                if let Ok(v) = serde_json::to_value(&ep) { items.push(v); }
+            }
         }
     }
     Json(serde_json::json!({
@@ -2184,16 +2185,14 @@ async fn get_endpointslice(
     State(state): State<AppState>,
     Path((namespace, name)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    // The endpointslice name includes a suffix; find the matching service
     let trackers = state.store.get_by_kind("Service").await;
     for t in &trackers {
         if t.resource.namespace() != namespace { continue; }
-        let svc_name = t.resource.name();
-        let slice_name = format!("{}-z8s", svc_name);
-        if slice_name == name {
-            if let AnyResource::Service(svc) = &t.resource {
-                let ep = state.network.compute_endpointslice(svc).await;
-                return Ok(Json(serde_json::to_value(&ep).unwrap_or_default()));
+        if let AnyResource::Service(svc) = &t.resource {
+            for ep in state.network.compute_endpointslices(svc).await {
+                if ep.metadata.name.as_deref() == Some(&name) {
+                    return Ok(Json(serde_json::to_value(&ep).unwrap_or_default()));
+                }
             }
         }
     }
