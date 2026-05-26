@@ -182,6 +182,25 @@ pub fn materialize_secret(sec: &Secret, dir: &str) -> Result<()> {
     Ok(())
 }
 
+/// Remove cached mount points in a reused rootfs so emptyDir data does not persist
+/// across pod delete/recreate when bind-mount falls back to copy.
+pub fn scrub_rootfs_volume_mounts(rootfs_path: &str, volumes: &[ResolvedVolume]) {
+    for vol in volumes {
+        let dst = Path::new(rootfs_path).join(vol.container_path.trim_start_matches('/'));
+        if dst.exists() {
+            if dst.is_dir() {
+                std::fs::remove_dir_all(&dst).ok();
+            } else {
+                std::fs::remove_file(&dst).ok();
+            }
+        }
+    }
+}
+
+fn is_emptydir_host_path(host_path: &str) -> bool {
+    host_path.contains("/emptydir/")
+}
+
 fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
     if src.is_file() {
         if let Some(parent) = dst.parent() {
@@ -225,16 +244,30 @@ pub fn bind_mount_volumes(rootfs_path: &str, volumes: &[ResolvedVolume]) {
             continue;
         }
 
-        // Bind mounts are often blocked in user namespaces; copy content into rootfs instead.
-        match copy_tree(src, dst_path) {
-            Ok(()) => info!(
+        // Bind mounts are often blocked in user namespaces.
+        if is_emptydir_host_path(&vol.host_path) {
+            // Symlink keeps emptyDir on the host staging dir (ephemeral), not in rootfs cache.
+            if std::os::unix::fs::symlink(src, dst_path).is_ok() {
+                info!(
+                    "Symlinked emptyDir {} → {} (bind mount unavailable)",
+                    vol.host_path, vol.container_path
+                );
+            } else {
+                warn!(
+                    "Failed to symlink emptyDir {} → {}",
+                    vol.host_path, vol.container_path
+                );
+            }
+        } else if copy_tree(src, dst_path).is_ok() {
+            info!(
                 "Copied volume {} → {} (bind mount unavailable)",
                 vol.host_path, vol.container_path
-            ),
-            Err(e) => warn!(
-                "Failed to install volume {} → {}: {}",
-                vol.host_path, vol.container_path, e
-            ),
+            );
+        } else {
+            warn!(
+                "Failed to install volume {} → {}",
+                vol.host_path, vol.container_path
+            );
         }
     }
 }

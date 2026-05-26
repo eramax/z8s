@@ -342,6 +342,9 @@ impl ProcessSupervisor {
             c.args(&cmd_args);
             c
         } else {
+            if !volumes.is_empty() {
+                crate::container::volumes::scrub_rootfs_volume_mounts(rootfs_path, &volumes);
+            }
             rootfs::prepare_rootfs(rootfs_path)?;
 
             let rootfs_owned = rootfs_path.to_string();
@@ -853,6 +856,11 @@ impl ProcessSupervisor {
         self.cgroup_manager.remove_cgroup(&pod_uid).ok();
         self.store.update_state(&pod_uid, ResourceState::Terminated).await;
         crate::container::volumes::cleanup_emptydir(&pod_uid);
+    }
+
+    pub async fn is_pod_running(&self, pod_name: &str) -> bool {
+        let prefix = format!("{}-", pod_name);
+        self.running.lock().await.keys().any(|cid| cid.starts_with(&prefix))
     }
 
     pub async fn is_pod_ready(&self, pod_name: &str) -> bool {

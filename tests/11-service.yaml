@@ -45,8 +45,8 @@ spec:
     app: python
   ports:
   - name: http
-    port: 8080
-    targetPort: 8080
+    port: 18080
+    targetPort: 18080
     protocol: TCP
 ---
 apiVersion: v1
@@ -62,8 +62,8 @@ spec:
     app: python
   ports:
   - name: http
-    port: 8080
-    targetPort: 8080
+    port: 18080
+    targetPort: 18080
     nodePort: 30080
     protocol: TCP
 ---

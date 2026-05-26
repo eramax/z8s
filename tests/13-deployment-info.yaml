@@ -168,7 +168,7 @@ spec:
     app: hostinfo
   ports:
   - name: http
-    port: 8080
+    port: 18081
     targetPort: 8080
     protocol: TCP
 ---

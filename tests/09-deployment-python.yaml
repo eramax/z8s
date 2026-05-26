@@ -19,7 +19,7 @@ spec:
       containers:
       - name: python
         image: python:3-slim
-        command: ["python3", "-m", "http.server", "8080"]
+        command: ["python3", "-m", "http.server", "18080", "--bind", "127.0.0.1"]
         env:
         - name: APP_ENV
           value: production

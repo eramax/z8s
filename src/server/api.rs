@@ -592,6 +592,22 @@ fn pod_list_to_table(items: &[serde_json::Value]) -> serde_json::Value {
     make_table(columns, rows)
 }
 
+fn extract_label_selector(raw_query: &str) -> Vec<(String, Option<String>)> {
+    if raw_query.is_empty() {
+        return vec![];
+    }
+    for part in raw_query.split('&') {
+        if part.is_empty() {
+            continue;
+        }
+        let part = urlpath_decode(part);
+        if let Some(v) = part.strip_prefix("labelSelector=") {
+            return parse_label_selector(v);
+        }
+    }
+    vec![]
+}
+
 fn parse_label_selector(raw: &str) -> Vec<(String, Option<String>)> {
     if raw.is_empty() {
         return vec![];
@@ -674,13 +690,7 @@ async fn list_pods_in_ns(
     raw_query: &str,
     headers: axum::http::HeaderMap,
 ) -> Result<axum::response::Response, ApiError> {
-    let label_selector: Vec<(String, Option<String>)> = raw_query
-        .split('&')
-        .find_map(|part| {
-            let part = urlpath_decode(part);
-            part.strip_prefix("labelSelector=").map(|v| parse_label_selector(v))
-        })
-        .unwrap_or_default();
+    let label_selector = extract_label_selector(raw_query);
 
     let trackers = state.store.get_by_kind("Pod").await;
     let mut items = Vec::new();
@@ -771,10 +781,22 @@ async fn pod_handler(
             let resource = AnyResource::Pod(pod);
             state.store.apply(resource.clone()).await
                 .map_err(|e| ApiError::bad_request(e.to_string()))?;
+            let pod_name = resource.name().to_string();
+            let already_running = state.supervisor.is_pod_running(&pod_name).await;
+            if !already_running {
+                let pod_state = match state.supervisor.start_pod(&resource).await {
+                    Ok(_) => ResourceState::Running,
+                    Err(e) => {
+                        tracing::warn!("Failed to start pod {}: {}", pod_name, e);
+                        ResourceState::Failed(e.to_string())
+                    }
+                };
+                state.store.update_state(&resource.uid(), pod_state).await;
+            }
             let tracker_state = state.store.get(&resource.uid()).await
                 .map(|t| t.state)
                 .unwrap_or(ResourceState::Pending);
-            let is_ready = state.supervisor.is_pod_ready(resource.name()).await;
+            let is_ready = state.supervisor.is_pod_ready(&pod_name).await;
             Ok(Json(resource_to_pod_json_with_status(&resource, &tracker_state, is_ready)).into_response())
         }
         _ => Err(ApiError::method_not_allowed("method not allowed".into())),
