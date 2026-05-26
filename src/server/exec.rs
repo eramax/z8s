@@ -581,14 +581,14 @@ async fn exec_ws_pipes(
     let mut child = child;
     let ws_tx_arc = ws_tx.clone();
 
-    let forwarder = tokio::spawn(async move {
+    let mut forwarder = Some(tokio::spawn(async move {
         while let Some(msg) = out_rx.recv().await {
             let mut tx = ws_tx_arc.lock().await;
             if tx.send(msg).await.is_err() {
                 break;
             }
         }
-    });
+    }));
 
     loop {
         tokio::select! {
@@ -629,18 +629,26 @@ async fn exec_ws_pipes(
             status = child.wait() => {
                 drop(child_stdin);
                 let exit_code = status.ok().and_then(|s| s.code()).unwrap_or(0);
+                // Drain buffered stdout/stderr before sending exit status.
+                // Pipe write-ends close when the child exits; reader tasks then read
+                // EOF, drop their out_tx clones, and out_rx returns None so the
+                // forwarder exits naturally.
+                if let Some(fwd) = forwarder.take() {
+                    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), fwd).await;
+                }
                 let mut tx = ws_tx.lock().await;
                 send_exit_status(&mut tx, exit_code).await;
-                forwarder.abort();
                 return;
             }
         }
     }
 
     let exit_code = child.wait().await.ok().and_then(|s| s.code()).unwrap_or(0);
+    if let Some(fwd) = forwarder.take() {
+        fwd.abort();
+    }
     let mut tx = ws_tx.lock().await;
     send_exit_status(&mut tx, exit_code).await;
-    forwarder.abort();
 }
 
 async fn send_exit_status(ws_tx: &mut futures_util::stream::SplitSink<WebSocket, Message>, exit_code: i32) {

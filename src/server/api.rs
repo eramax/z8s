@@ -1675,6 +1675,13 @@ async fn create_secret(
     if sec.metadata.creation_timestamp.is_none() {
         sec.metadata.creation_timestamp = Some(now_time());
     }
+    // Kubernetes API: move stringData into data as base64-encoded ByteString
+    if let Some(sd) = sec.string_data.take() {
+        let data = sec.data.get_or_insert_with(Default::default);
+        for (k, v) in sd {
+            data.insert(k, k8s_openapi::ByteString(v.into_bytes()));
+        }
+    }
     let resource = AnyResource::Secret(sec);
     let already_exists = state.store.get_by_kind("Secret").await.iter()
         .any(|t| t.resource.name() == resource.name() && t.resource.namespace() == resource.namespace());
@@ -1699,6 +1706,12 @@ async fn update_secret(
         .map_err(|e| ApiError::bad_request(format!("invalid Secret: {}", e)))?;
     if sec.metadata.namespace.is_none() { sec.metadata.namespace = Some(namespace); }
     if sec.metadata.name.is_none() { sec.metadata.name = Some(name); }
+    if let Some(sd) = sec.string_data.take() {
+        let data = sec.data.get_or_insert_with(Default::default);
+        for (k, v) in sd {
+            data.insert(k, k8s_openapi::ByteString(v.into_bytes()));
+        }
+    }
     let resource = AnyResource::Secret(sec);
     state.store.apply(resource.clone()).await.map_err(|e| ApiError::bad_request(e.to_string()))?;
     Ok(Json(serde_json::to_value(&resource).unwrap_or_default()))
@@ -1935,6 +1948,16 @@ async fn update_service(
         .map_err(|e| ApiError::bad_request(format!("invalid Service: {}", e)))?;
     if svc.metadata.namespace.is_none() { svc.metadata.namespace = Some(namespace); }
     if svc.metadata.name.is_none() { svc.metadata.name = Some(name); }
+    // Re-apply targetPort defaults in case the patch omitted them
+    if let Some(spec) = svc.spec.as_mut() {
+        if let Some(ports) = spec.ports.as_mut() {
+            for p in ports.iter_mut() {
+                if p.target_port.is_none() {
+                    p.target_port = Some(k8s_openapi::apimachinery::pkg::util::intstr::IntOrString::Int(p.port));
+                }
+            }
+        }
+    }
     let resource = AnyResource::Service(svc.clone());
     state.store.apply(resource.clone()).await.map_err(|e| ApiError::bad_request(e.to_string()))?;
     state.network.sync_service(&svc).await;
