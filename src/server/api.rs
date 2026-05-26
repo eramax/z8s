@@ -146,6 +146,13 @@ pub async fn run_server(
         .route("/api/v1/namespaces/{namespace}/services", get(list_services).post(create_service))
         .route("/api/v1/namespaces/{namespace}/services/{name}",
             get(get_service).put(update_service).patch(update_service).delete(delete_service))
+        // PersistentVolumes (cluster-scoped)
+        .route("/api/v1/persistentvolumes", get(list_pvs).post(create_pv))
+        .route("/api/v1/persistentvolumes/{name}", get(get_pv).delete(delete_pv))
+        // PersistentVolumeClaims (namespaced)
+        .route("/api/v1/persistentvolumeclaims", get(list_pvcs_all))
+        .route("/api/v1/namespaces/{namespace}/persistentvolumeclaims", get(list_pvcs).post(create_pvc))
+        .route("/api/v1/namespaces/{namespace}/persistentvolumeclaims/{name}", get(get_pvc).delete(delete_pvc))
         // Endpoints
         .route("/api/v1/endpoints", get(list_endpoints_all))
         .route("/api/v1/namespaces/{namespace}/endpoints", get(list_endpoints))
@@ -322,6 +329,8 @@ async fn api_v1_resources() -> Json<APIResourceList> {
             api_resource("configmaps", "configmap", true, "ConfigMap", &["get", "list", "create", "delete"], &["cm"], &[]),
             api_resource("secrets", "secret", true, "Secret", &["get", "list", "create", "delete"], &[], &[]),
             api_resource("events", "event", true, "Event", &["get", "list", "watch"], &["ev"], &[]),
+            api_resource("persistentvolumes", "persistentvolume", false, "PersistentVolume", &["get", "list", "create", "delete"], &["pv"], &[]),
+            api_resource("persistentvolumeclaims", "persistentvolumeclaim", true, "PersistentVolumeClaim", &["get", "list", "create", "delete"], &["pvc"], &[]),
         ],
     })
 }
@@ -1504,29 +1513,27 @@ async fn fallback_handler(uri: Uri) -> impl IntoResponse {
 
 // ── ConfigMaps ────────────────────────────────────────────────────────────────
 
-async fn list_configmaps_all(State(state): State<AppState>) -> Json<serde_json::Value> {
+async fn list_configmaps_all(State(state): State<AppState>) -> Json<List<ConfigMap>> {
     list_configmaps_in_ns(&state, None).await
 }
 
 async fn list_configmaps(
     State(state): State<AppState>,
     Path(namespace): Path<String>,
-) -> Json<serde_json::Value> {
+) -> Json<List<ConfigMap>> {
     list_configmaps_in_ns(&state, Some(namespace)).await
 }
 
-async fn list_configmaps_in_ns(state: &AppState, namespace: Option<String>) -> Json<serde_json::Value> {
-    let trackers = state.store.get_by_kind("ConfigMap").await;
-    let items: Vec<serde_json::Value> = trackers
-        .iter()
+async fn list_configmaps_in_ns(state: &AppState, namespace: Option<String>) -> Json<List<ConfigMap>> {
+    let items: Vec<ConfigMap> = state.store.get_by_kind("ConfigMap").await
+        .into_iter()
         .filter(|t| namespace.as_deref().map_or(true, |ns| t.resource.namespace() == ns))
-        .filter_map(|t| serde_json::to_value(&t.resource).ok())
+        .filter_map(|t| if let AnyResource::ConfigMap(cm) = t.resource { Some(cm) } else { None })
         .collect();
-    Json(serde_json::json!({
-        "kind": "ConfigMapList", "apiVersion": "v1",
-        "metadata": { "resourceVersion": "1" },
-        "items": items
-    }))
+    Json(List::<ConfigMap> {
+        items,
+        metadata: ListMeta { resource_version: Some("1".into()), ..Default::default() },
+    })
 }
 
 async fn get_configmap(
@@ -1605,29 +1612,27 @@ async fn delete_configmap(
 
 // ── Secrets ───────────────────────────────────────────────────────────────────
 
-async fn list_secrets_all(State(state): State<AppState>) -> Json<serde_json::Value> {
+async fn list_secrets_all(State(state): State<AppState>) -> Json<List<Secret>> {
     list_secrets_in_ns(&state, None).await
 }
 
 async fn list_secrets(
     State(state): State<AppState>,
     Path(namespace): Path<String>,
-) -> Json<serde_json::Value> {
+) -> Json<List<Secret>> {
     list_secrets_in_ns(&state, Some(namespace)).await
 }
 
-async fn list_secrets_in_ns(state: &AppState, namespace: Option<String>) -> Json<serde_json::Value> {
-    let trackers = state.store.get_by_kind("Secret").await;
-    let items: Vec<serde_json::Value> = trackers
-        .iter()
+async fn list_secrets_in_ns(state: &AppState, namespace: Option<String>) -> Json<List<Secret>> {
+    let items: Vec<Secret> = state.store.get_by_kind("Secret").await
+        .into_iter()
         .filter(|t| namespace.as_deref().map_or(true, |ns| t.resource.namespace() == ns))
-        .filter_map(|t| serde_json::to_value(&t.resource).ok())
+        .filter_map(|t| if let AnyResource::Secret(s) = t.resource { Some(s) } else { None })
         .collect();
-    Json(serde_json::json!({
-        "kind": "SecretList", "apiVersion": "v1",
-        "metadata": { "resourceVersion": "1" },
-        "items": items
-    }))
+    Json(List::<Secret> {
+        items,
+        metadata: ListMeta { resource_version: Some("1".into()), ..Default::default() },
+    })
 }
 
 async fn get_secret(
@@ -1821,20 +1826,21 @@ async fn list_services(
 }
 
 async fn list_services_in_ns(state: &AppState, namespace: Option<String>, headers: axum::http::HeaderMap) -> axum::response::Response {
-    let trackers = state.store.get_by_kind("Service").await;
-    let items: Vec<serde_json::Value> = trackers.iter()
+    let svcs: Vec<Service> = state.store.get_by_kind("Service").await
+        .into_iter()
         .filter(|t| namespace.as_deref().map_or(true, |ns| t.resource.namespace() == ns))
-        .filter_map(|t| serde_json::to_value(&t.resource).ok())
+        .filter_map(|t| if let AnyResource::Service(s) = t.resource { Some(s) } else { None })
         .collect();
     if accepts_table(&headers) {
+        let items: Vec<serde_json::Value> = svcs.iter()
+            .filter_map(|s| serde_json::to_value(s).ok())
+            .collect();
         return (StatusCode::OK, Json(service_list_to_table(&items))).into_response();
     }
-    Json(serde_json::json!({
-        "apiVersion": "v1",
-        "kind": "ServiceList",
-        "metadata": make_list_meta(),
-        "items": items
-    })).into_response()
+    Json(List::<Service> {
+        items: svcs,
+        metadata: ListMeta { resource_version: Some("1".into()), ..Default::default() },
+    }).into_response()
 }
 
 async fn get_service(
@@ -1985,4 +1991,128 @@ async fn get_endpoints(
         }
     }
     Err(ApiError::not_found(format!("endpoints \"{}/{}\" not found", namespace, name)))
+}
+
+// ── PersistentVolumes (cluster-scoped) ────────────────────────────────────────
+
+async fn list_pvs(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let items: Vec<serde_json::Value> = state.store.get_by_kind("PersistentVolume").await
+        .into_iter()
+        .filter_map(|t| serde_json::to_value(&t.resource).ok())
+        .collect();
+    Json(serde_json::json!({
+        "apiVersion": "v1", "kind": "PersistentVolumeList",
+        "metadata": make_list_meta(), "items": items
+    }))
+}
+
+async fn get_pv(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    state.store.get_by_kind("PersistentVolume").await
+        .into_iter()
+        .find(|t| t.resource.name() == name)
+        .and_then(|t| serde_json::to_value(&t.resource).ok())
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found(format!("persistentvolume \"{}\" not found", name)))
+}
+
+async fn create_pv(
+    State(state): State<AppState>,
+    raw: axum::body::Bytes,
+) -> Result<axum::response::Response, ApiError> {
+    let body = parse_body(&raw)?;
+    let pv: k8s_openapi::api::core::v1::PersistentVolume = serde_json::from_value(body)
+        .map_err(|e| ApiError::bad_request(format!("invalid PersistentVolume: {}", e)))?;
+    let resource = AnyResource::PersistentVolume(pv);
+    state.store.apply(resource.clone()).await.map_err(|e| ApiError::bad_request(e.to_string()))?;
+    Ok((StatusCode::CREATED, Json(serde_json::to_value(&resource).unwrap_or_default())).into_response())
+}
+
+async fn delete_pv(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<Status>, ApiError> {
+    let trackers = state.store.get_by_kind("PersistentVolume").await;
+    for t in &trackers {
+        if t.resource.name() == name {
+            state.store.delete(&t.resource).await.ok();
+            return Ok(Json(ok_status()));
+        }
+    }
+    Err(ApiError::not_found(format!("persistentvolume \"{}\" not found", name)))
+}
+
+// ── PersistentVolumeClaims (namespaced) ───────────────────────────────────────
+
+async fn list_pvcs_all(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let items: Vec<serde_json::Value> = state.store.get_by_kind("PersistentVolumeClaim").await
+        .into_iter()
+        .filter_map(|t| serde_json::to_value(&t.resource).ok())
+        .collect();
+    Json(serde_json::json!({
+        "apiVersion": "v1", "kind": "PersistentVolumeClaimList",
+        "metadata": make_list_meta(), "items": items
+    }))
+}
+
+async fn list_pvcs(
+    State(state): State<AppState>,
+    Path(namespace): Path<String>,
+) -> Json<serde_json::Value> {
+    let items: Vec<serde_json::Value> = state.store.get_by_kind("PersistentVolumeClaim").await
+        .into_iter()
+        .filter(|t| t.resource.namespace() == namespace)
+        .filter_map(|t| serde_json::to_value(&t.resource).ok())
+        .collect();
+    Json(serde_json::json!({
+        "apiVersion": "v1", "kind": "PersistentVolumeClaimList",
+        "metadata": make_list_meta(), "items": items
+    }))
+}
+
+async fn get_pvc(
+    State(state): State<AppState>,
+    Path((namespace, name)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    state.store.get_by_kind("PersistentVolumeClaim").await
+        .into_iter()
+        .find(|t| t.resource.namespace() == namespace && t.resource.name() == name)
+        .and_then(|t| serde_json::to_value(&t.resource).ok())
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found(format!("persistentvolumeclaim \"{}/{}\" not found", namespace, name)))
+}
+
+async fn create_pvc(
+    State(state): State<AppState>,
+    Path(namespace): Path<String>,
+    raw: axum::body::Bytes,
+) -> Result<axum::response::Response, ApiError> {
+    let body = parse_body(&raw)?;
+    let mut pvc: k8s_openapi::api::core::v1::PersistentVolumeClaim = serde_json::from_value(body)
+        .map_err(|e| ApiError::bad_request(format!("invalid PersistentVolumeClaim: {}", e)))?;
+    if pvc.metadata.namespace.is_none() {
+        pvc.metadata.namespace = Some(namespace);
+    }
+    if pvc.metadata.creation_timestamp.is_none() {
+        pvc.metadata.creation_timestamp = Some(now_time());
+    }
+    let resource = AnyResource::PersistentVolumeClaim(pvc);
+    state.store.apply(resource.clone()).await.map_err(|e| ApiError::bad_request(e.to_string()))?;
+    Ok((StatusCode::CREATED, Json(serde_json::to_value(&resource).unwrap_or_default())).into_response())
+}
+
+async fn delete_pvc(
+    State(state): State<AppState>,
+    Path((namespace, name)): Path<(String, String)>,
+) -> Result<Json<Status>, ApiError> {
+    let trackers = state.store.get_by_kind("PersistentVolumeClaim").await;
+    for t in &trackers {
+        if t.resource.namespace() == namespace && t.resource.name() == name {
+            state.store.delete(&t.resource).await.ok();
+            return Ok(Json(ok_status()));
+        }
+    }
+    Err(ApiError::not_found(format!("persistentvolumeclaim \"{}/{}\" not found", namespace, name)))
 }

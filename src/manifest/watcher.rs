@@ -102,6 +102,9 @@ impl ManifestWatcher {
 
         info!("Watching manifests directory: {}", dir);
 
+        // Clear startup-dedup set so re-creates and modify-as-create events are handled
+        self.processed.write().await.clear();
+
         while let Some(event) = rx.recv().await {
             match event {
                 Ok(event) => {

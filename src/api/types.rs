@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use k8s_openapi::api::apps::v1::Deployment;
-use k8s_openapi::api::core::v1::{ConfigMap, Container, Pod, Secret, Service};
+use k8s_openapi::api::core::v1::{
+    ConfigMap, Container, PersistentVolume, PersistentVolumeClaim, Pod, Secret, Service,
+};
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use serde::{Deserialize, Serialize};
@@ -15,6 +17,8 @@ pub enum AnyResource {
     Service(Service),
     ConfigMap(ConfigMap),
     Secret(Secret),
+    PersistentVolume(PersistentVolume),
+    PersistentVolumeClaim(PersistentVolumeClaim),
 }
 
 impl AnyResource {
@@ -25,6 +29,8 @@ impl AnyResource {
             AnyResource::Service(r) => &r.metadata,
             AnyResource::ConfigMap(r) => &r.metadata,
             AnyResource::Secret(r) => &r.metadata,
+            AnyResource::PersistentVolume(r) => &r.metadata,
+            AnyResource::PersistentVolumeClaim(r) => &r.metadata,
         }
     }
 
@@ -35,6 +41,8 @@ impl AnyResource {
             AnyResource::Service(r) => &mut r.metadata,
             AnyResource::ConfigMap(r) => &mut r.metadata,
             AnyResource::Secret(r) => &mut r.metadata,
+            AnyResource::PersistentVolume(r) => &mut r.metadata,
+            AnyResource::PersistentVolumeClaim(r) => &mut r.metadata,
         }
     }
 
@@ -45,6 +53,8 @@ impl AnyResource {
             AnyResource::Service(_) => "Service",
             AnyResource::ConfigMap(_) => "ConfigMap",
             AnyResource::Secret(_) => "Secret",
+            AnyResource::PersistentVolume(_) => "PersistentVolume",
+            AnyResource::PersistentVolumeClaim(_) => "PersistentVolumeClaim",
         }
     }
 
@@ -53,7 +63,11 @@ impl AnyResource {
     }
 
     pub fn namespace(&self) -> &str {
-        self.metadata().namespace.as_deref().unwrap_or("default")
+        match self {
+            // PersistentVolumes are cluster-scoped (no namespace)
+            AnyResource::PersistentVolume(_) => "",
+            _ => self.metadata().namespace.as_deref().unwrap_or("default"),
+        }
     }
 
     pub fn uid(&self) -> String {
@@ -165,6 +179,12 @@ pub fn parse_manifest_yaml(yaml: &str) -> Result<Vec<AnyResource>> {
             ),
             "Secret" => AnyResource::Secret(
                 serde_yaml::from_value(value).context("Failed to parse Secret")?,
+            ),
+            "PersistentVolume" => AnyResource::PersistentVolume(
+                serde_yaml::from_value(value).context("Failed to parse PersistentVolume")?,
+            ),
+            "PersistentVolumeClaim" => AnyResource::PersistentVolumeClaim(
+                serde_yaml::from_value(value).context("Failed to parse PersistentVolumeClaim")?,
             ),
             _ => anyhow::bail!("Unsupported resource kind: {}", kind),
         };

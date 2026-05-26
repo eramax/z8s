@@ -157,6 +157,7 @@ pub fn child_enter_ns_fork(
 ) -> Result<()> {
     let flags = CloneFlags::CLONE_NEWUSER
         | CloneFlags::CLONE_NEWNS
+        | CloneFlags::CLONE_NEWPID
         | CloneFlags::CLONE_NEWUTS
         | CloneFlags::CLONE_NEWIPC;
     unshare(flags)
