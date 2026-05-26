@@ -92,7 +92,7 @@ impl NetworkManager {
                 let target_port_c = target_port.clone();
                 let listen_addr_log = listen_addr.clone();
                 let handle = tokio::spawn(async move {
-                    service_proxy::run_proxy_addr(
+                    service_proxy::run_proxy_addr_when_ready(
                         &listen_addr,
                         selector_c,
                         target_port_c,
@@ -104,7 +104,7 @@ impl NetworkManager {
                     )
                     .await;
                 });
-                info!("Service proxy {} → ClusterIP {}", key, listen_addr_log);
+                info!("Service proxy {} → ClusterIP {} (deferred until endpoints ready)", key, listen_addr_log);
                 proxies.insert(port_key, RunningProxy { handle });
             }
 

@@ -182,6 +182,26 @@ pub fn materialize_secret(sec: &Secret, dir: &str) -> Result<()> {
     Ok(())
 }
 
+fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
+    if src.is_file() {
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::copy(src, dst)?;
+        return Ok(());
+    }
+    if !src.is_dir() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        copy_tree(&entry.path(), &dst.join(name))?;
+    }
+    Ok(())
+}
+
 pub fn bind_mount_volumes(rootfs_path: &str, volumes: &[ResolvedVolume]) {
     for vol in volumes {
         let dst = format!("{}{}", rootfs_path, vol.container_path);
@@ -190,37 +210,31 @@ pub fn bind_mount_volumes(rootfs_path: &str, volumes: &[ResolvedVolume]) {
 
         if src.is_dir() {
             std::fs::create_dir_all(dst_path).ok();
-        } else {
-            if let Some(parent) = dst_path.parent() {
-                std::fs::create_dir_all(parent).ok();
-            }
-            std::fs::write(dst_path, b"").ok();
+        } else if let Some(parent) = dst_path.parent() {
+            std::fs::create_dir_all(parent).ok();
         }
 
         let flags = MsFlags::MS_BIND | MsFlags::MS_REC;
-        match mount(Some(src), dst_path, None::<&str>, flags, None::<&str>) {
-            Ok(()) => {
-                if vol.read_only {
-                    // Remount read-only (MS_BIND alone ignores MS_RDONLY on first mount)
-                    let ro_flags = MsFlags::MS_BIND | MsFlags::MS_REMOUNT | MsFlags::MS_RDONLY;
-                    mount(Some(src), dst_path, None::<&str>, ro_flags, None::<&str>).ok();
-                }
-                info!("Mounted volume {} → {}", vol.host_path, vol.container_path);
+        let bind_ok = mount(Some(src), dst_path, None::<&str>, flags, None::<&str>).is_ok();
+        if bind_ok {
+            if vol.read_only {
+                let ro_flags = MsFlags::MS_BIND | MsFlags::MS_REMOUNT | MsFlags::MS_RDONLY;
+                mount(Some(src), dst_path, None::<&str>, ro_flags, None::<&str>).ok();
             }
-            Err(e) => {
-                warn!("Failed to bind-mount {} → {}: {} — trying file copy fallback", vol.host_path, vol.container_path, e);
-                if src.is_dir() {
-                    if let Ok(entries) = std::fs::read_dir(src) {
-                        for entry in entries.flatten() {
-                            let dst_file = dst_path.join(entry.file_name());
-                            if entry.path().is_file() {
-                                std::fs::copy(entry.path(), &dst_file).ok();
-                            }
-                        }
-                        info!("Copied files {} → {}", vol.host_path, vol.container_path);
-                    }
-                }
-            }
+            info!("Mounted volume {} → {}", vol.host_path, vol.container_path);
+            continue;
+        }
+
+        // Bind mounts are often blocked in user namespaces; copy content into rootfs instead.
+        match copy_tree(src, dst_path) {
+            Ok(()) => info!(
+                "Copied volume {} → {} (bind mount unavailable)",
+                vol.host_path, vol.container_path
+            ),
+            Err(e) => warn!(
+                "Failed to install volume {} → {}: {}",
+                vol.host_path, vol.container_path, e
+            ),
         }
     }
 }

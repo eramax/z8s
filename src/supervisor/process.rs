@@ -7,7 +7,7 @@ use crate::container::rootfs;
 use crate::supervisor::cgroup::CgroupManager;
 use crate::supervisor::health::{HealthChecker, HealthStatus, ProbeAction, ProbeConfig};
 use anyhow::{Context, Result};
-use k8s_openapi::api::core::v1::{ConfigMap, Container, Pod, Secret};
+use k8s_openapi::api::core::v1::{ConfigMap, Container, Pod, PodSecurityContext, Secret};
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 use std::collections::HashMap;
@@ -18,6 +18,24 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
+
+fn resolve_run_as_user(pod_sc: Option<&PodSecurityContext>, container: &Container) -> Option<u32> {
+    container
+        .security_context
+        .as_ref()
+        .and_then(|sc| sc.run_as_user)
+        .or_else(|| pod_sc.and_then(|sc| sc.run_as_user))
+        .map(|u| u as u32)
+}
+
+fn resolve_run_as_group(pod_sc: Option<&PodSecurityContext>, container: &Container) -> Option<u32> {
+    container
+        .security_context
+        .as_ref()
+        .and_then(|sc| sc.run_as_group)
+        .or_else(|| pod_sc.and_then(|sc| sc.run_as_group))
+        .map(|g| g as u32)
+}
 
 struct ContainerSpawnCtx<'a> {
     entrypoint: &'a str,
@@ -271,12 +289,12 @@ impl ProcessSupervisor {
         let entrypoint = cmd[0].clone();
         let cmd_args: Vec<String> = cmd[1..].iter().chain(args.iter()).cloned().collect();
 
-        let run_as_user = container.security_context.as_ref()
-            .and_then(|sc| sc.run_as_user)
-            .map(|u| u as u32);
-        let run_as_group = container.security_context.as_ref()
-            .and_then(|sc| sc.run_as_group)
-            .map(|g| g as u32);
+        let pod_sc = match resource {
+            AnyResource::Pod(pod) => pod.spec.as_ref().and_then(|s| s.security_context.as_ref()),
+            _ => None,
+        };
+        let run_as_user = resolve_run_as_user(pod_sc, container);
+        let run_as_group = resolve_run_as_group(pod_sc, container);
 
         let mut env_vars: Vec<(String, String)> = container
             .env
@@ -514,7 +532,7 @@ impl ProcessSupervisor {
                     .context("Failed to read sync from child")?;
                 drop(sync_r);
 
-                rootfs::write_userns_maps(child_pid)?;
+                rootfs::write_userns_maps(child_pid, run_as_user, run_as_group)?;
 
                 nix::unistd::write(&ack_w, b"A").ok();
                 drop(ack_w);

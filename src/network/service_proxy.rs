@@ -4,8 +4,47 @@ use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{info, warn};
+
+/// Wait until at least one backend is ready before binding ClusterIP. On the host
+/// network stack, binding ClusterIP:port before the pod listens can block the pod
+/// from binding 0.0.0.0:targetPort.
+pub async fn run_proxy_addr_when_ready(
+    listen_addr: &str,
+    selector: BTreeMap<String, String>,
+    target_port: IntOrString,
+    store: Arc<ResourceStore>,
+    supervisor: Arc<ProcessSupervisor>,
+    counter: Arc<AtomicUsize>,
+    svc_name: &str,
+    svc_ns: &str,
+) {
+    for _ in 0..120 {
+        let endpoints = find_endpoints(&selector, &target_port, &store, &supervisor, svc_ns).await;
+        if !endpoints.is_empty() {
+            if TcpStream::connect(format!("{}:{}", endpoints[0].host, endpoints[0].port))
+                .await
+                .is_ok()
+            {
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    run_proxy_addr(
+        listen_addr,
+        selector,
+        target_port,
+        store,
+        supervisor,
+        counter,
+        svc_name,
+        svc_ns,
+    )
+    .await;
+}
 
 pub async fn run_proxy_addr(
     listen_addr: &str,

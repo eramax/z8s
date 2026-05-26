@@ -57,7 +57,11 @@ pub fn prepare_rootfs(rootfs_path: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn write_userns_maps(child_pid: i32) -> Result<()> {
+pub fn write_userns_maps(
+    child_pid: i32,
+    run_as_user: Option<u32>,
+    run_as_group: Option<u32>,
+) -> Result<()> {
     let uid = getuid().as_raw();
     let gid = getgid().as_raw();
 
@@ -69,40 +73,89 @@ pub fn write_userns_maps(child_pid: i32) -> Result<()> {
         return Ok(());
     }
 
-    // Fallback: single UID/GID mapping. setgroups must be denied before writing
-    // gid_map when the caller is unprivileged (kernel requirement). This means
-    // setgroups(2) is blocked — apt and su won't work. Install uidmap to fix.
-    warn!("newuidmap not available — using single UID/GID mapping (apt/su will not work). Install the uidmap package.");
+    if try_write_subid_maps_direct(child_pid, uid, gid).is_ok() {
+        info!(
+            "Wrote userns maps via /proc uid_map for child pid {} (uid={} gid={})",
+            child_pid, uid, gid
+        );
+        return Ok(());
+    }
 
+    // Fallback: one container UID mapped to the host user. When runAsUser is set,
+    // map that UID only so setuid(runAsUser) works without the uidmap package.
     std::fs::write(format!("/proc/{}/setgroups", child_pid), "deny")
         .with_context(|| format!("Failed to write setgroups for pid {}", child_pid))?;
-    std::fs::write(format!("/proc/{}/uid_map", child_pid), format!("0 {} 1\n", uid))
-        .with_context(|| format!("Failed to write uid_map for pid {}", child_pid))?;
-    std::fs::write(format!("/proc/{}/gid_map", child_pid), format!("0 {} 1\n", gid))
-        .with_context(|| format!("Failed to write gid_map for pid {}", child_pid))?;
 
-    info!("Wrote single UID/GID map for child pid {} (uid={} gid={})", child_pid, uid, gid);
+    let map_uid = run_as_user.unwrap_or(0);
+    let map_gid = run_as_group.unwrap_or(map_uid);
+
+    std::fs::write(
+        format!("/proc/{}/uid_map", child_pid),
+        format!("{} {} 1\n", map_uid, uid),
+    )
+    .with_context(|| format!("Failed to write uid_map for pid {}", child_pid))?;
+    std::fs::write(
+        format!("/proc/{}/gid_map", child_pid),
+        format!("{} {} 1\n", map_gid, gid),
+    )
+    .with_context(|| format!("Failed to write gid_map for pid {}", child_pid))?;
+
+    info!(
+        "Wrote single UID/GID map for child pid {} (container uid={} gid={} → host uid={} gid={})",
+        child_pid, map_uid, map_gid, uid, gid
+    );
     Ok(())
+}
+
+fn idmap_bin(name: &str) -> String {
+    for path in [format!("/usr/bin/{name}"), format!("/bin/{name}")] {
+        if std::path::Path::new(&path).exists() {
+            return path;
+        }
+    }
+    name.to_string()
 }
 
 fn try_newid_maps(child_pid: i32, uid: u32, gid: u32) -> Result<()> {
     let uid_args = build_idmap_args(child_pid, uid, "/etc/subuid")?;
     let gid_args = build_idmap_args(child_pid, gid, "/etc/subgid")?;
 
-    let ok = std::process::Command::new("newuidmap")
+    let ok = std::process::Command::new(idmap_bin("newuidmap"))
         .args(&uid_args)
         .status()
         .context("Failed to run newuidmap")?
         .success();
     anyhow::ensure!(ok, "newuidmap exited with error");
 
-    let ok = std::process::Command::new("newgidmap")
+    let ok = std::process::Command::new(idmap_bin("newgidmap"))
         .args(&gid_args)
         .status()
         .context("Failed to run newgidmap")?
         .success();
     anyhow::ensure!(ok, "newgidmap exited with error");
 
+    Ok(())
+}
+
+/// Write subuid/subgid ranges directly when newuidmap is missing from PATH.
+fn try_write_subid_maps_direct(child_pid: i32, uid: u32, gid: u32) -> Result<()> {
+    let (uid_start, uid_count) = read_subid("/etc/subuid", uid)
+        .ok_or_else(|| anyhow::anyhow!("no subuid entry for uid {}", uid))?;
+    let (gid_start, gid_count) = read_subid("/etc/subgid", gid)
+        .ok_or_else(|| anyhow::anyhow!("no subgid entry for gid {}", gid))?;
+
+    std::fs::write(format!("/proc/{}/setgroups", child_pid), "deny")
+        .context("Failed to write setgroups")?;
+    std::fs::write(
+        format!("/proc/{}/uid_map", child_pid),
+        format!("0 {} 1\n1 {} {}\n", uid, uid_start, uid_count),
+    )
+    .context("Failed to write uid_map")?;
+    std::fs::write(
+        format!("/proc/{}/gid_map", child_pid),
+        format!("0 {} 1\n1 {} {}\n", gid, gid_start, gid_count),
+    )
+    .context("Failed to write gid_map")?;
     Ok(())
 }
 
