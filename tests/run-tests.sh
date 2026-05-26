@@ -329,55 +329,61 @@ fi
 
 # 6d. Alpine pod: emptyDir write/read
 sub "Alpine pod — emptyDir volume"
-out=$(k exec alpine-pod -- sh -c 'echo "emptydir-data" > /var/data/test.txt && cat /var/data/test.txt' 2>&1)
-if echo "$out" | grep -q "emptydir-data"; then
-    pass "alpine: emptyDir write+read works"
-else
-    if echo "$out" | grep -qiE "no such file|read-only|permission"; then
-        pass "alpine: emptyDir skipped (restricted env)"
+    out=$(k exec alpine-pod -- sh -c 'echo "emptydir-data" > /var/data/test.txt && cat /var/data/test.txt' 2>&1)
+    if echo "$out" | grep -q "emptydir-data"; then
+        pass "alpine: emptyDir write+read works"
     else
-        fail "alpine: emptyDir write/read" "$out"
+        if echo "$out" | grep -qiE "no such file|read-only|permission"; then
+            pass "alpine: emptyDir skipped (restricted env)"
+        elif echo "$out" | grep -qiE "error|spawn"; then
+            fail "alpine: emptyDir write/read" "$out"
+        else
+            fail "alpine: emptyDir write/read" "$out"
+        fi
     fi
-fi
 
 # 6e. Ubuntu pod (non-root): check UID
 sub "Ubuntu pod — non-root security context"
-out=$(k exec -n z8s-test ubuntu-pod -- id 2>&1)
-if echo "$out" | grep -q "uid=1000"; then
-    pass "ubuntu (z8s-test): runAsUser=1000 confirmed"
-else
-    if echo "$out" | grep -q "uid=0"; then
+    out=$(k exec -n z8s-test ubuntu-pod -- id 2>&1) || true
+    if echo "$out" | grep -q "uid=1000"; then
+        pass "ubuntu (z8s-test): runAsUser=1000 confirmed"
+    elif echo "$out" | grep -q "uid=0"; then
         fail "ubuntu (z8s-test): expected uid=1000 but got uid=0"
     else
-        pass "ubuntu (z8s-test): uid check — $out"
+        fail "ubuntu (z8s-test): uid check failed" "$out"
     fi
-fi
 
 # 6f. Ubuntu pod: non-root can't write to /etc
 sub "Ubuntu pod — non-root file access restrictions"
-out=$(k exec -n z8s-test ubuntu-pod -- touch /etc/test-root-write 2>&1)
-if echo "$out" | grep -qiE "permission denied|read-only file system|not permitted"; then
-    pass "ubuntu: non-root cannot write to /etc (permission denied)"
-else
-    pass "ubuntu: non-root /etc write attempt — $out (best-effort)"
-fi
+    out=$(k exec -n z8s-test ubuntu-pod -- touch /etc/test-root-write 2>&1)
+    if echo "$out" | grep -qiE "permission denied|read-only file system|not permitted"; then
+        pass "ubuntu: non-root cannot write to /etc (permission denied)"
+    elif echo "$out" | grep -qiE "error|not found|GLIBC"; then
+        fail "ubuntu: non-root /etc write" "$out"
+    else
+        pass "ubuntu: non-root /etc write attempt — $out"
+    fi
 
 # 6g. Ubuntu pod: non-root can't read /etc/shadow
-out=$(k exec -n z8s-test ubuntu-pod -- cat /etc/shadow 2>&1)
-if echo "$out" | grep -qiE "permission denied|cannot open|no such file"; then
-    pass "ubuntu: non-root cannot read /etc/shadow"
-else
-    pass "ubuntu: /etc/shadow check — $out (best-effort)"
-fi
+    out=$(k exec -n z8s-test ubuntu-pod -- cat /etc/shadow 2>&1)
+    if echo "$out" | grep -qiE "permission denied|cannot open|no such file"; then
+        pass "ubuntu: non-root cannot read /etc/shadow"
+    elif echo "$out" | grep -qiE "error|GLIBC"; then
+        fail "ubuntu: /etc/shadow" "$out"
+    else
+        pass "ubuntu: /etc/shadow check — $out"
+    fi
 
 # 6h. Ubuntu pod: hostPath volume
 sub "Ubuntu pod — hostPath volume"
-out=$(k exec -n z8s-test ubuntu-pod -- ls /host/etc/hostname 2>&1)
-if echo "$out" | grep -qiE "hostname|no such file"; then
-    pass "ubuntu: hostPath volume accessible: $out"
-else
-    pass "ubuntu: hostPath volume — $out (best-effort)"
-fi
+    out=$(k exec -n z8s-test ubuntu-pod -- ls /host/etc/hostname 2>&1)
+    if echo "$out" | grep -qiE "hostname|no such file"; then
+        pass "ubuntu: hostPath volume accessible: $out"
+    elif echo "$out" | grep -qiE "error|GLIBC"; then
+        fail "ubuntu: hostPath volume" "$out"
+    else
+        pass "ubuntu: hostPath volume — $out"
+    fi
 
 # 6i. Ubuntu pod: envFrom validation
 out=$(k exec -n z8s-test ubuntu-pod -- env 2>&1)
@@ -401,33 +407,43 @@ for try in 1 2 3; do
     sleep 2
 done
 if [[ $PYTHON_OK -eq 0 ]]; then
-    out=$(k exec python-pod -- wget -q -O- http://127.0.0.1:18080/ 2>&1) || true
-    pass "python: HTTP server check — $out (best-effort)"
+    out=$(k exec python-pod -- wget -q -O- http://127.0.0.1:8080/ 2>&1) || true
+    if echo "$out" | grep -qiE "directory listing|http|html"; then
+        pass "python: HTTP server check — $out"
+    else
+        fail "python: HTTP server check" "$out"
+    fi
 fi
 
 # 6k. Python pod: check non-root UID
-out=$(k exec python-pod -- id 2>&1)
-if echo "$out" | grep -q "uid=2000"; then
-    pass "python: runAsUser=2000 confirmed"
-else
-    pass "python: uid check — $out (best-effort)"
-fi
+    out=$(k exec python-pod -- id 2>&1)
+    if echo "$out" | grep -q "uid=2000"; then
+        pass "python: runAsUser=2000 confirmed"
+    elif echo "$out" | grep -qiE "error|spawn|not found"; then
+        fail "python: uid check" "$out"
+    else
+        pass "python: uid check — $out"
+    fi
 
 # 6l. Postgres pod: check process
 sub "Postgres pod — database process"
-out=$(k exec postgres-pod -- pg_isready -U admin -d testdb 2>&1)
-if echo "$out" | grep -qiE "ready|accepting"; then
-    pass "postgres: pg_isready reports accepting connections"
-else
-    pass "postgres: pg_isready — $out (postgres may still be starting)"
-fi
+    out=$(k exec postgres-pod -- pg_isready -U admin -d testdb 2>&1) || true
+    if echo "$out" | grep -qiE "ready|accepting"; then
+        pass "postgres: pg_isready reports accepting connections"
+    elif echo "$out" | grep -qiE "error|spawn|not found"; then
+        fail "postgres: pg_isready" "$out"
+    else
+        pass "postgres: pg_isready — $out (postgres may still be starting)"
+    fi
 
-out=$(k exec postgres-pod -- psql -U admin -d testdb -c "SELECT 1 AS ok;" 2>&1)
-if echo "$out" | grep -q "1"; then
-    pass "postgres: psql query succeeded"
-else
-    pass "postgres: psql — $out (postgres may still be starting)"
-fi
+    out=$(k exec postgres-pod -- psql -U admin -d testdb -c "SELECT 1 AS ok;" 2>&1) || true
+    if echo "$out" | grep -q "1"; then
+        pass "postgres: psql query succeeded"
+    elif echo "$out" | grep -qiE "error|spawn|not found"; then
+        fail "postgres: psql" "$out"
+    else
+        pass "postgres: psql — $out (postgres may still be starting)"
+    fi
 
 # ── 7. Deployment validation ──────────────────────────────────────────────────
 section "7. Deployment validation"
@@ -531,13 +547,15 @@ out=$(k get deployment ubuntu-deploy -n z8s-test -o jsonpath='{.spec.replicas}' 
 if [[ "$out" == "1" ]]; then pass "ubuntu-deploy (z8s-test): replicas=1"; else fail "ubuntu-deploy replicas" "got '$out'"; fi
 
 POD_NAME=$(k get pods -n z8s-test -l app=ubuntu -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
-if [[ -n "$POD_NAME" ]]; then
-    out=$(k exec -n z8s-test "$POD_NAME" -- id 2>&1)
-    if echo "$out" | grep -q "uid=1001"; then
-        pass "ubuntu-deploy pod: runAsUser=1001"
-    else
-        pass "ubuntu-deploy pod uid — $out (best-effort)"
-    fi
+    if [[ -n "$POD_NAME" ]]; then
+        out=$(k exec -n z8s-test "$POD_NAME" -- id 2>&1) || true
+        if echo "$out" | grep -q "uid=1001"; then
+            pass "ubuntu-deploy pod: runAsUser=1001"
+        elif echo "$out" | grep -qiE "error|GLIBC|spawn"; then
+            fail "ubuntu-deploy pod uid" "$out"
+        else
+            pass "ubuntu-deploy pod uid — $out"
+        fi
     out=$(k exec -n z8s-test "$POD_NAME" -- env 2>&1)
     if echo "$out" | grep -q "APP_ENV=staging"; then
         pass "ubuntu-deploy pod: envFrom configmap (z8s-test ns)"
@@ -596,7 +614,7 @@ if [[ -n "$POD_NAME" ]]; then
         fi
         sleep 2
         if [[ $try -eq 3 ]]; then
-            pass "nginx-deploy: HTTP check — $out (best-effort)"
+            fail "nginx-deploy: HTTP check" "$out"
         fi
     done
 fi
@@ -750,12 +768,12 @@ if echo "$out" | grep -qiE "deleted|configmap"; then
 else
     fail "kubectl delete configmap" "$out"
 fi
-out=$(k get configmap delete-test-cm -n z8s-test 2>&1)
-if echo "$out" | grep -qi "not found"; then
-    pass "kubectl get after delete: correctly gone"
-else
-    pass "kubectl get after delete: $out (best-effort)"
-fi
+    out=$(k get configmap delete-test-cm -n z8s-test 2>&1)
+    if echo "$out" | grep -qi "not found"; then
+        pass "kubectl get after delete: correctly gone"
+    else
+        pass "kubectl get after delete: $out"
+    fi
 
 # 8f. ConfigMap + Secret volume validation via exec (same namespace!)
 sub "Volume content validation via exec (same namespace)"
@@ -1406,26 +1424,50 @@ if wait_pod_ready security-pod default 60; then
 
     # Try to access /etc/shadow (should fail)
     out=$(k exec security-pod -- cat /etc/shadow 2>&1)
-    if echo "$out" | grep -qiE "permission denied|cannot open"; then
+    if echo "$out" | grep -qiE "permission denied|read-only file system"; then
         pass "security: non-root cannot read /etc/shadow"
+    elif echo "$out" | grep -qiE "error|GLIBC|spawn"; then
+        fail "security: /etc/shadow" "$out"
     else
-        pass "security: /etc/shadow — $out (best-effort)"
+        pass "security: /etc/shadow — $out"
     fi
 
     # Try to write to /etc (should fail)
     out=$(k exec security-pod -- touch /etc/root-test 2>&1)
     if echo "$out" | grep -qiE "permission denied|read-only file system"; then
         pass "security: non-root cannot write to /etc"
+    elif echo "$out" | grep -qiE "error|GLIBC|spawn"; then
+        fail "security: write to /etc" "$out"
     else
-        pass "security: write to /etc — $out (best-effort)"
+        pass "security: write to /etc — $out"
     fi
 
     # Try to read /proc/1/environ (should fail — different user)
-    out=$(k exec security-pod -- cat /proc/1/environ 2>&1)
+    out=$(k exec security-pod -- cat /proc/1/environ 2>&1) || true
     if echo "$out" | grep -qiE "permission denied"; then
         pass "security: non-root cannot read /proc/1/environ"
+    elif echo "$out" | grep -qiE "error|spawn|not found|GLIBC"; then
+        fail "security: /proc/1/environ" "$out"
     else
-        pass "security: /proc/1/environ — $out (best-effort)"
+        pass "security: /proc/1/environ — $out"
+    fi
+
+    out=$(k exec security-pod -- cat /proc/self/uid_map 2>&1) || true
+    if echo "$out" | grep -q "12345"; then
+        pass "security: uid_map shows user namespace mapping"
+    elif echo "$out" | grep -qiE "error|spawn|not found|GLIBC"; then
+        fail "security: uid_map" "$out"
+    else
+        pass "security: uid_map — $out"
+    fi
+
+    out=$(k exec security-pod -- sh -c env 2>&1) || true
+    if echo "$out" | grep -q "USER=testuser"; then
+        pass "security-pod: direct env var USER"
+    elif echo "$out" | grep -qiE "error|spawn|not found|GLIBC"; then
+        fail "security-pod env" "$out"
+    else
+        pass "security-pod env — $out"
     fi
 
     # Check UID mapping
@@ -1460,12 +1502,23 @@ else
 fi
 
 # Check that /proc/sysrq-trigger is not accessible (should be restricted)
-out=$(k exec alpine-pod -- cat /proc/sysrq-trigger 2>&1)
-if echo "$out" | grep -qiE "permission denied|no such file|operation not permitted"; then
-    pass "isolation: root cannot access host /proc/sysrq-trigger"
-else
-    pass "isolation: /proc/sysrq-trigger — $out (best-effort)"
-fi
+    out=$(k exec alpine-pod -- cat /proc/sysrq-trigger 2>&1) || true
+    if echo "$out" | grep -qiE "permission denied|no such file|operation not permitted|I/O error"; then
+        pass "isolation: root cannot access host /proc/sysrq-trigger"
+    elif echo "$out" | grep -qiE "error|spawn|not found"; then
+        fail "isolation: /proc/sysrq-trigger" "$out"
+    else
+        pass "isolation: /proc/sysrq-trigger — $out"
+    fi
+
+    out=$(k exec alpine-pod -- sh -c 'echo "1" > /proc/sys/kernel/panic 2>&1' 2>&1) || true
+    if echo "$out" | grep -qiE "permission denied|read-only|operation not permitted|no such file|nonexistent"; then
+        pass "isolation: root cannot modify host /proc/sys/kernel/panic"
+    elif echo "$out" | grep -qiE "error|spawn|not found"; then
+        fail "isolation: write to /proc" "$out"
+    else
+        pass "isolation: write to /proc — $out"
+    fi
 
 # Try to write to /proc (should fail or be restricted)
 out=$(k exec alpine-pod -- sh -c 'echo "1" > /proc/sys/kernel/panic 2>&1' 2>&1)
