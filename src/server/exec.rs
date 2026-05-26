@@ -233,9 +233,8 @@ fn spawn_with_pty(
 
     unsafe {
         child_cmd.as_std_mut().pre_exec(move || {
-            if let Some((ref u_fd, ref m_fd)) = ns_fds {
-                let _ = nix::sched::setns(u_fd, CloneFlags::CLONE_NEWUSER);
-                let _ = nix::sched::setns(m_fd, CloneFlags::CLONE_NEWNS);
+            if let Some(ref ns) = ns_fds {
+                let _ = enter_container_namespaces(ns);
                 let _ = nix::unistd::chdir("/");
             }
             let _ = nix::unistd::setsid();
@@ -280,13 +279,39 @@ fn spawn_with_pipes(
     Ok(child_cmd)
 }
 
-fn try_open_namespace_fds(container_pid: u32) -> Option<(OwnedFd, OwnedFd)> {
-    let user_ns_path = format!("/proc/{}/ns/user", container_pid);
-    let mnt_ns_path = format!("/proc/{}/ns/mnt", container_pid);
+struct ContainerNamespaces {
+    user: OwnedFd,
+    mnt: OwnedFd,
+    net: OwnedFd,
+}
+
+fn try_open_namespace_fds(container_pid: u32) -> Option<ContainerNamespaces> {
     let open_flags = OFlag::O_RDONLY | OFlag::O_CLOEXEC;
-    let user_fd = nix::fcntl::open(user_ns_path.as_str(), open_flags, nix::sys::stat::Mode::empty()).ok()?;
-    let mnt_fd = nix::fcntl::open(mnt_ns_path.as_str(), open_flags, nix::sys::stat::Mode::empty()).ok()?;
-    Some((user_fd, mnt_fd))
+    let mode = nix::sys::stat::Mode::empty();
+    let user_path = format!("/proc/{}/ns/user", container_pid);
+    let mnt_path = format!("/proc/{}/ns/mnt", container_pid);
+    let net_path = format!("/proc/{}/ns/net", container_pid);
+    let user_fd = nix::fcntl::open(user_path.as_str(), open_flags, mode).ok()?;
+    let mnt_fd = nix::fcntl::open(mnt_path.as_str(), open_flags, mode).ok()?;
+    let net_fd = nix::fcntl::open(net_path.as_str(), open_flags, mode).ok()?;
+    Some(ContainerNamespaces {
+        user: user_fd,
+        mnt: mnt_fd,
+        net: net_fd,
+    })
+}
+
+fn enter_container_namespaces(ns: &ContainerNamespaces) -> Result<(), std::io::Error> {
+    nix::sched::setns(&ns.user, CloneFlags::CLONE_NEWUSER).map_err(|e| {
+        std::io::Error::new(std::io::ErrorKind::Other, format!("setns(CLONE_NEWUSER): {e}"))
+    })?;
+    nix::sched::setns(&ns.mnt, CloneFlags::CLONE_NEWNS).map_err(|e| {
+        std::io::Error::new(std::io::ErrorKind::Other, format!("setns(CLONE_NEWNS): {e}"))
+    })?;
+    nix::sched::setns(&ns.net, CloneFlags::CLONE_NEWNET).map_err(|e| {
+        std::io::Error::new(std::io::ErrorKind::Other, format!("setns(CLONE_NEWNET): {e}"))
+    })?;
+    Ok(())
 }
 
 fn is_root() -> bool {
@@ -294,88 +319,38 @@ fn is_root() -> bool {
 }
 
 fn build_command(cmd: &str, args: &[&str], rootfs_pid: Option<(&str, u32)>, env_vars: &[(String, String)]) -> Command {
-    if let Some((_root, container_pid)) = rootfs_pid {
-        // Join the container's user+mount namespaces for real isolation.
-        // ns/user must be joined first to gain capabilities, then ns/mnt.
-        let user_ns_path = format!("/proc/{}/ns/user", container_pid);
-        let mnt_ns_path = format!("/proc/{}/ns/mnt", container_pid);
-        let open_flags = OFlag::O_RDONLY | OFlag::O_CLOEXEC;
-        let user_fd = nix::fcntl::open(
-            user_ns_path.as_str(),
-            open_flags,
-            nix::sys::stat::Mode::empty(),
-        );
-        let mnt_fd = nix::fcntl::open(
-            mnt_ns_path.as_str(),
-            open_flags,
-            nix::sys::stat::Mode::empty(),
-        );
-        let fds = match (user_fd, mnt_fd) {
-            (Ok(u), Ok(m)) => Some((u, m)),
-            _ => None,
-        };
-
-        let mut c = Command::new(cmd);
-        for a in args {
-            c.arg(a);
-        }
+    let mut apply_env = |c: &mut Command| {
         c.env_clear();
         for (k, v) in env_vars {
             c.env(k, v);
         }
-        let rootfs_for_exec = rootfs_pid.map(|(r, _)| r.to_string());
-        unsafe { c.as_std_mut().pre_exec(move || {
-            if let Some((ref u_fd, ref m_fd)) = fds {
-                nix::sched::setns(u_fd, CloneFlags::CLONE_NEWUSER)
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("setns(CLONE_NEWUSER): {e}")))?;
-                nix::sched::setns(m_fd, CloneFlags::CLONE_NEWNS)
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("setns(CLONE_NEWNS): {e}")))?;
-                // After setns(NEWNS): "/" is the container root when pivot_root was used.
-                // When chroot fallback was used, "/" is still the host root — chroot
-                // into the rootfs path (which is visible from the host-root view).
-                if let Some(ref rfs) = rootfs_for_exec {
-                    let _ = nix::unistd::chroot(rfs.as_str());
-                }
-                nix::unistd::chdir("/")
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("chdir(/): {e}")))?;
-            }
-            Ok(())
-        }); }
-        c
-    } else if let Some(root) = rootfs_pid.map(|(r, _)| r) {
-        // No container PID — just set cwd to rootfs (legacy non-isolated path)
-        if is_root() {
-            let mut c = Command::new("chroot");
-            c.arg(root).arg(cmd);
-            for a in args {
-                c.arg(a);
-            }
-            c.env_clear();
-            for (k, v) in env_vars {
-                c.env(k, v);
-            }
-            c
-        } else {
-            let mut c = Command::new(cmd);
-            for a in args {
-                c.arg(a);
-            }
-            c.env_clear();
-            for (k, v) in env_vars {
-                c.env(k, v);
-            }
-            c.current_dir(root);
-            c
+    };
+    let args_owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+
+    if let Some((root, container_pid)) = rootfs_pid {
+        let (exec_path, prog_args) = rootfs::build_container_argv(cmd, &args_owned, root);
+        let ns_fds = try_open_namespace_fds(container_pid);
+
+        let mut c = Command::new(&exec_path);
+        for a in &prog_args {
+            c.arg(a);
         }
+        apply_env(&mut c);
+
+        if let Some(ns) = ns_fds {
+            unsafe {
+                c.as_std_mut().pre_exec(move || enter_container_namespaces(&ns));
+            }
+        } else {
+            c.current_dir(root);
+        }
+        c
     } else {
         let mut c = Command::new(cmd);
         for a in args {
             c.arg(a);
         }
-        c.env_clear();
-        for (k, v) in env_vars {
-            c.env(k, v);
-        }
+        apply_env(&mut c);
         c
     }
 }
@@ -416,11 +391,17 @@ fn error_frame(msg: &str) -> Message {
     Message::Binary(axum::body::Bytes::from(frame))
 }
 
+async fn send_error_and_close(ws_tx: &mut futures_util::stream::SplitSink<WebSocket, Message>, msg: &str) {
+    send_exit_status_msg(ws_tx, 1, Some(msg)).await;
+}
+
 async fn exec_ws_tty(mut socket: WebSocket, cmd: &str, args: &[&str], rootfs_pid: Option<(&str, u32)>, env_vars: &[(String, String)]) {
+    let (mut ws_tx, mut ws_rx) = socket.split();
+
     let (master, mut child_cmd) = match spawn_with_pty(cmd, args, rootfs_pid, env_vars) {
         Ok(pair) => pair,
         Err(e) => {
-            let _ = socket.send(error_frame(&format!("pty setup: {}", e))).await;
+            send_error_and_close(&mut ws_tx, &format!("pty setup: {}", e)).await;
             return;
         }
     };
@@ -428,7 +409,7 @@ async fn exec_ws_tty(mut socket: WebSocket, cmd: &str, args: &[&str], rootfs_pid
     let mut child = match child_cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            let _ = socket.send(error_frame(&format!("spawn error: {}", e))).await;
+            send_error_and_close(&mut ws_tx, &format!("spawn error: {}", e)).await;
             return;
         }
     };
@@ -438,7 +419,6 @@ async fn exec_ws_tty(mut socket: WebSocket, cmd: &str, args: &[&str], rootfs_pid
 
     let async_master =
         tokio::io::unix::AsyncFd::new(master).expect("AsyncFd for PTY master");
-    let (mut ws_tx, mut ws_rx) = socket.split();
     let mut read_buf = vec![0u8; 4096];
 
     loop {
@@ -508,10 +488,14 @@ async fn exec_ws_pipes(
     stdout_flag: bool,
     stderr_flag: bool,
 ) {
+    let (ws_tx, mut ws_rx) = socket.split();
+    let ws_tx = std::sync::Arc::new(tokio::sync::Mutex::new(ws_tx));
+
     let mut child_cmd = match spawn_with_pipes(cmd, args, rootfs_pid, env_vars) {
         Ok(c) => c,
         Err(e) => {
-            let _ = socket.send(error_frame(&format!("pipe setup: {}", e))).await;
+            let mut tx = ws_tx.lock().await;
+            send_error_and_close(&mut tx, &format!("pipe setup: {}", e)).await;
             return;
         }
     };
@@ -519,7 +503,8 @@ async fn exec_ws_pipes(
     let mut child = match child_cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            let _ = socket.send(error_frame(&format!("spawn error: {}", e))).await;
+            let mut tx = ws_tx.lock().await;
+            send_error_and_close(&mut tx, &format!("spawn error: {}", e)).await;
             return;
         }
     };
@@ -530,13 +515,12 @@ async fn exec_ws_pipes(
     let child_stdout = if stdout_flag { child.stdout.take() } else { None };
     let child_stderr = if stderr_flag { child.stderr.take() } else { None };
 
-    let (ws_tx, mut ws_rx) = socket.split();
-    let ws_tx = std::sync::Arc::new(tokio::sync::Mutex::new(ws_tx));
     let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<Message>(64);
 
+    let mut reader_handles = Vec::new();
     if let Some(stdout) = child_stdout {
         let out_tx = out_tx.clone();
-        tokio::spawn(async move {
+        reader_handles.push(tokio::spawn(async move {
             let mut buf = vec![0u8; 4096];
             let mut stdout = tokio::io::BufReader::new(stdout);
             loop {
@@ -552,12 +536,12 @@ async fn exec_ws_pipes(
                     Err(_) => break,
                 }
             }
-        });
+        }));
     }
 
     if let Some(stderr) = child_stderr {
         let out_tx = out_tx.clone();
-        tokio::spawn(async move {
+        reader_handles.push(tokio::spawn(async move {
             let mut buf = vec![0u8; 4096];
             let mut stderr = tokio::io::BufReader::new(stderr);
             loop {
@@ -573,22 +557,24 @@ async fn exec_ws_pipes(
                     Err(_) => break,
                 }
             }
-        });
+        }));
     }
     drop(out_tx);
 
     let mut child_stdin = child_stdin;
-    let mut child = child;
     let ws_tx_arc = ws_tx.clone();
 
-    let mut forwarder = Some(tokio::spawn(async move {
+    let forwarder = tokio::spawn(async move {
         while let Some(msg) = out_rx.recv().await {
             let mut tx = ws_tx_arc.lock().await;
             if tx.send(msg).await.is_err() {
                 break;
             }
         }
-    }));
+    });
+
+    let mut child_done = false;
+    let mut exit_code = 0;
 
     loop {
         tokio::select! {
@@ -600,59 +586,62 @@ async fn exec_ws_pipes(
                                 let _ = stdin.write_all(&data[1..]).await;
                                 let _ = stdin.flush().await;
                             }
-                        } else if data[0] == 0xFF && data.len() >= 2 {
-                            // Client closed a stream (channel 255 + stream_id byte)
-                            if data[1] == 0 {
-                                drop(child_stdin.take());
-                            }
+                        } else if data[0] == 0xFF && data.len() >= 2 && data[1] == 0 {
+                            drop(child_stdin.take());
                         }
                     }
-                    Some(Ok(Message::Close(_))) => {
-                        drop(child_stdin);
+                    Some(Ok(Message::Close(_))) | None => {
+                        drop(child_stdin.take());
                         let _ = child.kill().await;
+                        if !child_done {
+                            exit_code = child.wait().await.ok().and_then(|s| s.code()).unwrap_or(137);
+                            child_done = true;
+                        }
                         break;
                     }
-                    Some(Err(_e)) => {
-                        drop(child_stdin);
+                    Some(Err(_)) => {
+                        drop(child_stdin.take());
                         child.kill().await.ok();
-                        break;
-                    }
-                    None => {
-                        drop(child_stdin);
-                        let _ = child.kill().await;
+                        if !child_done {
+                            exit_code = child.wait().await.ok().and_then(|s| s.code()).unwrap_or(137);
+                            child_done = true;
+                        }
                         break;
                     }
                     _ => {}
                 }
             }
 
-            status = child.wait() => {
-                drop(child_stdin);
-                let exit_code = status.ok().and_then(|s| s.code()).unwrap_or(0);
-                // Drain buffered stdout/stderr before sending exit status.
-                // Pipe write-ends close when the child exits; reader tasks then read
-                // EOF, drop their out_tx clones, and out_rx returns None so the
-                // forwarder exits naturally.
-                if let Some(fwd) = forwarder.take() {
-                    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), fwd).await;
-                }
-                let mut tx = ws_tx.lock().await;
-                send_exit_status(&mut tx, exit_code).await;
-                return;
+            status = child.wait(), if !child_done => {
+                drop(child_stdin.take());
+                exit_code = status.ok().and_then(|s| s.code()).unwrap_or(0);
+                child_done = true;
+                break;
             }
         }
     }
 
-    let exit_code = child.wait().await.ok().and_then(|s| s.code()).unwrap_or(0);
-    if let Some(fwd) = forwarder.take() {
-        fwd.abort();
+    for h in reader_handles {
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), h).await;
     }
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), forwarder).await;
+
     let mut tx = ws_tx.lock().await;
     send_exit_status(&mut tx, exit_code).await;
 }
 
 async fn send_exit_status(ws_tx: &mut futures_util::stream::SplitSink<WebSocket, Message>, exit_code: i32) {
-    let (status_str, message) = if exit_code == 0 {
+    send_exit_status_msg(ws_tx, exit_code, None).await;
+}
+
+async fn send_exit_status_msg(
+    ws_tx: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    exit_code: i32,
+    message: Option<&str>,
+) {
+    let (status_str, message) = if let Some(msg) = message {
+        ("Failure", msg.to_string())
+    } else if exit_code == 0 {
         ("Success", "command exited with code 0".to_string())
     } else {
         ("Failure", format!("command exited with code {}", exit_code))

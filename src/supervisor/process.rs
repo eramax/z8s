@@ -28,14 +28,6 @@ fn resolve_run_as_user(pod_sc: Option<&PodSecurityContext>, container: &Containe
         .map(|u| u as u32)
 }
 
-/// Resolve the binary path after namespace setup (pivot/chroot may have failed).
-fn resolve_exec_path(entrypoint: &str, rootfs_path: &str) -> String {
-    if std::path::Path::new(entrypoint).exists() {
-        entrypoint.to_string()
-    } else {
-        format!("{}{}", rootfs_path, entrypoint)
-    }
-}
 
 fn raise_nproc_limit() {
     use nix::sys::resource::{getrlimit, setrlimit, Resource};
@@ -46,6 +38,35 @@ fn raise_nproc_limit() {
             let _ = setrlimit(Resource::RLIMIT_NPROC, target, new_hard);
         }
     }
+}
+
+fn declared_container_ports(container: &Container) -> Vec<u16> {
+    container
+        .ports
+        .as_ref()
+        .map(|ps| ps.iter().map(|p| p.container_port as u16).collect())
+        .unwrap_or_default()
+}
+
+fn merge_publish_ports(container: &Container, extra: &[u16]) -> Vec<u16> {
+    let mut ports = declared_container_ports(container);
+    for p in extra {
+        if !ports.contains(p) {
+            ports.push(*p);
+        }
+    }
+    ports
+}
+
+fn attach_port_publish(
+    pid: u32,
+    ports: &[u16],
+) -> (std::collections::HashMap<u16, u16>, Option<crate::network::port_publish::PortPublish>) {
+    if ports.is_empty() {
+        return (std::collections::HashMap::new(), None);
+    }
+    let publish = crate::network::port_publish::publish_ports(pid, ports);
+    (publish.map.clone(), Some(publish))
 }
 
 fn resolve_run_as_group(pod_sc: Option<&PodSecurityContext>, container: &Container) -> Option<u32> {
@@ -80,6 +101,8 @@ pub struct ContainerInstance {
     pub rootfs: String,
     pub started_at: Option<chrono::DateTime<chrono::Utc>>,
     pub env_vars: Vec<(String, String)>,
+    /// container_port → 127.0.0.1 host port (pod network namespace publish)
+    pub published_ports: std::collections::HashMap<u16, u16>,
 }
 
 #[derive(Debug)]
@@ -90,6 +113,7 @@ pub struct RunningContainer {
     pub log_buffer: Arc<Mutex<Vec<String>>>,
     pub ready: Arc<Mutex<bool>>,
     pub healthy: Arc<Mutex<bool>>,
+    port_publish: Option<crate::network::port_publish::PortPublish>,
 }
 
 pub struct ProcessSupervisor {
@@ -150,6 +174,12 @@ impl ProcessSupervisor {
         self.cgroup_manager.create_pod_cgroup(&pod_uid)?;
         self.set_resource_limits(&pod_uid, &containers)?;
 
+        let service_ports = if let AnyResource::Pod(pod) = resource {
+            self.service_target_ports_for_pod(pod).await
+        } else {
+            Vec::new()
+        };
+
         let mut prepared = Vec::new();
         for container in &containers {
             let container_id = format!("{}-{}", pod_name, container.name);
@@ -167,7 +197,7 @@ impl ProcessSupervisor {
 
             info!("Starting container {}/{}", pod_name, container.name);
             let rc = self
-                .spawn_container(resource, container, &container_id, &rootfs_path, &pod_uid)
+                .spawn_container(resource, container, &container_id, &rootfs_path, &pod_uid, &service_ports)
                 .await?;
             prepared.push((container_id, rc));
         }
@@ -228,6 +258,42 @@ impl ProcessSupervisor {
             .collect();
 
         (cms, secrets)
+    }
+
+    async fn service_target_ports_for_pod(&self, pod: &Pod) -> Vec<u16> {
+        use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
+        let pod_ns = pod.metadata.namespace.as_deref().unwrap_or("default");
+        let pod_labels = pod.metadata.labels.clone().unwrap_or_default();
+        let mut ports = Vec::new();
+        let trackers = self.store.get_by_kind("Service").await;
+        for t in trackers {
+            if let AnyResource::Service(svc) = &t.resource {
+                if svc.metadata.namespace.as_deref().unwrap_or("default") != pod_ns {
+                    continue;
+                }
+                let selector = svc
+                    .spec
+                    .as_ref()
+                    .and_then(|s| s.selector.as_ref())
+                    .cloned()
+                    .unwrap_or_default();
+                if !selector.iter().all(|(k, v)| pod_labels.get(k) == Some(v)) {
+                    continue;
+                }
+                if let Some(svc_ports) = svc.spec.as_ref().and_then(|s| s.ports.as_ref()) {
+                    for sp in svc_ports {
+                        let tp = sp
+                            .target_port
+                            .clone()
+                            .unwrap_or_else(|| IntOrString::Int(sp.port));
+                        if let IntOrString::Int(p) = tp {
+                            ports.push(p as u16);
+                        }
+                    }
+                }
+            }
+        }
+        ports
     }
 
     async fn resolve_service_env(&self, pod: &Pod) -> Vec<(String, String)> {
@@ -308,6 +374,7 @@ impl ProcessSupervisor {
         container_id: &str,
         rootfs_path: &str,
         pod_uid: &str,
+        service_ports: &[u16],
     ) -> Result<RunningContainer> {
         let image = container.image.clone().unwrap_or_default();
         let is_native = rootfs_path.is_empty();
@@ -380,6 +447,7 @@ impl ProcessSupervisor {
         } else {
             if !volumes.is_empty() {
                 crate::container::volumes::scrub_rootfs_volume_mounts(rootfs_path, &volumes);
+                crate::container::volumes::stage_volumes_in_rootfs(rootfs_path, &volumes);
             }
             rootfs::prepare_rootfs(rootfs_path)?;
 
@@ -399,9 +467,9 @@ impl ProcessSupervisor {
                 run_as_group,
             };
             if rootfs::is_root() {
-                return self.spawn_root_ns_container(ctx).await;
+                return self.spawn_root_ns_container(ctx, service_ports).await;
             } else {
-                return self.spawn_userns_container(ctx).await;
+                return self.spawn_userns_container(ctx, service_ports).await;
             }
         };
 
@@ -419,10 +487,14 @@ impl ProcessSupervisor {
 
         self.cgroup_manager.add_pid_to_cgroup(pod_uid, pid)?;
 
-        self.build_running_container(child, container_id, rootfs_path, &image, container, &env_vars).await
+        self.build_running_container(child, container_id, rootfs_path, &image, container, &env_vars, service_ports).await
     }
 
-    async fn spawn_root_ns_container(&self, ctx: ContainerSpawnCtx<'_>) -> Result<RunningContainer> {
+    async fn spawn_root_ns_container(
+        &self,
+        ctx: ContainerSpawnCtx<'_>,
+        service_ports: &[u16],
+    ) -> Result<RunningContainer> {
         let ContainerSpawnCtx { entrypoint, cmd_args, env_vars, rootfs_path, container_id, pod_uid, image, container, volumes, run_as_user, run_as_group } = ctx;
         let (stdout_r, stdout_w) = nix::unistd::pipe().context("Failed to create stdout pipe")?;
         let (stderr_r, stderr_w) = nix::unistd::pipe().context("Failed to create stderr pipe")?;
@@ -469,7 +541,7 @@ impl ProcessSupervisor {
                     });
                 }
 
-                let instance = ContainerInstance {
+                let mut instance = ContainerInstance {
                     container_id: container_id.to_string(),
                     container_name: container.name.clone(),
                     image: image.to_string(),
@@ -477,7 +549,12 @@ impl ProcessSupervisor {
                     rootfs: rootfs_path.to_string(),
                     started_at: Some(chrono::Utc::now()),
                     env_vars: env_owned.clone(),
+                    published_ports: std::collections::HashMap::new(),
                 };
+                let publish_ports = merge_publish_ports(container, service_ports);
+                let (published_ports, port_publish) =
+                    attach_port_publish(pid, &publish_ports);
+                instance.published_ports = published_ports;
 
                 Ok(RunningContainer {
                     child: None,
@@ -486,6 +563,7 @@ impl ProcessSupervisor {
                     log_buffer,
                     ready: Arc::new(Mutex::new(true)),
                     healthy: Arc::new(Mutex::new(true)),
+                    port_publish,
                 })
             }
             Ok(nix::unistd::ForkResult::Child) => {
@@ -519,10 +597,11 @@ impl ProcessSupervisor {
 
                 raise_nproc_limit();
 
-                let exec_path = resolve_exec_path(&entrypoint_owned, &rootfs_owned);
+                let (exec_path, prog_args) =
+                    rootfs::build_container_argv(&entrypoint_owned, &args_owned, &rootfs_owned);
                 let mut argv: Vec<std::ffi::CString> =
                     vec![std::ffi::CString::new(exec_path.clone()).unwrap()];
-                for a in &args_owned {
+                for a in &prog_args {
                     argv.push(std::ffi::CString::new(a.as_str()).unwrap());
                 }
                 let envp: Vec<std::ffi::CString> = env_owned.iter()
@@ -544,7 +623,11 @@ impl ProcessSupervisor {
         }
     }
 
-    async fn spawn_userns_container(&self, ctx: ContainerSpawnCtx<'_>) -> Result<RunningContainer> {
+    async fn spawn_userns_container(
+        &self,
+        ctx: ContainerSpawnCtx<'_>,
+        service_ports: &[u16],
+    ) -> Result<RunningContainer> {
         let ContainerSpawnCtx { entrypoint, cmd_args, env_vars, rootfs_path, container_id, pod_uid, image, container, volumes, run_as_user, run_as_group } = ctx;
         let (stdout_r, stdout_w) = nix::unistd::pipe()
             .context("Failed to create stdout pipe")?;
@@ -626,7 +709,7 @@ impl ProcessSupervisor {
                     });
                 }
 
-                let instance = ContainerInstance {
+                let mut instance = ContainerInstance {
                     container_id: container_id.to_string(),
                     container_name: container.name.clone(),
                     image: image.to_string(),
@@ -634,7 +717,12 @@ impl ProcessSupervisor {
                     rootfs: rootfs_path.to_string(),
                     started_at: Some(chrono::Utc::now()),
                     env_vars: env_owned.clone(),
+                    published_ports: std::collections::HashMap::new(),
                 };
+                let publish_ports = merge_publish_ports(container, service_ports);
+                let (published_ports, port_publish) =
+                    attach_port_publish(pid, &publish_ports);
+                instance.published_ports = published_ports;
 
                 let ready = Arc::new(Mutex::new(true));
                 let healthy = Arc::new(Mutex::new(true));
@@ -646,6 +734,7 @@ impl ProcessSupervisor {
                     log_buffer,
                     ready,
                     healthy,
+                    port_publish,
                 })
             }
             Ok(nix::unistd::ForkResult::Child) => {
@@ -685,11 +774,11 @@ impl ProcessSupervisor {
 
                 raise_nproc_limit();
 
-                let exec_path = resolve_exec_path(&entrypoint_owned, &rootfs_owned);
-                let mut argv: Vec<std::ffi::CString> = vec![
-                    std::ffi::CString::new(exec_path.clone()).unwrap()
-                ];
-                for a in &args_owned {
+                let (exec_path, prog_args) =
+                    rootfs::build_container_argv(&entrypoint_owned, &args_owned, &rootfs_owned);
+                let mut argv: Vec<std::ffi::CString> =
+                    vec![std::ffi::CString::new(exec_path.clone()).unwrap()];
+                for a in &prog_args {
                     argv.push(std::ffi::CString::new(a.as_str()).unwrap());
                 }
                 let envp: Vec<std::ffi::CString> = env_owned.iter()
@@ -723,6 +812,7 @@ impl ProcessSupervisor {
         image: &str,
         container: &Container,
         env_vars: &[(String, String)],
+        service_ports: &[u16],
     ) -> Result<RunningContainer> {
         let pid = child.id().expect("No PID for spawned process");
 
@@ -755,7 +845,7 @@ impl ProcessSupervisor {
             });
         }
 
-        let instance = ContainerInstance {
+        let mut instance = ContainerInstance {
             container_id: container_id.to_string(),
             container_name: container.name.clone(),
             image: image.to_string(),
@@ -763,7 +853,11 @@ impl ProcessSupervisor {
             rootfs: rootfs_path.to_string(),
             started_at: Some(chrono::Utc::now()),
             env_vars: env_vars.to_vec(),
+            published_ports: std::collections::HashMap::new(),
         };
+        let publish_ports = merge_publish_ports(container, service_ports);
+        let (published_ports, port_publish) = attach_port_publish(pid, &publish_ports);
+        instance.published_ports = published_ports;
 
         let ready = Arc::new(Mutex::new(true));
         let healthy = Arc::new(Mutex::new(true));
@@ -827,7 +921,22 @@ impl ProcessSupervisor {
             log_buffer,
             ready,
             healthy,
+            port_publish,
         })
+    }
+
+    /// Host port on 127.0.0.1 that forwards into the pod's network namespace.
+    pub async fn published_host_port(&self, pod_name: &str, container_port: u16) -> Option<u16> {
+        let prefix = format!("{}-", pod_name);
+        let running = self.running.lock().await;
+        for (cid, rc) in running.iter() {
+            if cid.starts_with(&prefix) {
+                if let Some(p) = rc.instance.published_ports.get(&container_port) {
+                    return Some(*p);
+                }
+            }
+        }
+        None
     }
 
     fn set_resource_limits(&self, pod_uid: &str, containers: &[Container]) -> Result<()> {
@@ -860,7 +969,10 @@ impl ProcessSupervisor {
 
     pub async fn stop_container(&self, container_id: &str) {
         let mut running = self.running.lock().await;
-        if let Some(rc) = running.remove(container_id) {
+        if let Some(mut rc) = running.remove(container_id) {
+            if let Some(mut pp) = rc.port_publish.take() {
+                pp.stop();
+            }
             if let Some(pid) = rc.instance.pid {
                 info!("Stopping container {} (PID {})", container_id, pid);
                 let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);

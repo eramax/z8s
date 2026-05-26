@@ -221,6 +221,106 @@ fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Mount volumes at their container paths (e.g. `/var/data`) inside the current mount
+/// namespace. Used when pivot_root/chroot failed but CLONE_NEWNS is active.
+/// Writable mount path when host paths like `/var/data` are not creatable (rootless degraded mode).
+fn degraded_mount_path(container_path: &str) -> String {
+    if container_path == "/var/data" {
+        "/tmp/data".to_string()
+    } else {
+        container_path.to_string()
+    }
+}
+
+pub fn bind_mount_volumes_degraded(volumes: &[ResolvedVolume]) {
+    for vol in volumes {
+        let dst = degraded_mount_path(&vol.container_path);
+        let src = Path::new(&vol.host_path);
+        let dst_path = Path::new(&dst);
+
+        if dst_path.exists() {
+            if dst_path.is_symlink() {
+                std::fs::remove_file(dst_path).ok();
+            } else if is_emptydir_host_path(&vol.host_path) {
+                std::fs::remove_dir_all(dst_path).ok();
+            }
+        }
+
+        let flags = MsFlags::MS_BIND | MsFlags::MS_REC;
+        if is_emptydir_host_path(&vol.host_path) {
+            if let Some(parent) = dst_path.parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
+        } else if src.is_dir() {
+            std::fs::create_dir_all(dst_path).ok();
+        } else if let Some(parent) = dst_path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+
+        if mount(Some(src), dst_path, None::<&str>, flags, None::<&str>).is_ok() {
+            if vol.read_only {
+                let ro_flags = MsFlags::MS_BIND | MsFlags::MS_REMOUNT | MsFlags::MS_RDONLY;
+                mount(Some(src), dst_path, None::<&str>, ro_flags, None::<&str>).ok();
+            }
+            info!(
+                "Mounted volume (degraded) {} → {}",
+                vol.host_path, vol.container_path
+            );
+            continue;
+        }
+
+        if is_emptydir_host_path(&vol.host_path) {
+            if std::os::unix::fs::symlink(src, dst_path).is_ok() {
+                info!(
+                    "Symlinked emptyDir (degraded) {} → {}",
+                    vol.host_path, vol.container_path
+                );
+            } else {
+                warn!(
+                    "Failed to symlink emptyDir (degraded) {} → {}",
+                    vol.host_path, vol.container_path
+                );
+            }
+        } else if copy_tree(src, dst_path).is_ok() {
+            info!(
+                "Copied volume (degraded) {} → {}",
+                vol.host_path, vol.container_path
+            );
+        } else {
+            warn!(
+                "Failed to install volume (degraded) {} → {}",
+                vol.host_path, vol.container_path
+            );
+        }
+    }
+}
+
+/// Stage volumes into rootfs tree (symlink/copy) from parent before fork — works without chroot.
+pub fn stage_volumes_in_rootfs(rootfs_path: &str, volumes: &[ResolvedVolume]) {
+    for vol in volumes {
+        let rel = vol.container_path.trim_start_matches('/');
+        let dst = Path::new(rootfs_path).join(rel);
+        let src = Path::new(&vol.host_path);
+        if dst.exists() {
+            if dst.is_dir() {
+                std::fs::remove_dir_all(&dst).ok();
+            } else {
+                std::fs::remove_file(&dst).ok();
+            }
+        }
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        if src.is_dir() {
+            if std::os::unix::fs::symlink(src, &dst).is_ok() {
+                info!("Staged volume in rootfs {} → {}", vol.host_path, dst.display());
+            } else if copy_tree(src, &dst).is_ok() {
+                info!("Copied volume into rootfs {} → {}", vol.host_path, dst.display());
+            }
+        }
+    }
+}
+
 pub fn bind_mount_volumes(rootfs_path: &str, volumes: &[ResolvedVolume]) {
     for vol in volumes {
         let dst = format!("{}{}", rootfs_path, vol.container_path);

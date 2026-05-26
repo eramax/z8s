@@ -24,10 +24,8 @@ pub async fn run_proxy_addr_when_ready(
     for _ in 0..120 {
         let endpoints = find_endpoints(&selector, &target_port, &store, &supervisor, svc_ns).await;
         if !endpoints.is_empty() {
-            if TcpStream::connect(format!("{}:{}", endpoints[0].host, endpoints[0].port))
-                .await
-                .is_ok()
-            {
+            let probe = format!("{}:{}", endpoints[0].host, endpoints[0].port);
+            if TcpStream::connect(&probe).await.is_ok() {
                 break;
             }
         }
@@ -201,7 +199,12 @@ async fn find_endpoints(
                 None => continue,
             };
 
-            let addr = format!("127.0.0.1:{}", port);
+            let connect_port = supervisor
+                .published_host_port(pod_name, port)
+                .await
+                .unwrap_or(port);
+
+            let addr = format!("127.0.0.1:{}", connect_port);
             if tokio::time::timeout(Duration::from_millis(500), TcpStream::connect(&addr))
                 .await
                 .ok()
@@ -213,7 +216,7 @@ async fn find_endpoints(
 
             endpoints.push(super::ServiceEndpoint {
                 host: "127.0.0.1".to_string(),
-                port,
+                port: connect_port,
             });
         }
     }

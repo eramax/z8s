@@ -1,4 +1,5 @@
 pub mod dns;
+pub mod port_publish;
 pub mod service_proxy;
 
 /// The port the z8s DNS server is listening on (53 or 5353). Set once at startup.

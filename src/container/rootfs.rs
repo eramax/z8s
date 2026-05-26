@@ -11,6 +11,63 @@ pub fn is_root() -> bool {
     Uid::effective().is_root()
 }
 
+/// Resolve binary path when the process runs on the host mount view (no chroot).
+pub fn resolve_exec_path(entrypoint: &str, rootfs_path: &str) -> String {
+    let root = rootfs_path.trim_end_matches('/');
+    let candidates: Vec<String> = if entrypoint.starts_with('/') {
+        vec![format!("{root}{entrypoint}")]
+    } else {
+        [
+            format!("{root}/bin/{entrypoint}"),
+            format!("{root}/usr/bin/{entrypoint}"),
+            format!("{root}/sbin/{entrypoint}"),
+        ]
+        .to_vec()
+    };
+
+    for p in candidates {
+        let path = std::path::Path::new(&p);
+        if !path.exists() {
+            continue;
+        }
+        if let Ok(target) = std::fs::read_link(path) {
+            let t = target.to_string_lossy();
+            if t.starts_with('/') {
+                let in_root = format!("{root}{t}");
+                if std::path::Path::new(&in_root).exists() {
+                    return in_root;
+                }
+            }
+        }
+        return p;
+    }
+
+    if std::path::Path::new(entrypoint).exists() {
+        entrypoint.to_string()
+    } else if entrypoint.starts_with('/') {
+        format!("{root}{entrypoint}")
+    } else {
+        format!("{root}/bin/{entrypoint}")
+    }
+}
+
+/// Build exec path and argv (Alpine busybox applets: `sleep` → `busybox sleep …`).
+pub fn build_container_argv(
+    entrypoint: &str,
+    args: &[String],
+    rootfs_path: &str,
+) -> (String, Vec<String>) {
+    let exec_path = resolve_exec_path(entrypoint, rootfs_path);
+    let argv = if exec_path.ends_with("/busybox") && !entrypoint.contains("busybox") {
+        let mut v = vec![entrypoint.to_string()];
+        v.extend(args.iter().cloned());
+        v
+    } else {
+        args.to_vec()
+    };
+    (exec_path, argv)
+}
+
 pub fn prepare_rootfs(rootfs_path: &str) -> Result<()> {
     let rootfs = Path::new(rootfs_path);
     if !rootfs.exists() {
@@ -213,9 +270,12 @@ pub fn child_enter_ns_fork(
     let flags = CloneFlags::CLONE_NEWUSER
         | CloneFlags::CLONE_NEWNS
         | CloneFlags::CLONE_NEWUTS
-        | CloneFlags::CLONE_NEWIPC;
+        | CloneFlags::CLONE_NEWIPC
+        | CloneFlags::CLONE_NEWNET;
     unshare(flags)
-        .context("Failed to unshare user/mount/uts/ipc namespaces")?;
+        .context("Failed to unshare user/mount/uts/ipc/net namespaces")?;
+
+    crate::network::port_publish::setup_loopback();
 
     nix::unistd::write(&sync_w, b"S")
         .context("child: failed to write sync byte")?;
@@ -265,6 +325,9 @@ pub fn child_enter_ns_fork(
     // where mount/chroot syscalls are blocked by the outer runtime's seccomp.
     // The container process will still use the correct UID mapping.
     eprintln!("z8s: filesystem isolation unavailable in this environment — running with user-namespace-only isolation");
+    if !volumes.is_empty() {
+        crate::container::volumes::bind_mount_volumes_degraded(volumes);
+    }
     Ok(())
 }
 
@@ -273,9 +336,11 @@ pub fn child_enter_ns_root(
     volumes: &[crate::container::volumes::ResolvedVolume],
 ) -> Result<()> {
     unshare(
-        CloneFlags::CLONE_NEWNS | CloneFlags::CLONE_NEWUTS,
+        CloneFlags::CLONE_NEWNS | CloneFlags::CLONE_NEWUTS | CloneFlags::CLONE_NEWNET,
     )
-    .context("Failed to unshare mount/uts")?;
+    .context("Failed to unshare mount/uts/net")?;
+
+    crate::network::port_publish::setup_loopback();
 
     mount(
         None::<&str>,

@@ -47,12 +47,17 @@ impl DeploymentController {
         let match_labels = selector.match_labels.clone().unwrap_or_default();
 
         let all_pods = self.store.get_by_kind("Pod").await;
+        // Only count pods created by this deployment ({name}-pod-*). Standalone pods
+        // that happen to share selector labels (e.g. alpine-pod vs alpine-deploy) must
+        // not be treated as replicas or deleted as "excess".
         let mut matching_pods: Vec<String> = all_pods
             .iter()
             .filter(|t| {
                 if let AnyResource::Pod(pod) = &t.resource {
+                    let pod_name = t.resource.name();
                     let pod_labels = pod.metadata.labels.clone().unwrap_or_default();
-                    labels_match(&match_labels, &pod_labels)
+                    pod_managed_by_deployment(pod_name, name)
+                        && labels_match(&match_labels, &pod_labels)
                         && pod.metadata.namespace.as_deref() == Some(namespace)
                 } else {
                     false
@@ -130,6 +135,10 @@ fn labels_match(selector: &BTreeMap<String, String>, labels: &BTreeMap<String, S
         }
     }
     true
+}
+
+fn pod_managed_by_deployment(pod_name: &str, deploy_name: &str) -> bool {
+    pod_name.starts_with(&format!("{deploy_name}-pod-"))
 }
 
 fn create_pod_from_template(deploy: &Deployment, name: &str) -> Result<Pod> {
