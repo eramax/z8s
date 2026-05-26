@@ -1,0 +1,49 @@
+# AppArmor profile for z8s — allows unprivileged user namespace creation
+# on Ubuntu 23.10+ where kernel.apparmor_restrict_unprivileged_userns=1.
+#
+# Install: sudo apparmor_parser -r /etc/apparmor.d/z8s
+# Or via:  sudo install.sh  (installs automatically)
+
+abi <abi/4.0>,
+
+include <tunables/global>
+
+profile z8s /usr/local/bin/z8s {
+  include <abstractions/base>
+  include <abstractions/nameservice>
+
+  # Allow the binary itself to be executed
+  /usr/local/bin/z8s mr,
+
+  # Full file access for container image management and rootfs setup
+  / r,
+  /** rwkl,
+
+  # Allow network access (API server, DNS, container networking)
+  network,
+
+  # Allow all capabilities needed to manage containers
+  capability,
+
+  # Unprivileged user namespace creation — the key rule for Ubuntu 23.10+
+  userns,
+
+  # Mount/umount/pivot_root for container filesystem isolation
+  mount,
+  umount,
+  pivot_root,
+
+  # Allow signals and ptrace for process supervision
+  signal,
+  ptrace,
+
+  # Allow unix sockets
+  unix,
+
+  # Allow dbus (for systemd cgroup v2 transient scope creation)
+  dbus,
+
+  # Allow execution of container workloads and helper binaries
+  /usr/local/bin/** Px -> unconfined,
+  /** Px -> unconfined,
+}

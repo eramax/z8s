@@ -7,7 +7,6 @@
 
 # Runtime mount artifacts — created by containers at runtime, not project files
 /dev/
-/etc/
 /proc/
 /sys/
 /run/
