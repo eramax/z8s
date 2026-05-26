@@ -21,9 +21,10 @@ start() {
     fi
     rm -f "$PIDFILE"
     cd "$WORKDIR"
-    touch "$LOGFILE"
+    # Remove any stale root-owned log file so the sudo process can recreate it.
+    sudo rm -f "$LOGFILE"
     set -m
-    sudo "$BINARY" "$@" >> "$LOGFILE" 2>&1 &
+    sudo sh -c "\"$BINARY\" \"\$@\" >>\"$LOGFILE\" 2>&1" -- "$@" &
     set +m
     PID=$!
     echo "$PID" > "$PIDFILE"
