@@ -380,7 +380,7 @@ fn build_command(
     env_vars: &[(String, String)],
     isolated_net: bool,
 ) -> Command {
-    let mut apply_env = |c: &mut Command| {
+    let apply_env = |c: &mut Command| {
         c.env_clear();
         let mut has_path = false;
         for (k, v) in env_vars {
@@ -410,13 +410,17 @@ fn build_command(
 
         let ns_fds = try_open_namespace_fds(container_pid);
         let fs_isolated = rootfs::container_fs_isolated(container_pid, root);
-        let use_mnt_ns = fs_isolated;
-        let (exec_path, prog_args) = if use_mnt_ns {
+        let (exec_path, prog_args) = if fs_isolated {
             rootfs::build_container_argv_in_mount_ns(cmd, &args_owned, root)
         } else {
             rootfs::build_container_argv(cmd, &args_owned, root)
         };
-        let (program, prog_args) = if fs_isolated {
+        // If the resolved binary is a bare name (no /), it wasn't found in the
+        // container rootfs — don't enter the mount namespace so the host PATH
+        // is searched instead (e.g. wget in a scratch/minimal image).
+        let binary_in_rootfs = exec_path.contains('/');
+        let use_mnt_ns = fs_isolated && binary_in_rootfs;
+        let (program, prog_args) = if use_mnt_ns {
             (exec_path, prog_args)
         } else {
             rootfs::wrap_dynamic_linker(&exec_path, prog_args, root)

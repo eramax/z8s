@@ -357,9 +357,9 @@ impl NetworkManager {
                         .and_then(|s| s.ports.as_ref())
                         .map(|ps| {
                             ps.iter().map(|p| DiscoveryEndpointPort {
-                                name: p.name.clone(),
+                                name: Some(p.name.clone().unwrap_or_default()),
                                 port: Some(host_port as i32),
-                                protocol: p.protocol.clone(),
+                                protocol: Some(p.protocol.clone().unwrap_or_else(|| "TCP".to_string())),
                                 ..Default::default()
                             }).collect()
                         }),

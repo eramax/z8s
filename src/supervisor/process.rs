@@ -12,6 +12,7 @@ use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 use std::collections::HashMap;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -147,7 +148,7 @@ pub struct RunningContainer {
     pub instance: ContainerInstance,
     pub restart_count: u32,
     pub log_buffer: Arc<Mutex<Vec<String>>>,
-    pub ready: Arc<Mutex<bool>>,
+    pub ready: Arc<AtomicBool>,
     pub healthy: Arc<Mutex<bool>>,
     port_publish: Option<crate::network::port_publish::PortPublish>,
 }
@@ -757,7 +758,7 @@ impl ProcessSupervisor {
                     instance,
                     restart_count: 0,
                     log_buffer,
-                    ready: Arc::new(Mutex::new(true)),
+                    ready: Arc::new(AtomicBool::new(true)),
                     healthy: Arc::new(Mutex::new(true)),
                     port_publish,
                 })
@@ -985,7 +986,7 @@ impl ProcessSupervisor {
                     attach_port_publish(pid, &publish_ports);
                 instance.published_ports = published_ports;
 
-                let ready = Arc::new(Mutex::new(true));
+                let ready = Arc::new(AtomicBool::new(true));
                 let healthy = Arc::new(Mutex::new(true));
 
                 Ok(RunningContainer {
@@ -1130,7 +1131,7 @@ impl ProcessSupervisor {
         let (published_ports, port_publish) = attach_port_publish(pid, &publish_ports);
         instance.published_ports = published_ports;
 
-        let ready = Arc::new(Mutex::new(true));
+        let ready = Arc::new(AtomicBool::new(true));
         let healthy = Arc::new(Mutex::new(true));
 
         if container.liveness_probe.is_some()
@@ -1170,7 +1171,7 @@ impl ProcessSupervisor {
                                 }
                             };
                             let ok = matches!(status, HealthStatus::Healthy);
-                            *p_ready.lock().await = ok;
+                            p_ready.store(ok, Ordering::SeqCst);
                             *p_healthy.lock().await = ok;
                             if !ok {
                                 warn!("Probe for {} failed", cid);
@@ -1321,7 +1322,7 @@ impl ProcessSupervisor {
         let prefix = format!("{}-", pod_name);
         let running = self.running.lock().await;
         for (cid, rc) in running.iter() {
-            if cid.starts_with(&prefix) && *rc.ready.lock().await {
+            if cid.starts_with(&prefix) && rc.ready.load(Ordering::SeqCst) {
                 return true;
             }
         }

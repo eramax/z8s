@@ -46,14 +46,82 @@ pub async fn run_proxy_addr_when_ready(
     .await;
 }
 
-/// Try to add an IP address as a loopback alias so the service proxy can bind to it.
-/// Works when running as root or with CAP_NET_ADMIN; silently a no-op otherwise.
+/// Add `ip` as a secondary address on loopback via netlink RTM_NEWADDR.
+/// Uses `AF_NETLINK` / `NETLINK_ROUTE` — requires CAP_NET_ADMIN.
+/// Unlike SIOCSIFADDR this does NOT replace the primary loopback address.
 fn ensure_loopback_alias(ip: &str) {
-    let _ = std::process::Command::new("ip")
-        .args(["addr", "add", &format!("{}/32", ip), "dev", "lo"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
+    use std::net::Ipv4Addr;
+    use std::ptr;
+
+    let addr: Ipv4Addr = match ip.parse() {
+        Ok(a) => a,
+        Err(_) => return,
+    };
+    let s_addr = u32::from(addr).to_be();
+
+    unsafe {
+        let fd = libc::socket(libc::AF_NETLINK, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, libc::NETLINK_ROUTE);
+        if fd < 0 {
+            return;
+        }
+
+        // Get interface index of "lo" via SIOCGIFINDEX.
+        let mut ifr: libc::ifreq = std::mem::zeroed();
+        let name_bytes = b"lo\0";
+        for (i, &b) in name_bytes.iter().enumerate() {
+            ifr.ifr_name[i] = b as libc::c_char;
+        }
+        if libc::ioctl(fd, libc::SIOCGIFINDEX, &mut ifr as *mut _) < 0 {
+            libc::close(fd);
+            return;
+        }
+        let if_idx = ifr.ifr_ifru.ifru_ifindex;
+
+        // Build RTM_NEWADDR payload as raw bytes.
+        // Layout: nlmsghdr(16) + ifaddrmsg(8) + rtattr(4) + addr(4) = 32
+        // With IFA_ADDRESS attr: + rtattr(4) + addr(4) = 40
+        let mut buf = [0u8; 48];
+
+        // nlmsghdr
+        let total_len: u32 = 40;
+        ptr::write(buf.as_mut_ptr().add(0) as *mut u32, total_len);          // nlmsg_len
+        ptr::write(buf.as_mut_ptr().add(4) as *mut u16, libc::RTM_NEWADDR as u16); // nlmsg_type
+        ptr::write(
+            buf.as_mut_ptr().add(6) as *mut u16,
+            (libc::NLM_F_REQUEST | libc::NLM_F_CREATE | libc::NLM_F_EXCL | libc::NLM_F_ACK) as u16,
+        );
+        ptr::write(buf.as_mut_ptr().add(8) as *mut u32, 1u32);               // nlmsg_seq
+        ptr::write(buf.as_mut_ptr().add(12) as *mut u32, 0u32);              // nlmsg_pid
+
+        // ifaddrmsg
+        ptr::write(buf.as_mut_ptr().add(16) as *mut u8, libc::AF_INET as u8);   // ifa_family
+        ptr::write(buf.as_mut_ptr().add(17) as *mut u8, 32u8);                   // ifa_prefixlen
+        ptr::write(buf.as_mut_ptr().add(18) as *mut u8, 0u8);                    // ifa_flags
+        ptr::write(buf.as_mut_ptr().add(19) as *mut u8, 0u8);                    // ifa_scope (RT_SCOPE_UNIVERSE)
+        ptr::write(buf.as_mut_ptr().add(20) as *mut u32, if_idx as u32);         // ifa_index
+
+        // RTA attr: IFA_LOCAL
+        ptr::write(buf.as_mut_ptr().add(24) as *mut u16, 8u16);                  // rta_len
+        ptr::write(buf.as_mut_ptr().add(26) as *mut u16, libc::IFA_LOCAL as u16); // rta_type
+        ptr::write(buf.as_mut_ptr().add(28) as *mut u32, s_addr);               // address
+
+        // RTA attr: IFA_ADDRESS (same address)
+        ptr::write(buf.as_mut_ptr().add(32) as *mut u16, 8u16);                  // rta_len
+        ptr::write(buf.as_mut_ptr().add(34) as *mut u16, libc::IFA_ADDRESS as u16); // rta_type
+        ptr::write(buf.as_mut_ptr().add(36) as *mut u32, s_addr);               // address
+
+        let iov = libc::iovec {
+            iov_base: buf.as_mut_ptr() as *mut libc::c_void,
+            iov_len: total_len as usize,
+        };
+        let mut msg: libc::msghdr = std::mem::zeroed();
+        msg.msg_iov = &iov as *const _ as *mut _;
+        msg.msg_iovlen = 1;
+
+        // Send and ignore errors (address may already exist).
+        libc::sendmsg(fd, &msg, 0);
+        libc::close(fd);
+    }
 }
 
 pub async fn run_proxy_addr(

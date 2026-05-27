@@ -1021,10 +1021,7 @@ fn count_deployment_pods(
                 let cid = format!("{}-{}", t.resource.name(), c.name);
                 running
                     .get(&cid)
-                    .map(|rc| {
-                        let arc = rc.ready.clone();
-                        arc.try_lock().map(|g| *g).unwrap_or(false)
-                    })
+                    .map(|rc| rc.ready.load(std::sync::atomic::Ordering::SeqCst))
                     .unwrap_or(false)
             })
         })
