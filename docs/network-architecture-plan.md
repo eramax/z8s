@@ -114,9 +114,9 @@ HOST NETNS                      POD NETNS (#42)
 
 ## 3. CIDR & Pool Architecture
 
-### 3.1 Cluster Pod CIDR — `10.0.0.0/8`
+### 3.1 Cluster Pod CIDR — `10.42.0.0/16` (default)
 
-Default. All pod IPs come from this range.
+Default. All pod IPs come from this range. Configurable via `--pod-cidr`. Use a larger range like `10.0.0.0/8` only if you have no IP overlap with existing cloud/on-prem 10.x.x.x networks. The `/16` default avoids the most common deployment conflict.
 
 ```
 Reserved:
@@ -124,19 +124,25 @@ Reserved:
   10.96.0.0/16 → ClusterIPs (Service CIDR)
 ```
 
-The `/8` is sub-allocated into VNets:
+The CIDR is sub-allocated into VNets:
 
 ```
-10.0.0.0/8 (16.7M IPs)
-  ├── VNet "prod"         : 10.80.0.0/20   (4094 IPs, auto)
-  ├── VNet "staging"      : 10.80.16.0/20  (4094 IPs, auto)
-  ├── VNet "shared"       : 10.80.32.0/20  (4094 IPs, auto)
-  └── ...up to 256 VNets at /20
+10.42.0.0/16 (65534 IPs)
+  ├── VNet "prod"         : 10.42.0.0/20   (4094 IPs, auto)
+  ├── VNet "staging"      : 10.42.16.0/20  (4094 IPs, auto)
+  ├── VNet "shared"       : 10.42.32.0/20  (4094 IPs, auto)
+  └── ...up to 16 VNets at /20
+
+With --pod-cidr 10.0.0.0/8:
+  10.0.0.0/8 (16.7M IPs)
+    ├── VNet "prod"         : 10.80.0.0/20   (4094 IPs, auto)
+    ├── VNet "staging"      : 10.80.16.0/20  (4094 IPs, auto)
+    └── ...up to 256 VNets at /20
 ```
 
 | Resource | Pool | Allocation | Scope |
 |---|---|---|---|
-| Pods (long-lived) | `10.0.0.0/8` | Sub-allocated per VNet as /20 | Per-VNet |
+| Pods (long-lived) | `--pod-cidr` | Sub-allocated per VNet as /20 | Per-VNet |
 | Jobs (ephemeral) | Same pool, same VNet | Same allocator, no special pool | Same VNet |
 | ClusterIP | `10.96.0.0/16` | Flat pool, not per-VNet | Cluster-wide |
 | Public IPv4 | User-provided | Assigned to host interface | Host-level |
@@ -295,10 +301,19 @@ table ip filter {
 
 Default policy on forward chain is `drop`. All forwarding is explicit.
 
+**System hardening on bridge/VNet hosts:**
+
+- `net.ipv4.conf.all.rp_filter = 1` — strict reverse-path filtering prevents IP spoofing between VNets. A pod in VNet A cannot send packets with a VNet B source IP.
+- `net.ipv4.conf.all.forwarding = 1` — already set by `enable_ip_forward()`.
+- `net.ipv4.conf.all.arp_announce = 2` — always use the best local address for ARP replies, prevents cross-VNet ARP leaks on multi-homed hosts.
+
 ### 6.2 Rule Order — Priority Model
 
 ```
 chain forward {
+  # 0. Connection tracking — MUST be first
+  ct state {established, related} accept
+
   # 1. NSG baseline (subnet CIDR rules)
   ip saddr @vnet-prod ip daddr @vnet-staging drop
 
@@ -311,6 +326,8 @@ chain forward {
   # 4. Default: drop (inherited from chain policy)
 }
 ```
+
+The `ct state` rule at position 0 is critical — without it, return traffic for established connections is dropped by the default policy, breaking all TCP flows.
 
 | Layer | Controls | Compiled from |
 |---|---|---|
@@ -441,18 +458,70 @@ chain forward {
 
 ## 10. Multi-Node
 
-### 10.1 Node Join (Deferred — More Investigation Needed)
+### 10.1 Node Discovery (Deferred — Will Investigate at Phase 6)
 
-Approaches to investigate:
+Approaches to investigate at Phase 6:
 
 | Approach | Pros | Cons |
 |---|---|---|
-| **SWIM gossip** (memberlist) | Fully decentralized, no SPOF, production-grade library | ~300 lines to implement |
+| **SWIM gossip** (memberlist) | Fully decentralized, no SPOF, production-grade library | ~300 lines to implement; memberlist is Go — need Rust implementation |
 | **Join-handshake push** | Simple (~100 lines), explicit control | Less resilient to partitions |
 | **k3s-style token join** | Proven model, tokens provide auth | Needs one node to accept the join |
 | **DNS-based discovery** | Zero extra mechanism | DNS TTL race conditions |
 
-**Decided:** not now. Will investigate when implementing multi-node in Phase 6.
+**Note:** Node discovery determines how IPAM Level 1 (the /24 bitmap) is managed. See §10.3.
+
+### 10.2 Cross-Node Dataplane (Design Locked)
+
+Regardless of discovery mechanism, once a node knows a peer's pod CIDR:
+
+```
+Each node maintains:
+  kernel routes:  10.42.X.0/24 via <peer-host-ip>
+  nftables DNAT:  local maps include peer pod IPs as backends
+  nftables NSG:   same rules apply to cross-node traffic
+```
+
+The discovery mechanism only affects how the route table and DNAT maps are populated — the dataplane itself is identical whether the peer was discovered via gossip, static config, or token join.
+
+### 10.3 Multi-Node IPAM — Two-Level Hierarchical (Design Locked)
+
+Single-node IPAM uses a local BTreeSet (see §5). Multi-node extends this with a two-level scheme that piggybacks on node discovery:
+
+```
+Level 1 — global:  bitmap of /24 blocks per VNet, owned by the "oldest" node
+Level 2 — local:   BTreeSet on each node, sub-allocates within its /24
+```
+
+**Join flow:**
+```
+Node B → Node A: POST /join { host_ip, token, node_name }
+Node A:
+  1. validates token
+  2. picks a free /24 from the bitmap for Node B's VNet
+  3. records: node-b → 10.42.1.0/24
+  4. returns: { assigned_cidr: "10.42.1.0/24", peer_list: [...] }
+
+Now Node A and Node B route each other's /24.
+Node B allocates pod IPs locally from its BTreeSet within 10.42.1.0/24.
+No contention, no coordination per pod.
+```
+
+**On node death:** Heartbeat from node discovery detects death (~60s timeout). Bitmap owner marks the dead node's /24 as free.
+
+**Bitmap ownership:** The first node to start owns the bitmap. On join, the bitmap owner is known. If the bitmap-owner node dies, the next node takes over (the join handshake transfers ownership).
+
+**Exhaustion:** If a node exhausts its /24, it requests an additional /24 from the bitmap owner — same join flow.
+
+**Why this over alternatives:**
+
+| Approach | Why not chosen |
+|---|---|
+| Gossip-based CRDT | Too complex for <50 nodes; convergence delays |
+| etcd/Consul | Adds external dependency |
+| Per-pod CRD (Whereabouts) | CRD sprawl, needs k8s API |
+| Static pre-config | Fragile, no dynamic join |
+| **Two-level + join handshake** | **Chosen — ~300 lines, no deps, works with any discovery mechanism** |
 
 ### 10.2 Cross-Node Dataplane (Design Locked)
 
@@ -534,9 +603,10 @@ Write integration test scripts (shell + YAML) that define success for every feat
 
 ### Phase 2 — Pool Allocator + nftables Engine (SNAT + ClusterIP DNAT)
 
+- **Validate rustables early:** Before building the full engine, write a small validation script that exercises the three operations we need (SNAT MASQUERADE, DNAT map, dynamic set add/remove). If rustables fails any of these, implement the fallback raw-netlink approach before committing the architecture.
 - New crate: `rustables`
 - Pool allocator (unified for all resource types)
-- nftables table init (`ip nat`, `ip filter`, baseline chains)
+- nftables table init (`ip nat`, `ip filter`, baseline chains) with conntrack rules
 - `add_snat(pod_cidr)` — MASQUERADE rule via rustables
 - `add_clusterip_dnat(cluster_ip, port, backends)` — DNAT map via rustables Batch
 - `remove_clusterip_dnat()`, `update_clusterip_backends()`
@@ -710,11 +780,16 @@ Applying the MASQUERADE rule via `rustables::Batch` is idempotent — the `add` 
 ### Rust Crates
 
 | Crate | Version | Purpose | Affects phases |
-|---|---|---|---|
+|---|---|---|---|---|
 | `rustables` | 0.8 | nftables nfnetlink FFI | Phase 2+ |
 | `ipnetwork` | 0.21 | CIDR parsing (transitive via rustables) | Phase 2+ |
 
 Kept: `libc` + `nix` for rtnetlink FFI (veth, routes, IP assignment).
+
+**rustables risk note:** The crate is maintained but acknowledges "rough edges." Alternatives investigated:
+- `nftables-rs` (JSON API) — shells out to `nft` binary, requires host package ❌
+- Mullvad `nftnl` (FFI bindings to libnftnl C library) — requires `libnftnl-dev` system dep at build time ❌
+- **Fallback:** If rustables proves insufficient for our specific operations (SNAT, DNAT maps, sets, forward rules), implement the needed operations via raw `NFNL_SUBSYS_NFTABLES` netlink using the same `libc` FFI pattern as rtnetlink. The surface area is small (~100 lines).
 
 ### Host Packages
 
@@ -739,7 +814,7 @@ Each Pod resource gets exactly **one IP** from the pool. All containers within a
 z8s [OPTIONS]
 
 Networking:
-  --pod-cidr <CIDR>             Pod IP allocation range         [default: 10.0.0.0/8]
+  --pod-cidr <CIDR>             Pod IP allocation range         [default: 10.42.0.0/16]
   --service-cidr <CIDR>         ClusterIP allocation range       [default: 10.96.0.0/16]
   --vnet-cidr-size <PREFIX>     Default VNet CIDR size           [default: 20]
   --ipv6-prefix <PREFIX>        IPv6 /64 block (future)          [default: none]
@@ -756,6 +831,7 @@ Networking:
 | Topic | Options to investigate | Affects phase |
 |---|---|---|
 | **Node discovery** | SWIM gossip / join-handshake push / k3s-style token / DNS-based | Phase 6 |
+| **Multi-node IPAM bitmap ownership** | First-node-owns vs elected leader vs replicated via gossip | Phase 6 |
 | **TLS termination** | `tokio-rustls` (pure Rust) vs `tokio-native-tls` (OpenSSL, already linked) vs custom | Phase 7 |
 | **Auto-TLS / ACME** | Existing Rust crate vs implement HTTP-01 ourselves vs shelling out to certbot | Phase 7 |
 | **mTLS backend re-encryption** | Cluster-internal CA vs per-service certs | Phase 7 |
