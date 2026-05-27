@@ -829,7 +829,7 @@ Applying the MASQUERADE rule via `rustables::Batch` is idempotent — the `add` 
 ### Rust Crates
 
 | Crate | Version | Purpose | Affects phases |
-|---|---|---|---|---|
+|-------|---------|---------|---------------|
 | `rustables` | 0.8 | nftables nfnetlink FFI | Phase 2+ |
 | `ipnetwork` | 0.21 | CIDR parsing (transitive via rustables) | Phase 2+ |
 
