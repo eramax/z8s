@@ -1,13 +1,14 @@
 # Network Architecture Plan
 
-> **Date:** 2026-05-27 (v3 — single rustables engine)
-> **Goal:** Replace setns-based port publishing with a unified nftables-backed L3 network engine — real pod IPs, zero-copy forwarding, full NetworkPolicy, Azure-style VNet/Subnet/NSG, ClusterIP via DNAT, multi-node, no host package dependencies.
+> **Date:** 2026-05-27 (v4 — unified L3/L4 engine, final design)
+> **Goal:** Replace setns-based port publishing with a single nftables-backed network engine — real pod IPs, zero-copy forwarding, full NetworkPolicy + NSG, Azure-style VNet/Subnet, ClusterIP via DNAT, multi-node, no host package dependencies.
 > **Contracts:**
 > - No shelling out to `ip`, `iptables`, `nft`, or any host binary
 > - All L3/L4 enforcement via `rustables` (nfnetlink FFI)
 > - All L7 logic via built-in axum (ingress, API gateway)
-> - All pod attachment via veth pairs with host routes (no bridge)
-> - All netlink operations use the same `libc` FFI pattern as `ensure_loopback_alias`
+> - Pod attachment via veth pairs with host routes — **no bridge**
+> - rtnetlink operations (`RTM_NEWLINK`, `NEWADDR`, `NEWROUTE`) via minimal `libc` FFI (~50 lines)
+> - One unified pool allocator for all resource types — no special cases in the engine
 
 ---
 
@@ -36,137 +37,248 @@ HOST NETNS                      POD NETNS (#42)
 
 ---
 
-## 2. Proposed Architecture — Single Engine
+## 2. Proposed Architecture — Unified Network Engine
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│  Z8S HOST                                                        │
-│                                                                  │
-│  ┌──────────────────────────────────────────────────────────────┐│
-│  │  L7 INGRESS (axum) — separate, not nftables                  ││
-│  │  :80 HTTP Host header → backend pod IP                      ││
-│  │  :443 TLS SNI          → backend pod IP                     ││
-│  │  :22  port match       → backend pod IP                     ││
-│  └──────────────────────────────────────────────────────────────┘│
-│                                                                  │
-│  ┌──────────────────────────────────────────────────────────────┐│
-│  │  RUSTABLES ENGINE — unified L3/L4 dataplane                  ││
-│  │                                                              ││
-│  │  ┌─────────────┐ ┌──────────────┐ ┌──────────────────────┐  ││
-│  │  │ SNAT         │ │ ClusterIP    │ │ NetworkPolicy  + NSG │  ││
-│  │  │ masquerade   │ │ DNAT maps    │ │ pod-selector sets   │  ││
-│  │  │ postrouting  │ │ prerouting   │ │ subnet CIDR sets    │  ││
-│  │  └─────────────┘ └──────────────┘ └──────────────────────┘  ││
-│  │                                                              ││
-│  │  nftables tables:                                            ││
-│  │    nat:     prerouting (DNAT) + postrouting (SNAT)           ││
-│  │    filter:  forward (policy + isolation)                     ││
-│  │                                                              ││
-│  │  Atomic batch updates via rustables::Batch                   ││
-│  └──────────────────────────────────────────────────────────────┘│
-│                                                                  │
-│  ┌──────────────────────────────────────────────────────────────┐│
-│  │  POD ATTACHMENT — veth pairs, no bridge                      ││
-│  │                                                              ││
-│  │  host route: 10.42.0.2/32 dev veth-podA                     ││
-│  │  host route: 10.42.0.3/32 dev veth-podB                     ││
-│  │  host route: 10.42.1.0/24 via 10.0.0.2 (multi-node)        ││
-│  │                                                              ││
-│  │  veth-podA ── peer ──► podA (10.42.0.2/16, default route)   ││
-│  │  veth-podB ── peer ──► podB (10.42.0.3/16, default route)   ││
-│  │                                                              ││
-│  │  No bridge. No L2 forwarding. Pure L3 routed.               ││
-│  └──────────────────────────────────────────────────────────────┘│
-│                                                                  │
-│  ip_forward=1  (written once at startup)                         │
-└──────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│  Z8S HOST                                                          │
+│                                                                    │
+│  ┌───────────────────────────────────────────────────────────────┐ │
+│  │  L7 INGRESS (axum) — separate process, NOT part of engine     │ │
+│  │  :80  HTTP  Host header → backend pod IP                      │ │
+│  │  :443 TLS  SNI          → backend pod IP     (Phase 7)        │ │
+│  │  :22       port match   → backend pod IP                      │ │
+│  └───────────────────────────────────────────────────────────────┘ │
+│                                                                    │
+│  ┌───────────────────────────────────────────────────────────────┐ │
+│  │  NETWORK ENGINE — unified, resource-agnostic                   │ │
+│  │                                                               │ │
+│  │  Pool Allocator (one code path for everything):               │ │
+│  │    pod-cidr   (10.0.0.0/8)   → per-VNet /20 sub-allocation   │ │
+│  │    svc-cidr   (10.96.0.0/16) → flat per-ClusterIP            │ │
+│  │    public-v4  (<user>)       → host interface                 │ │
+│  │    public-v6  (<user>/64)    → host interface                 │ │
+│  │                                                               │ │
+│  │  Engine::register(resource, pool):                            │ │
+│  │    1. allocate IP from pool                                   │ │
+│  │    2. mark in-use (BTreeSet free-list)                        │ │
+│  │    3. return IP — nothing else                                │ │
+│  │                                                               │ │
+│  │  Engine::program(resource):                                   │ │
+│  │    if veth peer exists        → add /32 route via veth        │ │
+│  │    if Service references pod  → add DNAT map entry            │ │
+│  │    if Ingress references svc  → add L7 route                  │ │
+│  │    if DNS requested           → add A/AAAA record             │ │
+│  │    if labels match NetworkPolicy → add to nftables set        │ │
+│  │    if PublicIP is assigned    → assign to host iface + DNAT   │ │
+│  │    if none of the above       → nothing extra (job = done)    │ │
+│  │                                                               │ │
+│  │  nftables (via rustables):                                    │ │
+│  │    nat:      prerouting (DNAT) + postrouting (SNAT)           │ │
+│  │    filter:   forward (NSG + NetworkPolicy)                    │ │
+│  │    sets:     dynamic pod membership for NetworkPolicy         │ │
+│  │    maps:     ClusterIP → backend pod IPs (round-robin)        │ │
+│  └───────────────────────────────────────────────────────────────┘ │
+│                                                                    │
+│  ┌───────────────────────────────────────────────────────────────┐ │
+│  │  POD ATTACHMENT — veth pairs, no bridge (pure L3)             │ │
+│  │                                                               │ │
+│  │  host route: 10.80.0.2/32 dev veth-podA                      │ │
+│  │  host route: 10.80.0.3/32 dev veth-podB                      │ │
+│  │  host route: 10.80.16.0/24 via 10.0.0.2 (multi-node)        │ │
+│  │                                                               │ │
+│  │  veth-podA ── peer ──► podA (10.80.0.2/20, default route)   │ │
+│  │  veth-podB ── peer ──► podB (10.80.0.3/20, default route)   │ │
+│  │                                                               │ │
+│  │  No bridge. No L2. Pure L3 routed.                           │ │
+│  └───────────────────────────────────────────────────────────────┘ │
+│                                                                    │
+│  ip_forward=1 (written once at startup)                            │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Key Design Decisions
 
 | Decision | Rationale |
 |---|---|
-| **No bridge** | Pods are L3 neighbors via host routes. No L2 isolation leaks, no ARP tables, no STP, no MAC learning. VNet boundary = route aggregate boundary. |
-| **veth for attachment only** | Each pod gets one veth pair. Host end is a plain interface with a /32 route. The pod end is `eth0` inside the netns. |
-| **`rustables` for all L3/L4** | SNAT, ClusterIP DNAT, NetworkPolicy, NSG filtering — single engine, atomic batch updates, zero-copy kernel path. |
+| **No bridge** | Pods are L3 neighbors via host routes. No L2 isolation leaks, no ARP tables, no STP. VNet boundary = route aggregate boundary. |
+| **veth for attachment only** | Each pod gets one veth pair. Host end is a plain interface with a /32 route. No bridge port, no L2 forwarding. |
+| **`rustables` for all L3/L4** | SNAT, DNAT, NetworkPolicy, NSG — single engine, atomic batch updates, zero-copy kernel path. |
 | **ClusterIP via nftables DNAT** | Replace userspace TCP proxy + loopback alias with kernel DNAT map. No `ensure_loopback_alias` needed. Zero per-packet userspace. |
+| **Unified pool allocator** | One code path for pods, services, public IPs, jobs. No special cases in the engine. |
+| **Resource-agnostic programming** | Engine does the same `allocate → program` for every resource. Programs by reference (if a Service references a pod, DNAT is added; if nothing references a job, no extra rules). |
 | **L7 ingress separate (axum)** | nftables is L3/L4 only. HTTP Host/SNI/path routing stays in userspace where it belongs. |
-| **No host package deps** | Everything through `libc` FFI (`RTM_NEWLINK`, `RTM_NEWADDR`, `RTM_NEWROUTE`) + `rustables` (nfnetlink). |
+| **No host package deps** | Everything through `libc` FFI or `rustables`. Zero shell commands. |
 
 ---
 
-## 3. Data Flows
+## 3. CIDR & Pool Architecture
 
-### 3.1 Pod → Pod (same host)
+### 3.1 Cluster Pod CIDR — `10.0.0.0/8`
+
+Default. All pod IPs come from this range.
 
 ```
-Pod A (10.42.0.2) → 10.42.0.3:80
-  └── veth-podA → host routing (10.42.0.3/32 dev veth-podB)
+Reserved:
+  10.0.0.0/8  → Pod IPs only
+  10.96.0.0/16 → ClusterIPs (Service CIDR)
+```
+
+The `/8` is sub-allocated into VNets:
+
+```
+10.0.0.0/8 (16.7M IPs)
+  ├── VNet "prod"         : 10.80.0.0/20   (4094 IPs, auto)
+  ├── VNet "staging"      : 10.80.16.0/20  (4094 IPs, auto)
+  ├── VNet "shared"       : 10.80.32.0/20  (4094 IPs, auto)
+  └── ...up to 256 VNets at /20
+```
+
+| Resource | Pool | Allocation | Scope |
+|---|---|---|---|
+| Pods (long-lived) | `10.0.0.0/8` | Sub-allocated per VNet as /20 | Per-VNet |
+| Jobs (ephemeral) | Same pool, same VNet | Same allocator, no special pool | Same VNet |
+| ClusterIP | `10.96.0.0/16` | Flat pool, not per-VNet | Cluster-wide |
+| Public IPv4 | User-provided | Assigned to host interface | Host-level |
+| Public IPv6 | User-provided /64 | Assign /128 per service to host interface | Host-level |
+
+### 3.2 VNet → Namespace Mapping
+
+Every namespace gets a **default VNet** at namespace creation:
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: production
+  annotations:
+    z8s.io/vnet: prod     # default: namespace name
+    z8s.io/vnet-cidr: 10.80.0.0/20  # auto-allocated if not set
+```
+
+Users can override:
+- Move a namespace to a different VNet via annotation
+- Expand the VNet CIDR (e.g., from /20 to /19) without recreating pods
+- Assign the same VNet to multiple namespaces (shared network)
+
+The VNet is the **network boundary** — pods in different VNets cannot communicate by default (enforced by nftables forward chain).
+
+### 3.3 Subnets (Optional)
+
+Subnets are not required. A VNet with no subnets = one flat /20 where all pods communicate freely.
+
+```yaml
+apiVersion: z8s.io/v1
+kind: Subnet
+metadata:
+  name: web
+spec:
+  vnet: prod
+  cidr: 10.80.0.0/24
+```
+
+Subnets exist to:
+- Apply NSG rules between groups within the same VNet
+- Organize pods by function (web, app, db)
+- Default between subnets depends on NSG rules (no implicit isolation)
+
+---
+
+## 4. Data Flows
+
+### 4.1 Pod → Pod (same VNet, same node)
+
+```
+Pod A (10.80.0.2) → 10.80.0.3:80
+  └── veth-podA → host routing (10.80.0.3/32 dev veth-podB)
   └── nftables filter forward chain (policy check)
   └── veth-podB → Pod B
 ```
 
-**One L3 forward through the host kernel. No userspace. No bridge.**
+One L3 kernel forward. No userspace. No bridge.
 
-### 3.2 Pod → ClusterIP Service
+### 4.2 Pod → Pod (different VNet, same node)
 
 ```
-Pod A (10.42.0.2) → 10.96.0.3:80
-  └── veth-podA → host
-  └── nftables prerouting: ip daddr 10.96.0.3 dnat to 10.42.0.3:8080
-  └── host routing: 10.42.0.3/32 dev veth-podB
-  └── nftables filter forward chain (policy check)
-  └── veth-podB → Pod B
+Pod A (10.80.0.2, VNet=prod) → 10.80.20.3:80 (VNet=staging)
+  └── veth → host routing (10.80.20.3/32 dev veth-podX)
+  └── nftables filter forward chain:
+        ip saddr @vnet-prod ip daddr @vnet-staging drop  ← NSG default deny
+  └── DROPPED (unless explicit NSG allow or NetworkPolicy override)
 ```
 
-**ClusterIP DNAT map (round-robin):**
+### 4.3 Pod → ClusterIP Service (via nftables DNAT)
+
 ```
-nft add rule ip nat prerouting ip daddr 10.96.0.3 tcp dport 80 \
-  dnat to numgen inc mod 2 map { 0 : 10.42.0.3, 1 : 10.42.0.4 }
+Pod A (10.80.0.2) → 10.96.0.3:80
+  └── veth → host
+  └── nftables prerouting: ip daddr 10.96.0.3 tcp dport 80
+        dnat to numgen inc mod 2 map { 0 : 10.80.0.3:8080, 1 : 10.80.0.4:8080 }
+  └── host routing → veth → backend pod
 ```
 
-No `ensure_loopback_alias`. No userspace proxy. No per-packet overhead.
+No `ensure_loopback_alias`. No userspace proxy. Atomically updated via `rustables::Batch`.
 
-### 3.3 External → Ingress → Pod
+### 4.4 External → Ingress → Pod
 
 ```
 Client → svc1.z8s.emo.net (Cloudflare A → host IP)
   └── host:80 (axum listener)
   └── match Host header → backend service
-  └── splice to 10.42.0.2:8080 (kernel splice, zero-copy)
+  └── resolve backend pod IPs
+  └── splice to 10.80.0.3:8080 (kernel splice, zero-copy)
 ```
 
-L7 ingress is the only userspace touch. The `splice` path still never copies data through userspace after the route decision.
-
-### 3.4 Pod → Internet
+### 4.5 Pod → Internet
 
 ```
-Pod A (10.42.0.2) → 1.1.1.1:80
-  └── veth-podA → host
-  └── host routing → eth0 (default route)
+Pod A (10.80.0.2) → 1.1.1.1:80
+  └── veth → host routing → eth0 (default route)
   └── nftables postrouting: masquerade (SNAT to host IP)
 ```
 
-SNAT via `rustables` MASQUERADE rule. Source rewritten to host's external IP.
+MASQUERADE rule applies per-VNet. Hub VNet has SNAT, spoke VNets don't.
 
-### 3.5 Pod → Pod (cross-node)
+### 4.6 Pod → Pod (cross-node)
 
 ```
-Pod A (Node A, 10.42.1.2) → 10.42.2.3:80
-  └── veth → host routing (10.42.2.0/24 via 10.0.0.2)
-  └── eth0 → Node B
-  └── host routing (10.42.2.3/32 dev veth-podC)
-  └── nftables filter forward chain (policy check)
-  └── veth → Pod C
+Node A (10.0.0.1)                Node B (10.0.0.2)
+Pod (10.80.0.2)                  Pod (10.80.20.3)
+  └── veth                          └── veth
+  └── host routing                   └── host routing
+  └── 10.80.16.0/20 via 10.0.0.2    └── 10.80.0.0/20 via 10.0.0.1
+  └── eth0 ──── network ──── eth0
 ```
 
-One extra L3 hop. Same nftables policy enforcement applies. No overlay, no tunnel.
+One extra L3 hop. Same nftables policy enforcement on both nodes.
 
 ---
 
-## 4. rustables Integration — Unified L3/L4 Engine
+## 5. Pool Allocator — Unified for All Resources
 
-### 4.1 nftables Tables Layout
+```rust
+struct IpPool {
+    cidr: Ipv4Cidr,           // e.g., 10.80.0.0/20
+    free: BTreeSet<u32>,       // available IPs (host addresses)
+}
+
+impl IpPool {
+    fn allocate(&mut self) -> Option<Ipv4Addr>;
+    fn release(&mut self, ip: Ipv4Addr);
+    fn count_free(&self) -> usize;
+    fn expand(&mut self, new_cidr: Ipv4Cidr);  // add new range to free set
+}
+```
+
+Pool is per-VNet (for pod CIDRs) and single (for service CIDR). The engine calls `allocate()` when any resource requests an IP. The resource type is irrelevant to the allocator.
+
+The only difference between a pod and a job: the job releases its IP on completion. The pod releases its IP on deletion. Same allocator, same pool, no special cases.
+
+---
+
+## 6. nftables Integration — Unified L3/L4 Engine
+
+### 6.1 Table Layout
 
 ```
 table ip nat {
@@ -181,24 +293,20 @@ table ip filter {
 }
 ```
 
-The `forward` chain has default policy `drop` — this is the baseline isolation. Everything that passes must be explicitly allowed.
+Default policy on forward chain is `drop`. All forwarding is explicit.
 
-### 4.2 Rule Compilation Order
-
-Each rule set compiles to nftables rules in a specific position. The priority model (most specific wins) is enforced by ordering:
+### 6.2 Rule Order — Priority Model
 
 ```
 chain forward {
-  # 1. VNet/Subnet NSG baseline (topology)
-  ip saddr 10.42.1.0/24 ip daddr 10.42.2.0/24 drop       # deny spoke→spoke
-  ip saddr 10.42.0.0/16 ip daddr 10.42.0.0/16 accept      # same-VNet allow
+  # 1. NSG baseline (subnet CIDR rules)
+  ip saddr @vnet-prod ip daddr @vnet-staging drop
 
-  # 2. NetworkPolicy selectors (workload policy)
-  ip saddr @np:ns1.frontend ip daddr @np:ns1.backend accept
-  ip saddr @np:default-deny drop
+  # 2. NetworkPolicy (pod selector sets)
+  ip saddr @np:frontend ip daddr @np:backend accept
 
-  # 3. Hub-and-Spoke transit rules
-  ip saddr @hub-vnet ip daddr @spoke-vnet accept
+  # 3. Hub-and-Spoke transit
+  ip saddr @spoke-a ip daddr @spoke-b meta mark 0x1 accept
 
   # 4. Default: drop (inherited from chain policy)
 }
@@ -207,384 +315,449 @@ chain forward {
 | Layer | Controls | Compiled from |
 |---|---|---|
 | NSG | Subnet-to-subnet by CIDR | VNet/Subnet CRDs |
-| NetworkPolicy | Pod-to-pod by selector | `k8s-openapi` `NetworkPolicy` structs |
+| NetworkPolicy | Pod-to-pod by selector | `k8s-openapi` `NetworkPolicy` |
 | Hub-and-Spoke | Transit routing between VNets | VNet hub/spoke CRDs |
 
-### 4.3 Dynamic Sets for NetworkPolicy
+**Conflict resolution:** more specific (narrower match) rule wins. NSG is CIDR-based (broad), NetworkPolicy is pod IP-based (specific). If NSG denies subnet A→B but NetworkPolicy allows pod X→Y, the NP rule is more specific and wins.
 
-Each `NetworkPolicy` with a `podSelector` creates an nftables set:
+### 6.3 ClusterIP DNAT Maps
 
-```
-set np:default:allow-from-frontend {
-  type ipv4_addr
-  elements = { 10.42.0.2, 10.42.0.5 }  # pods matching frontend selector
-}
-```
-
-When a pod starts or stops, its IP is added to or removed from all sets that its labels match. This happens atomically via `rustables::Batch`.
-
-### 4.4 ClusterIP DNAT Maps
-
-Each Service creates an nftables map:
-
-```
+```rust
+// Per-service nftables map, updated atomically
 map svc:nginx-80 {
   type ipv4_addr . inet_service : ipv4_addr . inet_service
   elements = {
-    10.96.0.3 . 80 : 10.42.0.2 . 8080,
-    10.96.0.3 . 80 : 10.42.0.3 . 8080,
+    10.96.0.3 . 80 : 10.80.0.3 . 8080,
+    10.96.0.3 . 80 : 10.80.0.4 . 8080,
   }
 }
-```
 
-The prerouting rule uses the map directly:
-```
+// Pterouting rule uses the map
 ip daddr . tcp dport vmap @svc:nginx-80
 ```
 
-When backends change (pod scale, rolling update), the map is updated atomically via `Batch`. No userspace proxy. No loopback alias. No `ensure_loopback_alias`.
+When backends change (scale up/down, rolling update), the map is replaced atomically via `Batch`.
+
+### 6.4 Dynamic NetworkPolicy Sets
+
+```rust
+// Each podSelector creates a named set
+set np:default:allow-from-frontend {
+  type ipv4_addr
+  elements = { 10.80.0.2, 10.80.0.5 }  // pods matching labels
+}
+```
+
+On pod start/stop: add/remove IP from all matching sets atomically via `Batch`.
 
 ---
 
-## 5. Dual API — Kubernetes-Native + Azure CRDs
+## 7. Dual API Architecture
 
-### 5.1 API Layers
-
-| API | Source CRDs | Compiles to | Purpose |
+| API | CRDs | Compiles to | Purpose |
 |---|---|---|---|
 | **Kubernetes-native** | `k8s-openapi` `Service`, `NetworkPolicy`, `Ingress`, `Pod` | nftables DNAT maps, filter sets, L7 routes | Workload-level networking |
-| **Azure-style** | `VNet`, `Subnet`, `NSG`, `RouteTable`, `Hub`, `Spoke` | nftables forward rules, CIDR sets, route tables | Topology & isolation |
-
-### 5.2 Priority Model
-
-```
-NSG baseline (subnet CIDR)            ─── evaluates first (top of forward chain)
-NetworkPolicy (pod selector sets)     ─── evaluates second (more specific)
-```
-
-**Conflict resolution:** The more specific rule wins. Since nftables evaluates top-down:
-- NSG drops traffic at subnet boundary → that traffic never reaches NetworkPolicy rules
-- NetworkPolicy allows specific pod-to-pod → that rule is more specific than the NSG deny and appears later but with a narrower match
-
-**Example — NSG denies subnet A→B, NetworkPolicy allows a specific pod:**
-```
-chain forward {
-  ip saddr 10.42.1.0/24 ip daddr 10.42.2.0/24 drop            # NSG: deny subnet A→B
-  ip saddr 10.42.1.5    ip daddr 10.42.2.3    accept           # NP: allow specific pod
-}
-```
-Pod A (10.42.1.5) → Pod B (10.42.2.3): matches rule 2 (more specific), **allowed**.
-Pod A (10.42.1.6) → Pod B (10.42.2.3): matches rule 1 but not rule 2, **dropped**.
-
-This is the correct semantics: NSG is a baseline that can be overridden by explicit workload policy.
-
-### 5.3 Reconciliation
+| **Azure-style** | `VNet`, `Subnet`, `NSG`, `RouteTable`, `PublicIP`, `Hub`, `Spoke` | nftables forward rules, CIDR sets, route tables | Topology & isolation |
 
 Two independent controllers, both writing to the same nftables tables via `rustables::Batch`:
 
 ```
-VNetController {
-  watches: VNet, Subnet, NSG, Hub, Spoke CRDs
-  writes: forward chain (CIDR rules), route table entries
+VNetController:
+  watches: VNet, Subnet, NSG, Hub, Spoke, PublicIP
+  writes: forward chain (CIDR rules), route table entries, host interface assignment
   scope: topology-level
-}
 
-NetworkPolicyController {
-  watches: Service, NetworkPolicy, Pod CRDs
-  writes: nat chain (DNAT maps), forward chain (selector sets)
+NetworkPolicyController:
+  watches: Service, NetworkPolicy, Pod, Ingress
+  writes: nat chain (DNAT maps), forward chain (selector sets), L7 routes
   scope: workload-level
+```
+
+Both controllers use the same `PoolAllocator`. Both call `Engine::register()` and `Engine::program()`.
+
+---
+
+## 8. Hub-and-Spoke Topology
+
+```
+Internet ──► Hub VNet (10.80.0.0/20)
+               │  SNAT: yes
+               │  Ingress: yes
+               │
+               │──► Spoke A (10.80.16.0/20) — DB, no internet
+               │──► Spoke B (10.80.32.0/20) — app, no internet
+               │
+               DNS: global — all names resolve from any VNet
+               NSG enforces the actual access
+```
+
+### 8.1 NSG Rules for Hub-and-Spoke
+
+```
+chain forward {
+  # Spoke → Spoke: denied
+  ip saddr @spoke-a ip daddr @spoke-b drop
+  ip saddr @spoke-b ip daddr @spoke-a drop
+
+  # Hub → Spoke: allowed (hub can reach services)
+  ip saddr @hub ip daddr @spoke-a accept
+  ip saddr @hub ip daddr @spoke-b accept
+
+  # Spoke → Hub: allowed (spoke can reach hub for transit)
+  ip saddr @spoke-a ip daddr @hub accept
+
+  # Spoke → Internet: denied (no MASQUERADE)
+  ip saddr @spoke-a oif eth0 drop
+
+  # Hub → Internet: allowed (MASQUERADE applies)
+  oif eth0 accept
 }
 ```
 
-Both use the same `rustables::Batch` API. Ordering within the forward chain is fixed (NSG rules first, NetworkPolicy rules second).
+### 8.2 Private DNS + Spoke Transit
+
+- DNS is global — `db.myapp` resolves from any VNet
+- NSG is the enforcement boundary
+- Hub has ingress that routes to spoke backends (via ClusterIP or direct pod IP)
+- Spoke default route only covers internal CIDR (`10.0.0.0/8`), no default gateway
 
 ---
 
-## 6. Multi-Node Architecture
+## 9. L7 Ingress (Phase 7)
 
-```
-Node A (10.0.0.1)              Node B (10.0.0.2)
-┌──────────────────┐           ┌──────────────────┐
-│ veth-podA ──► podA│           │ veth-podC ──► podC│
-│  10.42.1.2/32     │           │  10.42.2.2/32     │
-│ veth-podB ──► podB│           │ veth-podD ──► podD│
-│  10.42.1.3/32     │           │  10.42.2.3/32     │
-│                   │           │                   │
-│ route:            │           │ route:            │
-│  10.42.2.0/24 via │◄───────► │  10.42.1.0/24 via │
-│  10.0.0.2         │           │  10.0.0.1         │
-│                   │           │                   │
-│ rustables:        │           │ rustables:        │
-│  SNAT + DNAT + NP │           │  SNAT + DNAT + NP │
-│  (same rules)     │           │  (same rules)     │
-│                   │           │                   │
-│ ingress (axum)    │           │ ingress (axum)    │
-│ :80,:443,:22,:5432│           │ :80,:443,:22,:5432│
-└──────────────────┘           └──────────────────┘
-```
-
-### 6.1 Cross-Node Traffic
-
-Pod A (Node A, 10.42.1.2) → Pod C (Node B, 10.42.2.2):
-1. Pod A sends to 10.42.2.2, goes through default route to veth
-2. Host routing on Node A: 10.42.2.0/24 via 10.0.0.2 → eth0
-3. Node B receives, host routing: 10.42.2.2/32 dev veth-podC
-4. nftables forward chain on **both nodes** enforces policy
-5. Pod C receives
-
-### 6.2 Cross-Node ClusterIP DNAT
-
-Same DNAT maps on every node. When a pod on Node A sends to a ClusterIP whose backends are on Node B:
-1. Node A prerouting DNAT rewrites dest to 10.42.2.2:port
-2. Host routing on Node A forwards to Node B
-3. Node B routing delivers to pod
-
-### 6.3 Cross-Node Ingress
-
-Ingress on Node A accepts a connection for a service with all backends on Node B:
-1. Node A axum accepts, Host header match → backend service
-2. `find_endpoints()` returns 10.42.2.2:port
-3. `splice` from client → 10.42.2.2:port through host routing
-4. Extra L3 hop, but same splice zero-copy path
-
-### 6.4 Node Discovery (MVP)
-
-Static config:
-```
-z8s --node-name node-a --node-ip 10.0.0.1 --pod-cidr 10.42.0.0/16 \
-    --peers node-b=10.0.0.2,node-c=10.0.0.3
-```
-
-Each node gets a /24 slice from the /16 (node-a: 10.42.1.0/24, node-b: 10.42.2.0/24). Cross-node routes added via `RTM_NEWROUTE` at startup.
-
-> **⚠️ NOTE:** The store is per-node in-memory. `find_endpoints()` on Node A only returns pods on Node A. Cross-node DNAT map entries require a future shared store or consensus layer. For MVP, Services with cross-node backends work via DNS pinning (each node advertises only its local backends).
+| Feature | Status |
+|---|---|
+| HTTP Host header routing | MVP |
+| TCP port routing | MVP |
+| TLS SNI passthrough | MVP |
+| TLS termination (decrypt at ingress) | Phase 7 |
+| Auto-TLS via Let's Encrypt | Phase 7 — investigate Rust ACME crates vs implement HTTP-01 ourselves |
+| mTLS to backend | Phase 7 — depends on TLS termination |
+| L7 NSG rules (method, header, cookie filtering) | Phase 7 — at ingress layer, not nftables |
+| PublicIP CRD (allocate + attach to resource) | Phase 7 |
+| API Gateway CRD (rate limiting, auth) | Future |
 
 ---
 
-## 7. Implementation Phases
+## 10. Multi-Node
 
-### Phase 1 — Veth Attachment + Host Routing Infrastructure
+### 10.1 Node Join (Deferred — More Investigation Needed)
 
-**Files:** `src/network/bridge.rs` → rename to `src/network/l3.rs`
+Approaches to investigate:
 
-- `create_veth(host_name, peer_name, netns_fd)` — RTM_NEWLINK veth with IFLA_NET_NS_FD (unchanged)
-- `link_up(ifname)` — ioctl SIOCGIFFLAGS + SIOCSIFFLAGS (unchanged)
-- `add_route(dst_cidr, gateway, ifindex)` / `del_route()` — RTM_NEWROUTE / RTM_DELROUTE
-- `add_pod_route(pod_ip, veth_ifindex)` — /32 route for pod via host veth end
-- `clean_orphan_veths()` — enumerate interfaces, RTM_DELLINK stale veth-* entries
+| Approach | Pros | Cons |
+|---|---|---|
+| **SWIM gossip** (memberlist) | Fully decentralized, no SPOF, production-grade library | ~300 lines to implement |
+| **Join-handshake push** | Simple (~100 lines), explicit control | Less resilient to partitions |
+| **k3s-style token join** | Proven model, tokens provide auth | Needs one node to accept the join |
+| **DNS-based discovery** | Zero extra mechanism | DNS TTL race conditions |
+
+**Decided:** not now. Will investigate when implementing multi-node in Phase 6.
+
+### 10.2 Cross-Node Dataplane (Design Locked)
+
+Regardless of discovery mechanism, once a node knows a peer's pod CIDR:
+
+```
+Each node maintains:
+  kernel routes:  10.80.X.0/24 via <peer-host-ip>
+  nftables DNAT:  local maps include peer pod IPs as backends
+  nftables NSG:   same rules apply to cross-node traffic
+```
+
+The discovery mechanism only affects how the route table and DNAT maps are populated — the dataplane itself is identical whether the peer was discovered via gossip, static config, or token join.
+
+---
+
+## 11. IPv6
+
+| Feature | Status |
+|---|---|
+| Each pod gets IPv6 /128 from the user's /64 | Later phase |
+| Ingress binds on both `[::]:80` and `0.0.0.0:80` | Later phase |
+| nftables DNAT supports AF_INET6 | Later phase (rustables supports it) |
+| PublicIP CRD for IPv6 allocation | Later phase |
+
+Concrete approach to investigate when implementing: `--ipv6-prefix 2001:db8::/64` flag, allocator gives each pod a `/128` from it alongside the IPv4 address. The engine treats IPv6 identically to IPv4 — same pool, same programming, same nftables rules with `ip6` family.
+
+---
+
+## 12. Resource Type Summary
+
+| Resource | Gets IP? | Gets /32 route? | Gets DNAT? | Gets DNS? | Gets L7 route? | Gets policy set? | Pool |
+|---|---|---|---|---|---|---|---|
+| Pod | Yes | Yes | Only if Service matches | Only if headless | No | Yes, if labels match NetworkPolicy | VNet |
+| Job | Yes | Yes | No | No | No | Yes, if labels match NetworkPolicy | VNet |
+| Service (ClusterIP) | Yes | No | N/A (source) | Yes | No | No | `--service-cidr` |
+| Service (NodePort) | No | No | N/A (host port) | Yes | No | No | N/A |
+| PublicIP | Yes | N/A | Yes (to backend) | No (external DNS) | No | No | User-provided |
+| Ingress | No | No | N/A | No | Yes | No | N/A |
+| VNet | Yes (CIDR) | No | N/A | No | No | No | From pod CIDR |
+
+The engine doesn't have a match statement on resource types. It checks **what references the resource** to decide what to program:
+
+```
+fn program(resource, ctx):
+  for each ref in store.references(resource):
+    match ref.type:
+      Service   → add_dnat(ref, resource.ip)
+      Ingress   → add_l7_route(ref, resource.ip)
+      PolicySet → add_to_set(ref, resource.ip)
+      DNSRecord → add_dns_record(ref, resource.ip)
+  if resource.has_veth:
+    add_route(resource.ip, resource.veth_ifindex)
+```
+
+If nothing references the resource, nothing extra happens. Jobs naturally get nothing extra. No special case needed.
+
+---
+
+## 13. Implementation Phases
+
+### Phase 0 — Test Scenarios
+
+Write integration test scripts (shell + YAML) that define success for every feature before implementation begins. Each test:
+1. Starts z8s with the relevant config
+2. Applies YAML manifests
+3. Asserts expected behavior (connectivity, isolation, DNS, etc.)
+4. Cleans up
+
+### Phase 1 — Veth Attachment + Host Routing
+
+- `create_veth()` — RTM_NEWLINK (existing pattern, no bridge)
+- `add_route()` / `del_route()` — RTM_NEWROUTE
+- `add_pod_route(pod_ip, veth_ifindex)` — /32 route via host veth end
+- `assign_pod_ip()` + `add_default_route()` — inside pod netns (RTM_NEWADDR)
 - `enable_ip_forward()` — write `"1\n"` to `/proc/sys/net/ipv4/ip_forward`
-- `assign_pod_ip(ip, prefix, ifname)` — RTM_NEWADDR inside pod netns
-- `add_default_route(gateway, ifname)` — RTM_NEWROUTE inside pod netns
+- `clean_orphan_veths()` — RTM_DELLINK stale veth-* entries
+- Pool allocator with `BTreeSet<u8>` free-list
 
-**No bridge creation.** No `ensure_loopback_alias`. Pod attachment is: create veth with peer in netns → add /32 route on host → assign IP + default route in child.
+### Phase 2 — Pool Allocator + nftables Engine (SNAT + ClusterIP DNAT)
 
-### Phase 2 — rustables Engine: SNAT + ClusterIP DNAT
-
-**New crate dependency:** `rustables`
-
-**New module:** `src/network/nftables.rs`
-
-- Initialize nftables tables (`ip nat`, `ip filter`) with baseline chains
-- `add_snat(pod_cidr, host_ifindex)` — MASQUERADE rule for pod outbound traffic
-- `add_clusterip_dnat(cluster_ip, port, backends: Vec<(Ipv4Addr, u16)>)` — atomic DNAT map update via Batch
-- `remove_clusterip_dnat(cluster_ip, port)` — remove map entry
-- `update_clusterip_backends(cluster_ip, port, backends)` — swap backends atomically
-
-**Also:**
-- Add `PodIpAllocator` with `BTreeSet<u8>` free-list
-- Remove `ensure_loopback_alias` — no longer needed
-- Remove userspace ClusterIP proxy from `service_proxy.rs`
+- New crate: `rustables`
+- Pool allocator (unified for all resource types)
+- nftables table init (`ip nat`, `ip filter`, baseline chains)
+- `add_snat(pod_cidr)` — MASQUERADE rule via rustables
+- `add_clusterip_dnat(cluster_ip, port, backends)` — DNAT map via rustables Batch
+- `remove_clusterip_dnat()`, `update_clusterip_backends()`
+- `PodIpAllocator` moved to unified pool
+- Remove `ensure_loopback_alias`, remove userspace proxy code
 
 ### Phase 3 — VNet / Subnet / NSG CRDs
 
-**New CRDs in store:**
-- `VNet` — CIDR + hub/spoke role
-- `Subnet` — CIDR range + parent VNet
-- `NSG` — security rules (allow/deny, src/dst CIDR or service tag, port/protocol)
-- `Hub` / `Spoke` — topology references
-
-**New module:** `src/network/vnet.rs`
-
+- `VNet`, `Subnet`, `NSG`, `Hub`, `Spoke`, `RouteTable` CRDs
 - Compile NSG rules to nftables forward chain CIDR rules
-- Compile Hub-and-Spoke topology to forward chain transit rules
-- Default: deny all cross-subnet traffic except explicit NSG allows
+- Compile Hub-and-Spoke to forward chain transit rules
+- Default: deny all cross-VNet traffic
+- VNet CIDR allocation from cluster pod CIDR (/20 default per VNet)
 
 ### Phase 4 — Kubernetes NetworkPolicy
 
-**No new CRDs** — uses existing `k8s-openapi` `NetworkPolicy` struct.
-
-**New module:** `src/network/network_policy.rs`
-
-- Watch `NetworkPolicy` + `Pod` resources from store
-- For each `NetworkPolicy`:
-  - Resolve `podSelector` → list of matching pod IPs
-  - Resolve `namespaceSelector` → all pods in matching namespaces
-  - Resolve `ipBlock` → CIDR set
-  - Compile `ingress`/`egress` rules to nftables forward chain rules with dynamic sets
-- On pod start/stop: atomically update all sets that its labels match
-- On policy create/update: re-resolve all selectors and compile new batch
+- Full `k8s-openapi` `NetworkPolicy` support
+- Dynamic nftables sets per `podSelector` / `namespaceSelector`
+- On pod start/stop: update all matching sets atomically
+- NSG + NetworkPolicy priority model (more specific wins)
 
 ### Phase 5 — Remove Old Code
 
-- Delete `port_publish.rs` entirely
-- Delete `service_proxy.rs` entirely (replaced by nftables DNAT)
-- Delete `ensure_loopback_alias` from `service_proxy.rs` (if not already removed)
+- Delete `port_publish.rs`, `service_proxy.rs`, `ensure_loopback_alias`
 - Remove `--net-backend=setns` flag
 
 ### Phase 6 — Multi-Node
 
-- `--node-name`, `--node-ip`, `--peers` flags
-- Per-node /24 subnet allocation
-- Cross-node host routes at startup
-- DNS pinning per node (local backends only)
+- Investigate discovery approaches: SWIM gossip vs join-handshake push vs k3s-style token
+- Cross-node host routes
+- Cross-node DNAT map synchronization
+- DNS pinning per node
 
-### Phase 7 — L7 Ingress + API Gateway
+### Phase 7 — L7 Ingress + TLS + Public IP
 
-- Ingress CRD with HTTP Host header, TLS SNI, and TCP port routing
-- axum-based L7 controller (separate from nftables engine)
-- API Gateway CRD (future — rate limiting, auth, path rewriting)
-
----
-
-## 8. What Stays the Same
-
-| Component | Notes |
-|---|---|
-| **Embedded DNS** | Unchanged. Resolves `<svc>.<ns>.svc.cluster.local` → ClusterIP. External domains forwarded to upstream DNS. |
-| **`kubectl exec`** | Unchanged. Still uses `setns`. |
-| **`kubectl logs`** | Unchanged. Ring buffer on host. |
-| **Manifest watcher / controller** | Unchanged. Just add new CRD types to watch list. |
-| **`copy_bidirectional`** | Still used by L7 ingress for splice forwarding. |
-| **Loopback setup in pods** | `setup_loopback()` still called in child — `lo` is always needed. |
-| **Existing sync-byte protocol** | Still used for parent-child ordering during veth creation. |
+- Ingress CRD with HTTP Host header, TCP port, TLS SNI routing
+- TLS termination + re-encryption (investigate tokio-rustls vs tokio-native-tls)
+- Auto-TLS via Let's Encrypt (investigate Rust ACME libs)
+- PublicIP CRD (allocate IPv4/IPv6, attach to service/ingress)
+- L7 NSG rules (HTTP method, headers, cookies — at axum layer)
+- Dual-stack listener (IPv4 + IPv6)
 
 ---
 
-## 9. What Changes
+## 14. Test Matrix (Phase 0)
 
-| Current | New |
-|---|---|
-| Bridge (`z8s0`) | **Removed.** Pods attached via veth + /32 route only. |
-| `ensure_loopback_alias` (RTM_NEWADDR on lo) | **Removed.** No ClusterIP on loopback. |
-| Userspace ClusterIP TCP proxy | **Removed.** Replaced by nftables prerouting DNAT map. |
-| `port_publish::publish_ports()` | **Removed.** Pod is directly reachable via its /32 route. |
-| `run_forwarder()` + `connect_tcp_in_netns()` | **Removed.** No setns per connection. |
-| `service_proxy.rs` `find_endpoints()` | **Removed.** Backend selection done by nftables map. |
-| No L3/L4 policy | **Added.** Full nftables forward chain with NSG + NetworkPolicy. |
-| No VNet abstraction | **Added.** VNet/Subnet/NSG/Hub/Spoke CRDs. |
-| No per-pod /32 routes | **Added.** Each pod gets a /32 host route via its veth interface. |
-| `iptables` / `nft` shell commands | **Never used.** All nftables via `rustables` FFI. |
-| `--net-backend=setns` | **Removed.** Only one path. |
+### A. Pod Attachment & Basic Connectivity
+
+| # | Test | Expected |
+|---|---|---|
+| A1 | Pod starts with `eth0` from its VNet CIDR | `ip addr` shows expected `10.X.Y.Z/XX` |
+| A2 | Pod pings same-VNet peer (same node) | Success |
+| A3 | Pod pings same-VNet peer (cross-node) | Success |
+| A4 | Pod cannot ping different-VNet pod (default deny) | Failure |
+| A5 | Pod gets new IP after delete/recreate | Different IP |
+| A6 | Host has /32 route for each pod via veth | `ip route` |
+| A7 | No bridge interfaces | `ip link show type bridge` empty |
+| A8 | Job gets IP + route, no DNAT, no DNS | Route exists, no DNAT entry |
+
+### B. ClusterIP DNAT
+
+| # | Test | Expected |
+|---|---|---|
+| B1 | Pod reaches ClusterIP:port, hits backend | Successful response |
+| B2 | Round-robin across multiple backends | Traffic distributed |
+| B3 | DNAT updates on backend crash+replace | New IP in map within ~1s |
+| B4 | Empty ClusterIP drops traffic | Timeout |
+| B5 | NodePort works | External access succeeds |
+| B6 | No ClusterIP on any interface | `ip addr show` clean |
+| B7 | No userspace proxy for ClusterIP | `ss -tlnp` clean |
+
+### C. SNAT & Outbound
+
+| # | Test | Expected |
+|---|---|---|
+| C1 | Pod (hub VNet) reaches internet | Success, source = host IP |
+| C2 | Pod (spoke VNet) cannot reach internet | Timeout |
+| C3 | Pod-to-pod traffic not SNATted | Source = pod IP |
+
+### D. VNet / Subnet / NSG
+
+| # | Test | Expected |
+|---|---|---|
+| D1 | Default VNet per namespace | Pods in namespace get VNet IPs |
+| D2 | Different VNets cannot communicate | Blocked |
+| D3 | NSG allow subnet A→B port 5432 | Specific port allowed, others blocked |
+| D4 | NSG deny between subnets | All traffic blocked |
+| D5 | NSG + NetworkPolicy override | Specific pod allowed despite NSG deny |
+| D6 | Hub reaches spoke | Allowed |
+| D7 | Spoke cannot reach spoke (direct) | Blocked |
+| D8 | Spoke reaches spoke via hub transit | Allowed with meta mark |
+
+### E. NetworkPolicy
+
+| # | Test | Expected |
+|---|---|---|
+| E1 | `podSelector` allow | Matching pods can communicate |
+| E2 | `namespaceSelector` allow | All pods in namespace can communicate |
+| E3 | `ipBlock` allow/deny | External CIDR filtered |
+| E4 | Dynamic set update on pod start/stop | Set membership updates atomically |
+
+### F. DNS
+
+| # | Test | Expected |
+|---|---|---|
+| F1 | `<svc>.<ns>.svc.cluster.local` → ClusterIP | Resolves |
+| F2 | External domains from pods | Forwarded to upstream DNS |
+| F3 | Private VNet names resolve globally | `db.myapp` resolves from any VNet |
+| F4 | NSG enforces access (not DNS) | IP resolves but traffic blocked by NSG |
+
+### G. L7 Ingress
+
+| # | Test | Expected |
+|---|---|---|
+| G1 | HTTP by Host header | Correct backend |
+| G2 | TLS by SNI | Correct backend |
+| G3 | TCP by port | Correct backend |
+| G4 | TLS termination + re-encryption | Works |
+| G5 | Auto-TLS cert provisioning | HTTPS works without manual config |
+| G6 | L7 NSG — block method/header | 403 |
+| G7 | Ingress → spoke backend (hub-and-spoke) | Works |
+
+### H. Multi-Node
+
+| # | Test | Expected |
+|---|---|---|
+| H1 | Node joins cluster | Route + DNAT sync established |
+| H2 | Node fails | Peers detect and remove entries |
+| H3 | Cross-node pod-to-pod | Works (one L3 hop) |
+| H4 | Cross-node ClusterIP | Works |
+| H5 | Cross-node ingress | Works |
+
+### I. Edge Cases
+
+| # | Test | Expected |
+|---|---|---|
+| I1 | VNet CIDR full | Pod creation fails with clear error |
+| I2 | nftables init fails | Z8s refuses to start |
+| I3 | SNAT fails | Warning logged, pods no internet |
+| I4 | 1000 concurrent connections through DNAT | All succeed |
+| I5 | 10 pods/sec start/stop for 60s | All IPs reclaimed, no leaks |
 
 ---
 
-## 10. Config Reference (New Flags)
+## 15. Error Handling
 
-```
-z8s [OPTIONS]
+| Failure | Behaviour | Graceful? |
+|---|---|---|
+| `create_veth` fails | Pod starts with lo only, warning logged | Yes |
+| `add_route` fails (RTM_NEWROUTE) | Pod starts with lo only, warning logged | Yes |
+| `rustables` table init fails | z8s refuses to start — nftables is required | No |
+| `add_snat` MASQUERADE fails | Warning logged: "SNAT not configured — pods cannot reach internet" | Yes |
+| `add_clusterip_dnat` fails | Warning logged, retried on next reconcile cycle | Yes |
+| Pool allocator exhausted (VNet full) | Pod creation fails with clear error: "no IPs available in VNet `<name>`" | No |
+| Stale veth on restart | `clean_orphan_veths()` at startup removes orphans before creates | Yes |
+| DNAT map has no backends | Packet dropped at prerouting (no DNAT match = no route) | Yes |
+| Cross-node route fails | Warning logged, peer node unreachable | Yes |
+| Node join with invalid token | Rejected with authentication error | Yes |
+| Node fails / network partition | Other nodes detect via timeout, remove routes and DNAT entries | Yes |
+| `rustables::Batch` conflict (two controllers simultaneously) | Batch ordering is deterministic — later batch overwrites earlier on same rule | Yes |
+| ClusterIP DNAT update during backend churn | Map updated atomically via Batch — no partial state | Yes |
 
-Networking:
-  --pod-cidr <CIDR>           Pod IP allocation range         [default: 10.42.0.0/16]
-  --service-cidr <CIDR>       ClusterIP allocation range       [default: 10.96.0.0/16]
-  --ingress-ports <PORTS>     L7 ingress listen ports         [default: 80,443]
-  --node-name <NAME>          This node's name                [default: hostname]
-  --node-ip <IP>              This node's host IP             [auto: default route iface]
-  --peers <PEERS>             Other nodes (k=v pairs)         [default: none]
-```
+### SNAT Idempotency
+
+Applying the MASQUERADE rule via `rustables::Batch` is idempotent — the `add` operation creates the rule if it doesn't exist. Calling `add_snat()` multiple times on restart does not duplicate rules. No `-C` check needed (unlike iptables).
 
 ---
 
-## 11. Dependencies
+## 16. Dependencies
 
-### Rust Crates (new)
+### Rust Crates
 
-| Crate | Version | Purpose | License |
+| Crate | Version | Purpose | Affects phases |
 |---|---|---|---|
-| `rustables` | 0.8 | nftables nfnetlink FFI (SNAT, DNAT, policy) | GPL-3.0 |
-| `ipnetwork` | 0.21 | CIDR parsing (transitive via `rustables`) | MIT/Apache-2.0 |
+| `rustables` | 0.8 | nftables nfnetlink FFI | Phase 2+ |
+| `ipnetwork` | 0.21 | CIDR parsing (transitive via rustables) | Phase 2+ |
 
-All other operations use existing `libc` + `nix` for `RTM_NEWLINK`, `RTM_NEWADDR`, `RTM_NEWROUTE`.
+Kept: `libc` + `nix` for rtnetlink FFI (veth, routes, IP assignment).
 
 ### Host Packages
 
 | Package | Required? |
 |---|---|
-| `iproute2` | **Not required** — all netlink via `libc` FFI |
-| `iptables` / `nftables` | **Not required** — nftables via `rustables` raw nfnetlink |
-| Kernel module `nf_tables` | **Required** — standard in all modern kernels |
-| Kernel module `nf_nat` | **Required** — for DNAT/SNAT, standard in all modern kernels |
+| `iproute2` | **Not required** |
+| `iptables` / `nftables` | **Not required** |
+| Kernel module `nf_tables` | Required (standard in all modern kernels) |
+| Kernel module `nf_nat` | Required (standard in all modern kernels) |
 
 ---
 
-## 12. Error Handling
+## NOTE: One IP Per Pod
 
-| Failure | Handling |
-|---|---|
-| `create_veth` fails | Log warning, pod runs with lo only |
-| `RTM_NEWADDR` / `RTM_NEWROUTE` in child fails | Log warning, pod has lo only |
-| `rustables` table init fails | Log error, abort startup — nftables is required |
-| `rustables` DNAT map update fails | Log warning, update retried on next reconcile |
-| `rustables` MASQUERADE fails | Log warning: "SNAT not configured — pods cannot reach internet" |
-| Stale veth on pod restart | `clean_orphan_veths()` at startup removes orphans |
-| ClusterIP DNAT map has no backends | Packets to ClusterIP are dropped (no DNAT match) — same as current behavior |
-| NSG conflict with NetworkPolicy | More specific rule wins by evaluation order (see §5.2) |
-| Cross-node route add fails | Log warning, pods on other nodes unreachable |
+Each Pod resource gets exactly **one IP** from the pool. All containers within a Pod share the same network namespace (Linux kernel behaviour). The pool allocator tracks Pod resources, not containers. Jobs are Pods in terms of networking — same one-IP-per-resource model.
 
 ---
 
-## 13. Test Plan
+## 17. Config Reference
 
-| Test | What it validates |
-|---|---|
-| Pod gets `eth0` with pod IP | `kubectl exec <pod> -- ip addr show eth0` |
-| Pod can ping host gateway | `kubectl exec <pod> -- ping -c1 10.42.0.1` (host) |
-| Pod A can ping Pod B (same host) | `kubectl exec podA -- ping -c1 10.42.0.3` |
-| Pod A → Pod B port (direct) | `curl http://10.42.0.3:80` from pod A |
-| ClusterIP service | `kubectl exec podA -- curl http://10.96.0.3:80` |
-| ClusterIP updates on backend change | Scale deployment up/down, verify DNAT map via `nft list map` |
-| SNAT for outbound traffic | `kubectl exec podA -- curl http://example.com` |
-| HTTP ingress by Host header | `curl -H "Host: svc1.z8s.emo.net" http://localhost` |
-| TCP/SNI ingress | `curl --resolve 'svc1.z8s.emo.net:443:127.0.0.1' https://svc1.z8s.emo.net` |
-| NodePort | `curl http://localhost:3xxxx` |
-| NetworkPolicy allow | Pod A can reach Pod B after `podSelector` match |
-| NetworkPolicy deny | Pod A cannot reach Pod C (not in `podSelector`) |
-| NSG deny subnet→subnet | Pod in subnet A cannot ping pod in subnet B |
-| NSG + NetworkPolicy override | NSG denies subnet→subnet but NetworkPolicy allows specific pod pair |
-| VNet hub-and-spoke | Spoke A → hub → Spoke B works; Spoke A → Spoke B direct fails |
-| Cross-node pod-to-pod | Pod on Node A reaches pod on Node B |
-| Cross-node ClusterIP | Pod on Node A reaches ClusterIP with backends on Node B |
-| No bridge interfaces | `ip link show type bridge` returns empty |
-| No `ensure_loopback_alias` | No `RTM_NEWADDR` for ClusterIPs on `lo` |
-| No `PortPublish` code | All old port publishing code removed |
+```
+z8s [OPTIONS]
+
+Networking:
+  --pod-cidr <CIDR>             Pod IP allocation range         [default: 10.0.0.0/8]
+  --service-cidr <CIDR>         ClusterIP allocation range       [default: 10.96.0.0/16]
+  --vnet-cidr-size <PREFIX>     Default VNet CIDR size           [default: 20]
+  --ipv6-prefix <PREFIX>        IPv6 /64 block (future)          [default: none]
+  --ingress-ports <PORTS>       L7 ingress listen ports          [default: 80,443]
+  --node-name <NAME>            This node's name                 [default: hostname]
+  --node-ip <IP>                This node's host IP              [auto: default route iface]
+  --peers <PEERS>               Other nodes (k=v pairs)          [default: none]
+```
 
 ---
 
-## 14. Migration Strategy
+## 18. Pending Decisions (Investigate Later)
 
-1. **Phase 1** — Veth + host route attachment (same as old Phase 1, no bridge)
-2. **Phase 2** — `rustables` engine for SNAT + ClusterIP DNAT (replace userspace proxy)
-3. **Phase 3** — VNet/Subnet/NSG CRDs + nftables forward rules
-4. **Phase 4** — Kubernetes NetworkPolicy with dynamic pod selector sets
-5. **Phase 5** — Delete old code (port publishing, service proxy, loopback alias)
-6. **Phase 6** — Multi-node with cross-node routing
-7. **Phase 7** — L7 ingress + API Gateway
-
-No rollback to `--net-backend=setns` — the old port publishing architecture is replaced entirely. The bridge is never created. The loopback alias is never added.
-
----
-
-## 15. Open Questions
-
-| Question | Decision |
-|---|---|
-| Pod CIDR? | `10.42.0.0/16`, configurable via `--pod-cidr` |
-| Only IPv4 for now? | Yes. IPv6 post-MVP. |
-| Destroy veths on shutdown? | Yes — enumerate `veth-*` interfaces, RTM_DELLINK each. z8s.sh stop does the same. |
-| ClusterIP DNAT or userspace proxy? | **DNAT via rustables.** Userspace proxy deleted entirely. |
-| Bridge yes/no? | **No bridge.** Pure L3 via veth + host routes. |
-| NetworkPolicy implementation? | Dynamic nftables sets compiled from `NetworkPolicy` `podSelector`. |
-| VNet/Subnet/NSG as CRDs? | Yes — separate CRDs compiling to nftables forward chain rules. |
-| Dual API conflict resolution? | More specific (narrower match) rule wins. NSG = CIDR, NetworkPolicy = pod IP. |
-| Multi-node store? | MVP: per-node in-memory. DNS pinning for local backends only. Future: external store. |
-| Outbound internet (SNAT)? | Phase 2 — `rustables` MASQUERADE rule. No host package needed. |
-| TLS termination in ingress? | Phase 7+. For MVP, TLS pass-through with SNI routing via axum. |
+| Topic | Options to investigate | Affects phase |
+|---|---|---|
+| **Node discovery** | SWIM gossip / join-handshake push / k3s-style token / DNS-based | Phase 6 |
+| **TLS termination** | `tokio-rustls` (pure Rust) vs `tokio-native-tls` (OpenSSL, already linked) vs custom | Phase 7 |
+| **Auto-TLS / ACME** | Existing Rust crate vs implement HTTP-01 ourselves vs shelling out to certbot | Phase 7 |
+| **mTLS backend re-encryption** | Cluster-internal CA vs per-service certs | Phase 7 |
+| **IPv6 per-pod allocation** | Sequential vs SLAAC vs from /64 prefix | Later |
+| **PublicIP CRD lifecycle** | How does allocation + attachment + detachment work for IPv4/IPv6 | Later |
