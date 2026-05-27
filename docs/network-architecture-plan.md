@@ -1,7 +1,7 @@
 # Network Architecture Plan
 
 > **Date:** 2026-05-27 (v4 — unified L3/L4 engine, final design)
-> **Goal:** Replace setns-based port publishing with a single nftables-backed network engine — real pod IPs, zero-copy forwarding, full NetworkPolicy + NSG, Azure-style VNet/Subnet, ClusterIP via DNAT, multi-node, no host package dependencies.
+> **Goal:** Replace setns-based port publishing with **NetMux** — a single nftables-backed L3/L4 network engine. Real pod IPs, zero-copy forwarding, full NetworkPolicy + NSG, Azure-style VNet/Subnet, ClusterIP via DNAT, multi-node, no host package dependencies.
 > **Contracts:**
 > - No shelling out to `ip`, `iptables`, `nft`, or any host binary
 > - All L3/L4 enforcement via `rustables` (nfnetlink FFI)
@@ -51,10 +51,10 @@ HOST NETNS                      POD NETNS (#42)
 │  └───────────────────────────────────────────────────────────────┘ │
 │                                                                    │
 │  ┌───────────────────────────────────────────────────────────────┐ │
-│  │  NETWORK ENGINE — unified, resource-agnostic                   │ │
+│  │  NETMUX — unified network engine, resource-agnostic                   │ │
 │  │                                                               │ │
 │  │  Pool Allocator (one code path for everything):               │ │
-│  │    pod-cidr   (10.0.0.0/8)   → per-VNet /20 sub-allocation   │ │
+│  │    pod-cidr   (10.42.0.0/12) → per-VNet /20 sub-allocation   │ │
 │  │    svc-cidr   (10.96.0.0/16) → flat per-ClusterIP            │ │
 │  │    public-v4  (<user>)       → host interface                 │ │
 │  │    public-v6  (<user>/64)    → host interface                 │ │
@@ -83,12 +83,12 @@ HOST NETNS                      POD NETNS (#42)
 │  ┌───────────────────────────────────────────────────────────────┐ │
 │  │  POD ATTACHMENT — veth pairs, no bridge (pure L3)             │ │
 │  │                                                               │ │
-│  │  host route: 10.80.0.2/32 dev veth-podA                      │ │
-│  │  host route: 10.80.0.3/32 dev veth-podB                      │ │
-│  │  host route: 10.80.16.0/24 via 10.0.0.2 (multi-node)        │ │
+│  │  host route: 10.42.0.2/32 dev veth-podA                      │ │
+│  │  host route: 10.42.0.3/32 dev veth-podB                      │ │
+│  │  host route: 10.42.16.0/24 via 10.0.0.2 (multi-node)        │ │
 │  │                                                               │ │
-│  │  veth-podA ── peer ──► podA (10.80.0.2/20, default route)   │ │
-│  │  veth-podB ── peer ──► podB (10.80.0.3/20, default route)   │ │
+│  │  veth-podA ── peer ──► podA (10.42.0.2/20, default route)   │ │
+│  │  veth-podB ── peer ──► podB (10.42.0.3/20, default route)   │ │
 │  │                                                               │ │
 │  │  No bridge. No L2. Pure L3 routed.                           │ │
 │  └───────────────────────────────────────────────────────────────┘ │
@@ -96,6 +96,23 @@ HOST NETNS                      POD NETNS (#42)
 │  ip_forward=1 (written once at startup)                            │
 └─────────────────────────────────────────────────────────────────────┘
 ```
+
+### What NetMux Replaces
+
+In standard Kubernetes, networking requires three separate components: a **CNI** (pod IPAM + routing), **kube-proxy** (ClusterIP/NodePort via iptables/nftables), and a **NetworkPolicy controller** (policy to iptables/nftables). NetMux replaces all three with one unified engine, plus adds Azure-style VNet/Subnet/NSG abstraction not available in standard Kubernetes.
+
+| Standard component | NetMux replaces with | Phase |
+|---|---|---|
+| **CNI** (Flannel/Calico/Cilium) | Veth pair + host route + per-VNet IPAM | Phase 1 |
+| **kube-proxy** | nftables DNAT maps (numgen round-robin) | Phase 2 |
+| **NetworkPolicy controller** | nftables dynamic pod-selector sets | Phase 4 |
+| **CoreDNS** (internal) | Embedded DNS server (already exists in z8s) | Already built |
+
+NetMux additions beyond standard Kubernetes:
+- VNet/Subnet/NSG CRDs → Azure-style topology isolation
+- Hub-and-Spoke with proxy-based transit
+- Unified pool allocator for pods, jobs, services, public IPs
+- L7 ingress via axum (separate process, not nftables)
 
 ### Key Design Decisions
 
@@ -114,14 +131,20 @@ HOST NETNS                      POD NETNS (#42)
 
 ## 3. CIDR & Pool Architecture
 
-### 3.1 Cluster Pod CIDR — `10.42.0.0/16` (default)
+### 3.1 Cluster Pod CIDR — `10.42.0.0/12` (default)
 
-Default. All pod IPs come from this range. Configurable via `--pod-cidr`. Use a larger range like `10.0.0.0/8` only if you have no IP overlap with existing cloud/on-prem 10.x.x.x networks. The `/16` default avoids the most common deployment conflict.
+Default. All pod IPs come from this range. Configurable via `--pod-cidr`. The `10.42.x.x` range is unlikely to conflict with common host network ranges (cloud VPCs typically use `10.0.0.0/8` or `172.16.0.0/12`).
+
+The CIDR is sub-allocated into VNets:
 
 ```
-Reserved:
-  10.0.0.0/8  → Pod IPs only
-  10.96.0.0/16 → ClusterIPs (Service CIDR)
+10.42.0.0/12 (1,048,576 IPs)
+  ├── VNet "prod"         : 10.42.0.0/20   (4094 IPs, auto)
+  ├── VNet "staging"      : 10.42.16.0/20  (4094 IPs, auto)
+  ├── VNet "shared"       : 10.42.32.0/20  (4094 IPs, auto)
+  └── ...up to 256 VNets at /20
+
+ClusterIPs: 10.96.0.0/16 (separate pool from --service-cidr)
 ```
 
 The CIDR is sub-allocated into VNets:
@@ -135,8 +158,8 @@ The CIDR is sub-allocated into VNets:
 
 With --pod-cidr 10.0.0.0/8:
   10.0.0.0/8 (16.7M IPs)
-    ├── VNet "prod"         : 10.80.0.0/20   (4094 IPs, auto)
-    ├── VNet "staging"      : 10.80.16.0/20  (4094 IPs, auto)
+    ├── VNet "prod"         : 10.42.0.0/20   (4094 IPs, auto)
+    ├── VNet "staging"      : 10.42.16.0/20  (4094 IPs, auto)
     └── ...up to 256 VNets at /20
 ```
 
@@ -159,12 +182,12 @@ metadata:
   name: production
   annotations:
     z8s.io/vnet: prod     # default: namespace name
-    z8s.io/vnet-cidr: 10.80.0.0/20  # auto-allocated if not set
+    z8s.io/vnet-cidr: 10.42.0.0/20  # auto-allocated if not set
 ```
 
 Users can override:
 - Move a namespace to a different VNet via annotation
-- Expand the VNet CIDR (e.g., from /20 to /19) without recreating pods
+- Expand the VNet CIDR (e.g., from /20 to /19) — requires the adjacent CIDR block to be unallocated; checked at admission time
 - Assign the same VNet to multiple namespaces (shared network)
 
 The VNet is the **network boundary** — pods in different VNets cannot communicate by default (enforced by nftables forward chain).
@@ -180,13 +203,30 @@ metadata:
   name: web
 spec:
   vnet: prod
-  cidr: 10.80.0.0/24
+  cidr: 10.42.0.0/24
 ```
 
 Subnets exist to:
 - Apply NSG rules between groups within the same VNet
 - Organize pods by function (web, app, db)
 - Default between subnets depends on NSG rules (no implicit isolation)
+
+### Native-Mode Pods (image: "") Bypass NetMux
+
+All workloads in z8s are Pods. The distinction is whether the pod gets network namespace isolation:
+
+| Pod type | `image` field | Network | IPAM | nftables policy |
+|---|---|---|---|---|
+| **Container** | Non-empty (e.g., `nginx`) | Isolated netns via veth | VNet IP from pool | Enforced on forward chain |
+| **Native** | `""` (empty) | Host netns (no veth) | No IPAM — uses host IP | Not enforced (host-originated traffic) |
+
+Native-mode pods (`image: ""`) run directly on the host network namespace — no veth, no netns, no IP allocation. They bypass NetMux entirely:
+
+- Full internet access (no SNAT needed — source is the host IP)
+- Full VNet access (can reach any pod IP via host routing)
+- No nftables forward chain enforcement (applies to forwarded traffic, not host-originated)
+
+Both pod types share everything else — lifecycle, health probes, restart policy, labels, selectors, Services, Ingress. The only difference is network isolation.
 
 ---
 
@@ -195,8 +235,8 @@ Subnets exist to:
 ### 4.1 Pod → Pod (same VNet, same node)
 
 ```
-Pod A (10.80.0.2) → 10.80.0.3:80
-  └── veth-podA → host routing (10.80.0.3/32 dev veth-podB)
+Pod A (10.42.0.2) → 10.42.0.3:80
+  └── veth-podA → host routing (10.42.0.3/32 dev veth-podB)
   └── nftables filter forward chain (policy check)
   └── veth-podB → Pod B
 ```
@@ -206,8 +246,8 @@ One L3 kernel forward. No userspace. No bridge.
 ### 4.2 Pod → Pod (different VNet, same node)
 
 ```
-Pod A (10.80.0.2, VNet=prod) → 10.80.20.3:80 (VNet=staging)
-  └── veth → host routing (10.80.20.3/32 dev veth-podX)
+Pod A (10.42.0.2, VNet=prod) → 10.42.20.3:80 (VNet=staging)
+  └── veth → host routing (10.42.20.3/32 dev veth-podX)
   └── nftables filter forward chain:
         ip saddr @vnet-prod ip daddr @vnet-staging drop  ← NSG default deny
   └── DROPPED (unless explicit NSG allow or NetworkPolicy override)
@@ -216,10 +256,10 @@ Pod A (10.80.0.2, VNet=prod) → 10.80.20.3:80 (VNet=staging)
 ### 4.3 Pod → ClusterIP Service (via nftables DNAT)
 
 ```
-Pod A (10.80.0.2) → 10.96.0.3:80
+Pod A (10.42.0.2) → 10.96.0.3:80
   └── veth → host
   └── nftables prerouting: ip daddr 10.96.0.3 tcp dport 80
-        dnat to numgen inc mod 2 map { 0 : 10.80.0.3:8080, 1 : 10.80.0.4:8080 }
+        dnat to numgen inc mod 2 map { 0 : 10.42.0.3:8080, 1 : 10.42.0.4:8080 }
   └── host routing → veth → backend pod
 ```
 
@@ -232,13 +272,13 @@ Client → svc1.z8s.emo.net (Cloudflare A → host IP)
   └── host:80 (axum listener)
   └── match Host header → backend service
   └── resolve backend pod IPs
-  └── splice to 10.80.0.3:8080 (kernel splice, zero-copy)
+  └── splice to 10.42.0.3:8080 (kernel splice, zero-copy)
 ```
 
 ### 4.5 Pod → Internet
 
 ```
-Pod A (10.80.0.2) → 1.1.1.1:80
+Pod A (10.42.0.2) → 1.1.1.1:80
   └── veth → host routing → eth0 (default route)
   └── nftables postrouting: masquerade (SNAT to host IP)
 ```
@@ -249,10 +289,10 @@ MASQUERADE rule applies per-VNet. Hub VNet has SNAT, spoke VNets don't.
 
 ```
 Node A (10.0.0.1)                Node B (10.0.0.2)
-Pod (10.80.0.2)                  Pod (10.80.20.3)
+Pod (10.42.0.2)                  Pod (10.42.20.3)
   └── veth                          └── veth
   └── host routing                   └── host routing
-  └── 10.80.16.0/20 via 10.0.0.2    └── 10.80.0.0/20 via 10.0.0.1
+  └── 10.42.16.0/20 via 10.0.0.2    └── 10.42.0.0/20 via 10.0.0.1
   └── eth0 ──── network ──── eth0
 ```
 
@@ -264,7 +304,7 @@ One extra L3 hop. Same nftables policy enforcement on both nodes.
 
 ```rust
 struct IpPool {
-    cidr: Ipv4Cidr,           // e.g., 10.80.0.0/20
+    cidr: Ipv4Cidr,           // e.g., 10.42.0.0/20
     free: BTreeSet<u32>,       // available IPs (host addresses)
 }
 
@@ -337,23 +377,31 @@ The `ct state` rule at position 0 is critical — without it, return traffic for
 
 **Conflict resolution:** more specific (narrower match) rule wins. NSG is CIDR-based (broad), NetworkPolicy is pod IP-based (specific). If NSG denies subnet A→B but NetworkPolicy allows pod X→Y, the NP rule is more specific and wins.
 
-### 6.3 ClusterIP DNAT Maps
+### 6.3 ClusterIP DNAT — `numgen` Round-Robin
 
-```rust
-// Per-service nftables map, updated atomically
-map svc:nginx-80 {
-  type ipv4_addr . inet_service : ipv4_addr . inet_service
-  elements = {
-    10.96.0.3 . 80 : 10.80.0.3 . 8080,
-    10.96.0.3 . 80 : 10.80.0.4 . 8080,
+ClusterIP load balancing uses `numgen` with a chain of DNAT rules. A map with duplicate keys is invalid in nftables — the correct approach is a rule chain with `numgen` selection:
+
+```
+chain clusterip-nginx {
+  ip daddr 10.96.0.3 tcp dport 80 dnat to numgen inc mod 2 map {
+    0 : 10.42.0.3:8080,
+    1 : 10.42.0.4:8080,
   }
 }
-
-// Pterouting rule uses the map
-ip daddr . tcp dport vmap @svc:nginx-80
 ```
 
-When backends change (scale up/down, rolling update), the map is replaced atomically via `Batch`.
+The prerouting chain jumps to the service-specific chain:
+
+```
+chain prerouting {
+  jump clusterip-nginx
+  # ... other services
+}
+```
+
+When backends change (scale up/down, rolling update), the entire `clusterip-nginx` chain is replaced atomically via `Batch`. The `numgen` counter increments per-connection, providing round-robin distribution.
+
+**Session affinity:** `numgen` is stateless — a client making two sequential connections may hit different backends. For stateful services, replace `numgen` with `jhash` or `symhash` using `ip saddr` as the hash key. This is a per-service configuration option.
 
 ### 6.4 Dynamic NetworkPolicy Sets
 
@@ -361,7 +409,7 @@ When backends change (scale up/down, rolling update), the map is replaced atomic
 // Each podSelector creates a named set
 set np:default:allow-from-frontend {
   type ipv4_addr
-  elements = { 10.80.0.2, 10.80.0.5 }  // pods matching labels
+  elements = { 10.42.0.2, 10.42.0.5 }  // pods matching labels
 }
 ```
 
@@ -392,17 +440,28 @@ NetworkPolicyController:
 
 Both controllers use the same `PoolAllocator`. Both call `Engine::register()` and `Engine::program()`.
 
+**Batch write serialization:** Both controllers write to the same nftables tables. Concurrent `rustables::Batch` writes from separate tasks can race, causing partial rule sets or `EBUSY` errors. All nftables writes go through a **single serialized channel**:
+
+```
+VNetController ──┐
+                  ├──→ mpsc channel ──→ single writer task ──→ rustables::Batch
+NetworkPolicy    ──┘
+Controller
+```
+
+The writer task pulls batches from the channel one at a time and applies them sequentially. If a batch fails, the error is logged and the affected controller re-queues its batch on the next reconcile cycle.
+
 ---
 
 ## 8. Hub-and-Spoke Topology
 
 ```
-Internet ──► Hub VNet (10.80.0.0/20)
+Internet ──► Hub VNet (10.42.0.0/20)
                │  SNAT: yes
                │  Ingress: yes
                │
-               │──► Spoke A (10.80.16.0/20) — DB, no internet
-               │──► Spoke B (10.80.32.0/20) — app, no internet
+               │──► Spoke A (10.42.16.0/20) — DB, no internet
+               │──► Spoke B (10.42.32.0/20) — app, no internet
                │
                DNS: global — all names resolve from any VNet
                NSG enforces the actual access
@@ -410,17 +469,19 @@ Internet ──► Hub VNet (10.80.0.0/20)
 
 ### 8.1 NSG Rules for Hub-and-Spoke
 
+Spoke-to-spoke transit via the hub uses an L7 proxy (ingress or Service on the hub), not kernel-level L3 forwarding. The hub changes the source IP, so the forward chain sees hub-sourced traffic toward spokes.
+
 ```
 chain forward {
-  # Spoke → Spoke: denied
+  # Spoke → Spoke: denied (no direct L3 transit)
   ip saddr @spoke-a ip daddr @spoke-b drop
   ip saddr @spoke-b ip daddr @spoke-a drop
 
-  # Hub → Spoke: allowed (hub can reach services)
+  # Hub → Spoke: allowed (hub reaches spokes via proxy)
   ip saddr @hub ip daddr @spoke-a accept
   ip saddr @hub ip daddr @spoke-b accept
 
-  # Spoke → Hub: allowed (spoke can reach hub for transit)
+  # Spoke → Hub: allowed (spoke reaches hub's proxy/ingress)
   ip saddr @spoke-a ip daddr @hub accept
 
   # Spoke → Internet: denied (no MASQUERADE)
@@ -436,7 +497,7 @@ chain forward {
 - DNS is global — `db.myapp` resolves from any VNet
 - NSG is the enforcement boundary
 - Hub has ingress that routes to spoke backends (via ClusterIP or direct pod IP)
-- Spoke default route only covers internal CIDR (`10.0.0.0/8`), no default gateway
+- Pods in every VNet always have a default route via the veth gateway (host). Spoke isolation is enforced **by nftables on the host** (`oif eth0 drop`), not by removing the default route from the pod. The pod itself does not know it is in a spoke — all packets to non-CIDR destinations reach the host, and the host's forward chain drops them if they came from a spoke VNet.
 
 ---
 
@@ -523,21 +584,6 @@ No contention, no coordination per pod.
 | Static pre-config | Fragile, no dynamic join |
 | **Two-level + join handshake** | **Chosen — ~300 lines, no deps, works with any discovery mechanism** |
 
-### 10.2 Cross-Node Dataplane (Design Locked)
-
-Regardless of discovery mechanism, once a node knows a peer's pod CIDR:
-
-```
-Each node maintains:
-  kernel routes:  10.80.X.0/24 via <peer-host-ip>
-  nftables DNAT:  local maps include peer pod IPs as backends
-  nftables NSG:   same rules apply to cross-node traffic
-```
-
-The discovery mechanism only affects how the route table and DNAT maps are populated — the dataplane itself is identical whether the peer was discovered via gossip, static config, or token join.
-
----
-
 ## 11. IPv6
 
 | Feature | Status |
@@ -599,6 +645,7 @@ Write integration test scripts (shell + YAML) that define success for every feat
 - `assign_pod_ip()` + `add_default_route()` — inside pod netns (RTM_NEWADDR)
 - `enable_ip_forward()` — write `"1\n"` to `/proc/sys/net/ipv4/ip_forward`
 - `clean_orphan_veths()` — RTM_DELLINK stale veth-* entries
+- **Veth naming convention:** `veth-<uid8>` where `<uid8>` is the first 8 hex characters of the pod UID. Linux interface names capped at 15 chars. UID hash avoids collisions across namespaces and stays within the limit. Example: pod UID `a1b2c3d4-e5f6-7890-abcd-ef1234567890` → `veth-a1b2c3d4`.
 - Pool allocator with `BTreeSet<u8>` free-list
 
 ### Phase 2 — Pool Allocator + nftables Engine (SNAT + ClusterIP DNAT)
@@ -628,7 +675,9 @@ Write integration test scripts (shell + YAML) that define success for every feat
 - On pod start/stop: update all matching sets atomically
 - NSG + NetworkPolicy priority model (more specific wins)
 
-### Phase 5 — Remove Old Code
+### Phase 5 — Remove Old Code (After Phase 6 Stable)
+
+> **Gate:** Do not start this phase until Phase 6 (multi-node) has been stable for at least one release cycle. If multi-node breaks something, `port_publish.rs` and `service_proxy.rs` are the rollback path.
 
 - Delete `port_publish.rs`, `service_proxy.rs`, `ensure_loopback_alias`
 - Remove `--net-backend=setns` flag
@@ -746,7 +795,7 @@ Write integration test scripts (shell + YAML) that define success for every feat
 | I1 | VNet CIDR full | Pod creation fails with clear error |
 | I2 | nftables init fails | Z8s refuses to start |
 | I3 | SNAT fails | Warning logged, pods no internet |
-| I4 | 1000 concurrent connections through DNAT | All succeed |
+| I4 | 1000 concurrent connections through DNAT | All succeed, p99 connection setup < 5ms, throughput > 1 Gbps per connection pair |
 | I5 | 10 pods/sec start/stop for 60s | All IPs reclaimed, no leaks |
 
 ---
@@ -814,13 +863,18 @@ Each Pod resource gets exactly **one IP** from the pool. All containers within a
 z8s [OPTIONS]
 
 Networking:
-  --pod-cidr <CIDR>             Pod IP allocation range         [default: 10.42.0.0/16]
+  --pod-cidr <CIDR>             Pod IP allocation range         [default: 10.42.0.0/12]
   --service-cidr <CIDR>         ClusterIP allocation range       [default: 10.96.0.0/16]
   --vnet-cidr-size <PREFIX>     Default VNet CIDR size           [default: 20]
   --ipv6-prefix <PREFIX>        IPv6 /64 block (future)          [default: none]
   --ingress-ports <PORTS>       L7 ingress listen ports          [default: 80,443]
   --node-name <NAME>            This node's name                 [default: hostname]
   --node-ip <IP>                This node's host IP              [auto: default route iface]
+                              Auto-detection algorithm: parse `/proc/net/route`, find the
+                              entry with destination "00000000" (0.0.0.0), take the Iface
+                              column, read the first non-loopback IPv4 address on that
+                              interface. For multi-NIC hosts, prefers the interface with
+                              the lowest route metric. If ambiguous, require explicit config.
   --peers <PEERS>               Other nodes (k=v pairs)          [default: none]
 ```
 
