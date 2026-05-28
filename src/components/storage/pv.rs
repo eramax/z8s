@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use crate::types::{AnyResource, ResourceStore, ResourceTracker};
 use crate::components::{Component, ReconcileContext, ResourceCategory};
+use k8s_openapi::api::core::v1::{ObjectReference, PersistentVolumeClaimStatus};
 
 pub struct PvResource {
     pub store: Arc<ResourceStore>,
@@ -17,13 +18,9 @@ impl PvResource {
 
 #[async_trait]
 impl Component for PvResource {
-    fn kind(&self) -> &'static str {
-        "PersistentVolume"
-    }
+    fn kind(&self) -> &'static str { "PersistentVolume" }
 
-    fn category(&self) -> ResourceCategory {
-        ResourceCategory::Storage
-    }
+    fn category(&self) -> ResourceCategory { ResourceCategory::Storage }
 
     async fn reconcile(&self, _ctx: &ReconcileContext, _tracker: &ResourceTracker) -> Result<()> {
         Ok(())
@@ -37,20 +34,42 @@ impl Component for PvResource {
         if pv.spec.as_ref().and_then(|s| s.claim_ref.as_ref()).is_some() {
             return Ok(());
         }
+        let pv_name = match pv.metadata.name.as_deref() {
+            Some(n) => n.to_string(),
+            None => return Ok(()),
+        };
         let pvc_trackers = self.store.get_by_kind("PersistentVolumeClaim").await;
         for t in &pvc_trackers {
             let pvc = match &t.resource {
                 AnyResource::PersistentVolumeClaim(p) => p.clone(),
                 _ => continue,
             };
-            if pvc.spec.as_ref().and_then(|s| s.volume_name.as_ref()).is_some() {
+            let pvc_spec = match pvc.spec.as_ref() {
+                Some(s) => s,
+                None => continue,
+            };
+            if pvc_spec.volume_name.is_some() {
                 continue;
             }
-            let pv_name = pv.metadata.name.as_deref().unwrap_or("");
-            if let Some(mut updated_pvc) = try_bind_pvc(&pv, &pvc) {
-                self.store.apply(AnyResource::PersistentVolumeClaim(updated_pvc)).await?;
-                let _ = self.store.apply(AnyResource::PersistentVolume(pv.clone())).await;
+            let Some(mut updated_pvc) = try_bind_pvc(&pv, &pvc) else { continue };
+
+            let mut updated_pv = pv.clone();
+            if let Some(s) = updated_pv.spec.as_mut() {
+                s.claim_ref = Some(ObjectReference {
+                    kind: Some("PersistentVolumeClaim".into()),
+                    name: pvc.metadata.name.clone(),
+                    namespace: pvc.metadata.namespace.clone(),
+                    ..Default::default()
+                });
             }
+            updated_pv.status = Some(k8s_openapi::api::core::v1::PersistentVolumeStatus {
+                phase: Some("Bound".into()),
+                ..Default::default()
+            });
+
+            self.store.apply(AnyResource::PersistentVolume(updated_pv)).await?;
+            self.store.apply(AnyResource::PersistentVolumeClaim(updated_pvc)).await?;
+            return Ok(());
         }
         Ok(())
     }
@@ -89,12 +108,10 @@ fn try_bind_pvc(pv: &k8s_openapi::api::core::v1::PersistentVolume, pvc: &k8s_ope
     if !pvc_modes.is_empty() && !pvc_modes.iter().all(|m| pv_modes.contains(m)) { return None; }
 
     let pv_name = pv.metadata.name.as_deref()?;
-    let pvc_ns = pvc.metadata.namespace.as_deref().unwrap_or("default");
-    let pvc_name = pvc.metadata.name.as_deref()?;
-
     let mut updated_pvc = pvc.clone();
-    updated_pvc.spec.as_mut().unwrap().volume_name = Some(pv_name.to_string());
-    updated_pvc.status = Some(k8s_openapi::api::core::v1::PersistentVolumeClaimStatus {
+    let pvc_spec = updated_pvc.spec.as_mut()?;
+    pvc_spec.volume_name = Some(pv_name.to_string());
+    updated_pvc.status = Some(PersistentVolumeClaimStatus {
         phase: Some("Bound".into()),
         capacity: pv_spec.capacity.clone(),
         access_modes: pv_spec.access_modes.clone(),

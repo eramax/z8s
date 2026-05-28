@@ -11,8 +11,6 @@ check() { local m="$1"; shift; "$@" && pass "$m" || fail "$m"; }
 
 PV_BASE="/var/lib/z8s/pv"
 PVC_NAME="storage-test-claim"
-PV_NAME="pvc-${NS}-${PVC_NAME}"
-HOST_PATH="${PV_BASE}/${PV_NAME}"
 
 cleanup() {
   for pid in $(fuser "${SP:-12345}/tcp" 2>/dev/null | xargs); do kill "$pid" 2>/dev/null || true; done
@@ -47,6 +45,7 @@ check "PVC Bound" test "$(k get pvc "$PVC_NAME" -n "$NS" -o jsonpath='{.status.p
 pv_name=$(k get pvc "$PVC_NAME" -n "$NS" -o jsonpath='{.spec.volumeName}' 2>/dev/null)
 check "volumeName set" test -n "$pv_name"
 check "PV status Bound" test "$(k get pv "$pv_name" -o jsonpath='{.status.phase}' 2>/dev/null)" = "Bound"
+HOST_PATH="${PV_BASE}/${pv_name}"
 check "hostPath exists" test -d "$HOST_PATH"
 echo "  PV=$pv_name  hostPath=$HOST_PATH"
 

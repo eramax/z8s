@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use k8s_openapi::api::core::v1::{PersistentVolume, PersistentVolumeClaim};
 use std::path::Path;
-use tracing::info;
+use tracing::{info, warn};
 
 use super::StorageClass;
 
@@ -9,19 +9,23 @@ pub struct LoopProvisioner;
 
 impl LoopProvisioner {
     pub async fn provision(&self, pv: &mut PersistentVolume, _pvc: &PersistentVolumeClaim, _class: &StorageClass) -> Result<()> {
-        let host_path = pv.spec.as_ref()
+        let host_path = match pv.spec.as_ref()
             .and_then(|s| s.host_path.as_ref())
-            .map(|h| h.path.as_str())
-            .context("PV has no hostPath")?;
+            .map(|h| h.path.clone())
+        {
+            Some(p) => p,
+            None => anyhow::bail!("PV has no hostPath"),
+        };
+
         let img_path = format!("{}.img", host_path);
 
         if Path::new(&host_path).exists() {
-            if is_mounted(host_path) {
+            if is_mounted(&host_path) {
                 info!("Loop PV {} already mounted at {}", pv.metadata.name.as_deref().unwrap_or("?"), host_path);
                 return Ok(());
             }
             info!("Loop PV {} hostPath exists but not mounted, re-provisioning", pv.metadata.name.as_deref().unwrap_or("?"));
-            let _ = std::fs::remove_dir_all(host_path);
+            let _ = std::fs::remove_dir_all(&host_path);
         }
 
         let capacity = pv.spec.as_ref()
@@ -34,9 +38,13 @@ impl LoopProvisioner {
             anyhow::bail!("loop provisioner requires non-zero capacity");
         }
 
-        let parent = Path::new(&img_path).parent().unwrap();
+        let parent = Path::new(&img_path).parent()
+            .context("image path has no parent directory")?;
         std::fs::create_dir_all(parent)
             .with_context(|| format!("create {}", parent.display()))?;
+
+        std::fs::create_dir_all(&host_path)
+            .with_context(|| format!("create mount dir {}", host_path))?;
 
         info!("Creating sparse image {} ({} bytes)", img_path, capacity);
         run("truncate", &["-s", &capacity.to_string(), &img_path])?;
@@ -54,22 +62,20 @@ impl LoopProvisioner {
             anyhow::bail!("losetup returned empty device");
         }
 
-        std::fs::create_dir_all(host_path)
-            .with_context(|| format!("create mount dir {}", host_path))?;
-
         info!("Mounting {} at {}", loop_dev, host_path);
-        if let Err(e) = run("mount", &[&loop_dev, host_path]) {
+        if let Err(e) = run("mount", &[&loop_dev, &host_path]) {
             let _ = run("losetup", &["-d", &loop_dev]);
             cleanup_file(&img_path);
             anyhow::bail!("mount failed: {}", e);
         }
 
-        pv.metadata.annotations.get_or_insert_with(Default::default)
-            .insert("z8s.io/loop-device".into(), loop_dev);
-        pv.metadata.annotations.get_or_insert_with(Default::default)
-            .insert("z8s.io/image-path".into(), img_path);
+        let ann = pv.metadata.annotations.get_or_insert_with(Default::default);
+        ann.insert("z8s.io/loop-device".into(), loop_dev);
+        ann.insert("z8s.io/image-path".into(), img_path);
 
-        let _ = run("chmod", &["0777", host_path]);
+        if let Err(e) = run("chmod", &["0777", &host_path]) {
+            warn!("chmod 0777 {} failed: {}", host_path, e);
+        }
 
         Ok(())
     }
@@ -79,19 +85,37 @@ impl LoopProvisioner {
             Some(a) => a,
             None => return Ok(()),
         };
-        let host_path = pv.spec.as_ref()
+        let host_path = match pv.spec.as_ref()
             .and_then(|s| s.host_path.as_ref())
             .map(|h| h.path.as_str())
-            .unwrap_or("");
+        {
+            Some(p) => p,
+            None => return Ok(()),
+        };
 
-        if let Some(loop_dev) = annotations.get("z8s.io/loop-device") {
-            info!("Detaching loop device {} for PV {}", loop_dev, pv.metadata.name.as_deref().unwrap_or("?"));
-            let _ = run("umount", &[host_path]);
-            let _ = run("losetup", &["-d", loop_dev]);
+        if host_path.is_empty() {
+            return Ok(());
         }
 
-        if let Some(img_path) = annotations.get("z8s.io/image-path") {
-            cleanup_file(img_path);
+        let img_path = annotations.get("z8s.io/image-path").cloned().unwrap_or_default();
+
+        if let Some(loop_dev) = annotations.get("z8s.io/loop-device") {
+            if is_mounted(host_path) {
+                info!("Unmounting {} for PV {}", host_path, pv.metadata.name.as_deref().unwrap_or("?"));
+                if let Err(e) = run("umount", &[host_path]) {
+                    warn!("umount {} failed ({}), trying lazy umount", host_path, e);
+                    let _ = run("umount", &["-l", host_path]);
+                }
+            }
+            info!("Detaching loop device {} for PV {}", loop_dev, pv.metadata.name.as_deref().unwrap_or("?"));
+            if let Err(e) = run("losetup", &["-d", loop_dev]) {
+                warn!("losetup -d {} failed: {}", loop_dev, e);
+            }
+        }
+
+        if !img_path.is_empty() && Path::new(&img_path).exists() {
+            info!("Removing backing image {}", img_path);
+            cleanup_file(&img_path);
         }
 
         Ok(())

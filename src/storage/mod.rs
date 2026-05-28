@@ -53,11 +53,11 @@ impl ProvisionerDispatcher {
         }
     }
 
-    fn select(&self, class: &StorageClass) -> &dyn StorageProvisionerBackend {
+    fn select(&self, class: &StorageClass) -> Result<&dyn StorageProvisionerBackend> {
         match class.provisioner {
-            "z8s.io/loop" => &self.loop_prov,
-            "z8s.io/hostpath" => &self.hostpath_prov,
-            p => panic!("unknown provisioner '{}'", p),
+            "z8s.io/loop" => Ok(&self.loop_prov),
+            "z8s.io/hostpath" => Ok(&self.hostpath_prov),
+            p => anyhow::bail!("unknown provisioner '{}'", p),
         }
     }
 
@@ -67,7 +67,7 @@ impl ProvisionerDispatcher {
             .context(format!("unknown storage class '{}'", class_name))?;
         let pvc_ns = pvc.metadata.namespace.as_deref().unwrap_or("default");
         let pvc_name = pvc.metadata.name.as_deref().unwrap_or("unknown");
-        let pv_name = format!("pvc-{}-{}", pvc_ns, pvc_name);
+        let pv_name = format!("pvc-{}--{}", pvc_ns, pvc_name);
         let host_path = format!("/var/lib/z8s/pv/{}", pv_name);
         let mut pv = PersistentVolume {
             metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
@@ -105,7 +105,7 @@ impl ProvisionerDispatcher {
         };
 
         info!("Provisioning PV {} from storage class '{}'", pv_name, class_name);
-        self.select(&class).do_provision(&mut pv, pvc, &class).await?;
+        self.select(&class)?.do_provision(&mut pv, pvc, &class).await?;
         if let Some(s) = pv.status.as_mut() { s.phase = Some("Bound".into()); }
 
         let mut updated_pvc = pvc.clone();
@@ -138,10 +138,10 @@ impl StorageProvisioner for ProvisionerDispatcher {
             return Ok(());
         }
 
-        let uid = pvc.metadata.uid.as_deref().unwrap_or("").to_string();
-        if uid.is_empty() {
-            anyhow::bail!("PVC has no uid");
-        }
+        let uid = match &pvc.metadata.uid {
+            Some(u) => u.clone(),
+            None => anyhow::bail!("PVC has no uid"),
+        };
 
         {
             let mut inflight = self.inflight.lock().await;
@@ -151,9 +151,16 @@ impl StorageProvisioner for ProvisionerDispatcher {
             inflight.insert(uid.clone(), ());
         }
 
-        if pvc.spec.as_ref().and_then(|s| s.volume_name.as_ref()).is_some() {
-            self.inflight.lock().await.remove(&uid);
-            return Ok(());
+        let pvc_uid = format!("PersistentVolumeClaim/{}/{}",
+            pvc.metadata.namespace.as_deref().unwrap_or("default"),
+            pvc.metadata.name.as_deref().unwrap_or("unknown"));
+        if let Some(tracker) = self.store.get(&pvc_uid).await {
+            if let AnyResource::PersistentVolumeClaim(ref p) = tracker.resource {
+                if p.spec.as_ref().and_then(|s| s.volume_name.as_ref()).is_some() {
+                    self.inflight.lock().await.remove(&uid);
+                    return Ok(());
+                }
+            }
         }
 
         let result = self.do_provision(pvc, class_name).await;
@@ -163,13 +170,19 @@ impl StorageProvisioner for ProvisionerDispatcher {
     }
 
     async fn deprovision_pv(&self, pv: &PersistentVolume) -> Result<()> {
-        let prov = pv.metadata.annotations.as_ref()
+        let prov: &'static str = match pv.metadata.annotations.as_ref()
             .and_then(|a| a.get("z8s.io/provisioner"))
             .map(|s| s.as_str())
-            .unwrap_or("z8s.io/hostpath");
+            .unwrap_or("")
+        {
+            "z8s.io/loop" => "z8s.io/loop",
+            "z8s.io/hostpath" => "z8s.io/hostpath",
+            _ => return Ok(()),
+        };
         let backend: &dyn StorageProvisionerBackend = match prov {
             "z8s.io/loop" => &self.loop_prov,
-            _ => &self.hostpath_prov,
+            "z8s.io/hostpath" => &self.hostpath_prov,
+            _ => return Ok(()),
         };
         backend.do_deprovision(pv).await
     }

@@ -92,10 +92,18 @@ impl Component for PvcResource {
             AnyResource::PersistentVolumeClaim(p) => p,
             _ => return Ok(()),
         };
-        let vol_name = match pvc.spec.as_ref().and_then(|s| s.volume_name.as_ref()) {
-            Some(n) => n.clone(),
-            None => return Ok(()),
+        let pvc_uid = AnyResource::PersistentVolumeClaim(pvc.clone()).uid();
+        let current = self.store.get(&pvc_uid).await;
+        let vol_name = match current {
+            Some(ref t) => match &t.resource {
+                AnyResource::PersistentVolumeClaim(p) =>
+                    p.spec.as_ref().and_then(|s| s.volume_name.as_ref()).cloned(),
+                _ => None,
+            },
+            None => pvc.spec.as_ref().and_then(|s| s.volume_name.as_ref()).cloned(),
         };
+        let Some(vol_name) = vol_name else { return Ok(()) };
+
         let pv_trackers = self.store.get_by_kind("PersistentVolume").await;
         for t in &pv_trackers {
             if t.resource.name() == vol_name {
