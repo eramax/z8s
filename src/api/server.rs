@@ -9,8 +9,7 @@ pub use k8s_openapi::api::authorization::v1::{
     SelfSubjectAccessReview, SelfSubjectAccessReviewSpec, SubjectAccessReviewStatus,
 };
 pub use k8s_openapi::api::core::v1::{
-    ConfigMap, ContainerState, ContainerStateRunning, ContainerStatus, DaemonEndpoint,
-    Endpoints, Event, EventSource, HostIP, Namespace, NamespaceStatus, Node, NodeAddress,
+    ConfigMap, ContainerState, ContainerStateRunning, ContainerStatus, DaemonEndpoint, Event, EventSource, HostIP, Namespace, NamespaceStatus, Node, NodeAddress,
     NodeCondition, NodeDaemonEndpoints, NodeSpec, NodeStatus, NodeSystemInfo,
     ObjectReference, PodCondition, PodIP, PodStatus, Secret, Service, ServiceStatus,
 };

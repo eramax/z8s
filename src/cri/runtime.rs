@@ -1,5 +1,5 @@
 use crate::api::types::{
-    extract_containers, parse_quantity_bytes, parse_quantity_cpu, ResourceState, ResourceStore,
+    ResourceState, ResourceStore,
 };
 use crate::api::AnyResource;
 use crate::cri::image::ImageManager;
@@ -7,7 +7,6 @@ use crate::cri::rootfs;
 use crate::cri::cgroup::CgroupManager;
 use crate::cri::health::{HealthChecker, HealthStatus, ProbeAction, ProbeConfig};
 use anyhow::{Context, Result};
-use k8s_openapi::api::core::v1::{ConfigMap, Container, Pod, PodSecurityContext, Secret};
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 use std::collections::HashMap;
@@ -18,20 +17,12 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 use async_trait::async_trait;
 use crate::cri::spec::ContainerSpec;
 use crate::cri::RuntimeProvider;
 
 
-fn resolve_run_as_user(pod_sc: Option<&PodSecurityContext>, container: &Container) -> Option<u32> {
-    container
-        .security_context
-        .as_ref()
-        .and_then(|sc| sc.run_as_user)
-        .or_else(|| pod_sc.and_then(|sc| sc.run_as_user))
-        .map(|u| u as u32)
-}
 
 
 fn raise_nproc_limit() {
@@ -45,29 +36,8 @@ fn raise_nproc_limit() {
     }
 }
 
-fn declared_container_ports(container: &Container) -> Vec<u16> {
-    container
-        .ports
-        .as_ref()
-        .map(|ps| ps.iter().map(|p| p.container_port as u16).collect())
-        .unwrap_or_default()
-}
 
-fn use_isolated_network(container: &Container, service_ports: &[u16]) -> bool {
-    !declared_container_ports(container).is_empty() || !service_ports.is_empty()
-}
 
-fn merge_publish_ports(container: &Container, service_ports: &[u16]) -> Vec<u16> {
-    let mut ports = declared_container_ports(container);
-    for &p in service_ports {
-        if !ports.contains(&p) {
-            ports.push(p);
-        }
-    }
-    ports.sort_unstable();
-    ports.dedup();
-    ports
-}
 
 fn attach_port_publish(
     pid: u32,
@@ -108,14 +78,6 @@ fn launch_pasta_for_pid(pid: u32) {
     }
 }
 
-fn resolve_run_as_group(pod_sc: Option<&PodSecurityContext>, container: &Container) -> Option<u32> {
-    container
-        .security_context
-        .as_ref()
-        .and_then(|sc| sc.run_as_group)
-        .or_else(|| pod_sc.and_then(|sc| sc.run_as_group))
-        .map(|g| g as u32)
-}
 
 struct ContainerSpawnCtx<'a> {
     entrypoint: &'a str,
@@ -125,10 +87,14 @@ struct ContainerSpawnCtx<'a> {
     container_id: &'a str,
     pod_uid: &'a str,
     image: &'a str,
-    container: &'a Container,
+    container_name: &'a str,
     volumes: Vec<crate::cri::volumes::ResolvedVolume>,
     run_as_user: Option<u32>,
     run_as_group: Option<u32>,
+    isolate_net: bool,
+    privileged: bool,
+    extra_caps: Vec<String>,
+    published_ports: Vec<u16>,
 }
 
 #[derive(Debug, Clone)]
@@ -165,6 +131,8 @@ pub struct ProcessSupervisor {
     pub restart_counts: Arc<Mutex<HashMap<String, u32>>>,
 }
 
+
+
 impl ProcessSupervisor {
     pub fn new(
         image_manager: Arc<ImageManager>,
@@ -186,348 +154,63 @@ impl ProcessSupervisor {
         }
     }
 
-    pub async fn start_pod(&self, resource: &AnyResource) -> Result<()> {
-        self.start_pod_inner(resource).await
-    }
 
-    async fn start_pod_inner(&self, resource: &AnyResource) -> Result<()> {
-        let containers = extract_containers(resource);
-        if containers.is_empty() {
-            warn!("No containers in resource {}", resource.name());
-            return Ok(());
-        }
+    // ── ContainerSpec-based spawn pipeline (§7.5) ──────────────────────────
 
-        let pod_uid = resource.uid();
-        let pod_name = resource.name().to_string();
-
-        // Clean stale emptyDir data from a previous run (e.g. after crash before stop_pod)
-        crate::cri::volumes::cleanup_emptydir(&pod_uid);
-
-        // Guard against concurrent start by multiple reconcile rounds
-        {
-            let running = self.running.lock().await;
-            if running.keys().any(|cid| cid.starts_with(&format!("{}-", pod_name))) {
-                info!("Pod {} already running, skipping duplicate start", pod_name);
-                return Ok(());
-            }
-        }
-
-        info!("Starting pod {} ({} container(s))", pod_name, containers.len());
-
-        self.cgroup_manager.create_pod_cgroup(&pod_uid)?;
-        self.set_resource_limits(&pod_uid, &containers)?;
-
-        let service_ports = if let AnyResource::Pod(pod) = resource {
-            self.service_target_ports_for_pod(pod).await
-        } else {
-            Vec::new()
-        };
-
-        let mut prepared = Vec::new();
-        for container in &containers {
-            let container_id = format!("{}-{}", pod_name, container.name);
-            let image_ref = container.image.clone().unwrap_or_default();
-
-            let rootfs_path = if image_ref.is_empty() || image_ref == "host" || image_ref.starts_with("host://") {
-                info!("Native process {}/{} (no OCI image)", pod_name, container.name);
-                String::new()
-            } else {
-                self.image_manager
-                    .unpack_image(&image_ref, &container_id)
-                    .await
-                    .context(format!("Failed to prepare image {} for {}", image_ref, container.name))?
-            };
-
-            info!("Starting container {}/{}", pod_name, container.name);
-            let rc = self
-                .spawn_container(resource, container, &container_id, &rootfs_path, &pod_uid, &service_ports)
-                .await?;
-            prepared.push((container_id, rc));
-        }
-
-        let mut running = self.running.lock().await;
-        for (cid, rc) in prepared {
-            running.insert(cid, rc);
-        }
-        drop(running);
-
-        self.store.update_state(&pod_uid, ResourceState::Running).await;
-
-        Ok(())
-    }
-
-    async fn fetch_cms_and_secrets(
+    async fn spawn_container_from_config(
         &self,
-    ) -> (HashMap<(String, String), ConfigMap>, HashMap<(String, String), Secret>) {
-        let cms = self
-            .store
-            .get_by_kind("ConfigMap")
-            .await
-            .into_iter()
-            .filter_map(|t| {
-                if let AnyResource::ConfigMap(cm) = t.resource {
-                    let ns = cm.metadata.namespace.clone().unwrap_or_default();
-                    let name = cm.metadata.name.clone().unwrap_or_default();
-                    Some(((ns, name), cm))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        let secrets = self
-            .store
-            .get_by_kind("Secret")
-            .await
-            .into_iter()
-            .filter_map(|t| {
-                if let AnyResource::Secret(sec) = t.resource {
-                    let ns = sec.metadata.namespace.clone().unwrap_or_default();
-                    let name = sec.metadata.name.clone().unwrap_or_default();
-                    Some(((ns, name), sec))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        (cms, secrets)
-    }
-
-    async fn service_target_ports_for_pod(&self, pod: &Pod) -> Vec<u16> {
-        use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
-        let pod_ns = pod.metadata.namespace.as_deref().unwrap_or("default");
-        let pod_labels = pod.metadata.labels.clone().unwrap_or_default();
-        let mut ports = Vec::new();
-        let trackers = self.store.get_by_kind("Service").await;
-        for t in trackers {
-            if let AnyResource::Service(svc) = &t.resource {
-                if svc.metadata.namespace.as_deref().unwrap_or("default") != pod_ns {
-                    continue;
-                }
-                let selector = svc
-                    .spec
-                    .as_ref()
-                    .and_then(|s| s.selector.as_ref())
-                    .cloned()
-                    .unwrap_or_default();
-                if !selector.iter().all(|(k, v)| pod_labels.get(k) == Some(v)) {
-                    continue;
-                }
-                if let Some(svc_ports) = svc.spec.as_ref().and_then(|s| s.ports.as_ref()) {
-                    for sp in svc_ports {
-                        let tp = sp
-                            .target_port
-                            .clone()
-                            .unwrap_or_else(|| IntOrString::Int(sp.port));
-                        if let IntOrString::Int(p) = tp {
-                            ports.push(p as u16);
-                        }
-                    }
-                }
-            }
-        }
-        ports
-    }
-
-    async fn resolve_service_env(&self, pod: &Pod) -> Vec<(String, String)> {
-        let pod_ns = pod.metadata.namespace.as_deref().unwrap_or("default");
-        let trackers = self.store.get_by_kind("Service").await;
-        let mut vars = Vec::new();
-        for t in trackers {
-            if let AnyResource::Service(svc) = &t.resource {
-                if svc.metadata.namespace.as_deref().unwrap_or("default") != pod_ns {
-                    continue;
-                }
-                let cluster_ip = svc.spec.as_ref()
-                    .and_then(|s| s.cluster_ip.as_deref())
-                    .unwrap_or("None");
-                if cluster_ip == "None" || cluster_ip.is_empty() {
-                    continue;
-                }
-                let svc_name = svc.metadata.name.as_deref().unwrap_or_default();
-                let prefix = svc_name.to_uppercase().replace('-', "_");
-                vars.push((format!("{}_SERVICE_HOST", prefix), cluster_ip.to_string()));
-                if let Some(ports) = svc.spec.as_ref().and_then(|s| s.ports.as_ref()) {
-                    for port in ports {
-                        let port_str = port.port.to_string();
-                        vars.push((format!("{}_SERVICE_PORT", prefix), port_str.clone()));
-                        if let Some(pname) = &port.name {
-                            let pname_up = pname.to_uppercase().replace('-', "_");
-                            vars.push((format!("{}_SERVICE_PORT_{}", prefix, pname_up), port_str));
-                        }
-                    }
-                }
-            }
-        }
-        vars
-    }
-
-    fn resolve_env_from(
-        container: &Container,
-        pod: &Pod,
-        cms: &HashMap<(String, String), ConfigMap>,
-        secrets: &HashMap<(String, String), Secret>,
-    ) -> Vec<(String, String)> {
-        let ns = pod.metadata.namespace.as_deref().unwrap_or("default");
-        let mut vars = Vec::new();
-        for env_from in container.env_from.as_deref().unwrap_or(&[]) {
-            let prefix = env_from.prefix.as_deref().unwrap_or("");
-            if let Some(cm_ref) = &env_from.config_map_ref {
-                if let Some(cm) = cms.get(&(ns.to_string(), cm_ref.name.clone())) {
-                    for (k, v) in cm.data.as_ref().into_iter().flatten() {
-                        vars.push((format!("{}{}", prefix, k), v.clone()));
-                    }
-                } else {
-                    warn!("envFrom configMapRef '{}' not found in ns '{}'", cm_ref.name, ns);
-                }
-            }
-            if let Some(sec_ref) = &env_from.secret_ref {
-                if let Some(sec) = secrets.get(&(ns.to_string(), sec_ref.name.clone())) {
-                    for (k, v) in sec.data.as_ref().into_iter().flatten() {
-                        match std::str::from_utf8(&v.0) {
-                            Ok(s) => vars.push((format!("{}{}", prefix, k), s.to_string())),
-                            Err(_) => warn!("Secret key '{}' is not valid UTF-8, skipping", k),
-                        }
-                    }
-                    for (k, v) in sec.string_data.as_ref().into_iter().flatten() {
-                        vars.push((format!("{}{}", prefix, k), v.clone()));
-                    }
-                } else {
-                    warn!("envFrom secretRef '{}' not found in ns '{}'", sec_ref.name, ns);
-                }
-            }
-        }
-        vars
-    }
-
-    async fn spawn_container(
-        &self,
-        resource: &AnyResource,
-        container: &Container,
-        container_id: &str,
+        cfg: &crate::cri::spec::ContainerConfig,
         rootfs_path: &str,
         pod_uid: &str,
-        service_ports: &[u16],
     ) -> Result<RunningContainer> {
-        let image = container.image.clone().unwrap_or_default();
-        let is_native = rootfs_path.is_empty();
-
-        let (entrypoint, cmd_args) = if is_native {
-            let command = container.command.clone().unwrap_or_default();
-            if command.is_empty() {
-                anyhow::bail!("Native process container '{}' must have a command", container.name);
-            }
-            let args = container.args.clone().unwrap_or_default();
-            let ep = command[0].clone();
-            let rest: Vec<String> = command[1..].iter().chain(args.iter()).cloned().collect();
-            (ep, rest)
-        } else {
-            crate::cri::oci::resolve_argv(container, rootfs_path)
-        };
-
-        let pod_sc = match resource {
-            AnyResource::Pod(pod) => pod.spec.as_ref().and_then(|s| s.security_context.as_ref()),
-            _ => None,
-        };
-        let run_as_user = resolve_run_as_user(pod_sc, container);
-        let run_as_group = resolve_run_as_group(pod_sc, container);
-
-        let mut env_vars: Vec<(String, String)> = container
-            .env
-            .as_ref()
-            .map(|env| {
-                env.iter()
-                    .map(|e| (e.name.clone(), e.value.clone().unwrap_or_default()))
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        // Resolve volumes, envFrom, and service env vars for pod resources
-        let volumes = if let AnyResource::Pod(pod) = resource {
-            let (cms, secrets) = self.fetch_cms_and_secrets().await;
-            env_vars.extend(Self::resolve_env_from(container, pod, &cms, &secrets));
-            // Inject service env vars (K8s-style: SVCNAME_SERVICE_HOST, SVCNAME_SERVICE_PORT)
-            env_vars.extend(self.resolve_service_env(pod).await);
-            if !is_native {
-                crate::cri::volumes::prepare_volumes(
-                    pod,
-                    &container.name,
-                    pod_uid,
-                    &|ns, name| cms.get(&(ns.to_string(), name.to_string())).cloned(),
-                    &|ns, name| secrets.get(&(ns.to_string(), name.to_string())).cloned(),
-                )
-                .unwrap_or_default()
-            } else {
-                vec![]
-            }
-        } else {
-            vec![]
-        };
-
-        // Inject HOME if not already set
-        if !env_vars.iter().any(|(k, _)| k == "HOME") {
-            let home = match run_as_user {
-                Some(0) | None => "/root".to_string(),
-                Some(_) => "/home/user".to_string(),
-            };
-            env_vars.push(("HOME".to_string(), home));
-        }
-
-        // Merge OCI image environment variables if not native and not overridden by manifest
-        if !is_native {
-            let img_cfg = crate::cri::oci::read_image_config(rootfs_path);
-            if let Some(img_env) = img_cfg.env {
-                for entry in img_env {
-                    if let Some(pos) = entry.find('=') {
-                        let key = entry[..pos].to_string();
-                        let val = entry[pos + 1..].to_string();
-                        if !env_vars.iter().any(|(k, _)| k == &key) {
-                            env_vars.push((key, val));
-                        }
-                    }
-                }
-            }
-        }
-
-        // Ensure a fallback PATH exists in all containers to prevent "os error 2" during process execution
-        if !env_vars.iter().any(|(k, _)| k == "PATH") {
-            env_vars.push((
-                "PATH".to_string(),
-                "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string(),
-            ));
-        }
+        let image = &cfg.image;
+        let is_native = cfg.is_native;
+        let entrypoint = &cfg.entrypoint;
+        let cmd_args = &cfg.args;
+        let env_vars = &cfg.env;
+        let volumes = &cfg.volumes;
+        let run_as_user = cfg.run_as_user;
+        let run_as_group = cfg.run_as_group;
+        let isolate_net = cfg.isolated_net;
+        let privileged = cfg.privileged;
+        let extra_caps = cfg.extra_capabilities.clone();
+        let container_id = &cfg.container_id;
+        let published_ports_data = cfg.published_ports.values().copied().collect::<Vec<u16>>();
 
         let mut child_cmd = if is_native {
             let mut c = Command::new(&entrypoint);
-            c.args(&cmd_args);
+            c.args(cmd_args);
             c
         } else {
             if !volumes.is_empty() {
-                crate::cri::volumes::scrub_rootfs_volume_mounts(rootfs_path, &volumes);
-                crate::cri::volumes::stage_volumes_in_rootfs(rootfs_path, &volumes);
+                crate::cri::volumes::scrub_rootfs_volume_mounts(rootfs_path, volumes);
+                crate::cri::volumes::stage_volumes_in_rootfs(rootfs_path, volumes);
             }
             rootfs::prepare_rootfs(rootfs_path)?;
 
             let rootfs_owned = rootfs_path.to_string();
 
             let ctx = ContainerSpawnCtx {
-                entrypoint: &entrypoint,
-                cmd_args: &cmd_args,
-                env_vars: &env_vars,
+                entrypoint,
+                cmd_args,
+                env_vars,
                 rootfs_path: &rootfs_owned,
                 container_id,
                 pod_uid,
-                image: &image,
-                container,
-                volumes,
+                image,
+                container_name: &cfg.container_name,
+                volumes: volumes.clone(),
                 run_as_user,
                 run_as_group,
+                isolate_net,
+                privileged,
+                extra_caps: extra_caps.clone(),
+                published_ports: published_ports_data.clone(),
             };
             if rootfs::is_root() {
-                return self.spawn_root_ns_container(ctx, service_ports).await;
+                return self.spawn_root_ns_container(ctx, &published_ports_data).await;
             } else {
-                return self.spawn_userns_container(ctx, service_ports).await;
+                return self.spawn_userns_container(ctx, &published_ports_data).await;
             }
         };
 
@@ -545,28 +228,69 @@ impl ProcessSupervisor {
 
         self.cgroup_manager.add_pid_to_cgroup(pod_uid, pid)?;
 
-        self.build_running_container(child, container_id, rootfs_path, &image, container, &env_vars, service_ports).await
+        self.build_running_container(child, container_id, rootfs_path, image, &cfg.container_name, env_vars, isolate_net, &published_ports_data, &cfg.probes).await
     }
+
+    pub async fn start_pod_from_spec(&self, spec: &crate::cri::spec::ContainerSpec) -> Result<()> {
+        let pod_uid = &spec.pod_uid;
+        let pod_name = &spec.pod_name;
+
+        crate::cri::volumes::cleanup_emptydir(pod_uid);
+
+        {
+            let running = self.running.lock().await;
+            if running.keys().any(|cid| cid.starts_with(&format!("{}-", pod_name))) {
+                info!("Pod {} already running, skipping duplicate start", pod_name);
+                return Ok(());
+            }
+        }
+
+        info!("Starting pod {} ({} container(s))", pod_name, spec.containers.len());
+
+        self.cgroup_manager.create_pod_cgroup(pod_uid)?;
+
+        let mut prepared = Vec::new();
+        for cfg in &spec.containers {
+            let image_ref = &cfg.image;
+            let rootfs_path = if cfg.is_native {
+                info!("Native process {}/{} (no OCI image)", pod_name, cfg.container_name);
+                String::new()
+            } else {
+                self.image_manager.unpack_image(image_ref, &cfg.container_id).await
+                    .context(format!("Failed to prepare image {} for {}", image_ref, cfg.container_name))?
+            };
+
+            info!("Starting container {}/{}", pod_name, cfg.container_name);
+            let rc = self.spawn_container_from_config(cfg, &rootfs_path, pod_uid).await?;
+            prepared.push((cfg.container_id.clone(), rc));
+        }
+
+        let mut running = self.running.lock().await;
+        for (cid, rc) in prepared {
+            running.insert(cid, rc);
+        }
+        drop(running);
+
+        self.store.update_state(pod_uid, ResourceState::Running).await;
+        Ok(())
+    }
+
+    pub async fn start_pod(&self, resource: &AnyResource) -> Result<()> {
+        let spec = crate::resources::compute::spec_builder::build_spec(resource, &self.store).await;
+        self.start_pod_from_spec(&spec).await
+    }
+
+
+
+
+
 
     async fn spawn_root_ns_container(
         &self,
         ctx: ContainerSpawnCtx<'_>,
-        service_ports: &[u16],
+        _service_ports: &[u16],
     ) -> Result<RunningContainer> {
-        let ContainerSpawnCtx { entrypoint, cmd_args, env_vars, rootfs_path, container_id, pod_uid, image, container, volumes, run_as_user, run_as_group } = ctx;
-        let isolate_net = use_isolated_network(container, service_ports);
-        let privileged = container
-            .security_context
-            .as_ref()
-            .and_then(|sc| sc.privileged)
-            .unwrap_or(false);
-        let extra_caps: Vec<String> = container
-            .security_context
-            .as_ref()
-            .and_then(|sc| sc.capabilities.as_ref())
-            .and_then(|c| c.add.as_ref())
-            .cloned()
-            .unwrap_or_default();
+        let ContainerSpawnCtx { entrypoint, cmd_args, env_vars, rootfs_path, container_id, pod_uid, image, container_name, volumes, run_as_user, run_as_group, isolate_net, privileged, extra_caps, published_ports } = ctx;
         let (stdout_r, stdout_w) = nix::unistd::pipe().context("Failed to create stdout pipe")?;
         let (stderr_r, stderr_w) = nix::unistd::pipe().context("Failed to create stderr pipe")?;
 
@@ -618,7 +342,7 @@ impl ProcessSupervisor {
 
                 let mut instance = ContainerInstance {
                     container_id: container_id.to_string(),
-                    container_name: container.name.clone(),
+                    container_name: container_name.to_string(),
                     image: image.to_string(),
                     pid: Some(pid),
                     rootfs: rootfs_path.to_string(),
@@ -627,10 +351,8 @@ impl ProcessSupervisor {
                     published_ports: std::collections::HashMap::new(),
                     isolated_net: isolate_net,
                 };
-                let publish_ports = merge_publish_ports(container, service_ports);
-                let (published_ports, port_publish) =
-                    attach_port_publish(pid, &publish_ports);
-                instance.published_ports = published_ports;
+                let (published_ports_map, port_publish) = attach_port_publish(pid, &published_ports);
+                instance.published_ports = published_ports_map;
 
                 Ok(RunningContainer {
                     child: None,
@@ -749,22 +471,9 @@ impl ProcessSupervisor {
     async fn spawn_userns_container(
         &self,
         ctx: ContainerSpawnCtx<'_>,
-        service_ports: &[u16],
+        _service_ports: &[u16],
     ) -> Result<RunningContainer> {
-        let ContainerSpawnCtx { entrypoint, cmd_args, env_vars, rootfs_path, container_id, pod_uid, image, container, volumes, run_as_user, run_as_group } = ctx;
-        let isolate_net = use_isolated_network(container, service_ports);
-        let privileged = container
-            .security_context
-            .as_ref()
-            .and_then(|sc| sc.privileged)
-            .unwrap_or(false);
-        let extra_caps: Vec<String> = container
-            .security_context
-            .as_ref()
-            .and_then(|sc| sc.capabilities.as_ref())
-            .and_then(|c| c.add.as_ref())
-            .cloned()
-            .unwrap_or_default();
+        let ContainerSpawnCtx { entrypoint, cmd_args, env_vars, rootfs_path, container_id, pod_uid, image, container_name, volumes, run_as_user, run_as_group, isolate_net, privileged, extra_caps, published_ports } = ctx;
         let (stdout_r, stdout_w) = nix::unistd::pipe()
             .context("Failed to create stdout pipe")?;
         let (stderr_r, stderr_w) = nix::unistd::pipe()
@@ -851,7 +560,7 @@ impl ProcessSupervisor {
 
                 let mut instance = ContainerInstance {
                     container_id: container_id.to_string(),
-                    container_name: container.name.clone(),
+                    container_name: container_name.to_string(),
                     image: image.to_string(),
                     pid: Some(pid),
                     rootfs: rootfs_path.to_string(),
@@ -860,10 +569,8 @@ impl ProcessSupervisor {
                     published_ports: std::collections::HashMap::new(),
                     isolated_net: isolate_net,
                 };
-                let publish_ports = merge_publish_ports(container, service_ports);
-                let (published_ports, port_publish) =
-                    attach_port_publish(pid, &publish_ports);
-                instance.published_ports = published_ports;
+                let (published_ports_map, port_publish) = attach_port_publish(pid, &published_ports);
+                instance.published_ports = published_ports_map;
 
                 let ready = Arc::new(AtomicBool::new(true));
                 let healthy = Arc::new(Mutex::new(true));
@@ -959,9 +666,11 @@ impl ProcessSupervisor {
         container_id: &str,
         rootfs_path: &str,
         image: &str,
-        container: &Container,
+        container_name: &str,
         env_vars: &[(String, String)],
-        service_ports: &[u16],
+        isolate_net: bool,
+        published_ports: &[u16],
+        probes: &[ProbeConfig],
     ) -> Result<RunningContainer> {
         let pid = child.id().expect("No PID for spawned process");
 
@@ -994,10 +703,9 @@ impl ProcessSupervisor {
             });
         }
 
-        let isolate_net = use_isolated_network(container, service_ports);
         let mut instance = ContainerInstance {
             container_id: container_id.to_string(),
-            container_name: container.name.clone(),
+            container_name: container_name.to_string(),
             image: image.to_string(),
             pid: Some(pid),
             rootfs: rootfs_path.to_string(),
@@ -1006,60 +714,37 @@ impl ProcessSupervisor {
             published_ports: std::collections::HashMap::new(),
             isolated_net: isolate_net,
         };
-        let publish_ports = merge_publish_ports(container, service_ports);
-        let (published_ports, port_publish) = attach_port_publish(pid, &publish_ports);
-        instance.published_ports = published_ports;
+        let (published_ports_map, port_publish) = attach_port_publish(pid, published_ports);
+        instance.published_ports = published_ports_map;
 
         let ready = Arc::new(AtomicBool::new(true));
         let healthy = Arc::new(Mutex::new(true));
 
-        if container.liveness_probe.is_some()
-            || container.readiness_probe.is_some()
-            || container.startup_probe.is_some()
-        {
+        if !probes.is_empty() {
             let p_ready = ready.clone();
             let p_healthy = healthy.clone();
             let cid = container_id.to_string();
-            let container_cfg = container.clone();
+            let probes_owned = probes.to_vec();
             tokio::spawn(async move {
-                let probes = [
-                    container_cfg.liveness_probe.as_ref().map(|p| ("liveness", p)),
-                    container_cfg.readiness_probe.as_ref().map(|p| ("readiness", p)),
-                    container_cfg.startup_probe.as_ref().map(|p| ("startup", p)),
-                ];
-                for (_name, probe) in probes.into_iter().flatten() {
-                    if let Some(config) = ProbeConfig::from_probe(probe) {
-                        tokio::time::sleep(Duration::from_secs(
-                            config.initial_delay_seconds as u64,
-                        ))
-                        .await;
-                        loop {
-                            let status = match &config.action {
-                                ProbeAction::Exec(exec) => {
-                                    HealthChecker::check_exec(
-                                        exec.command.as_deref().unwrap_or(&[]),
-                                        config.timeout(),
-                                    )
-                                    .await
-                                }
-                                ProbeAction::HTTPGet(http) => {
-                                    HealthChecker::check_http(http, config.timeout()).await
-                                }
-                                ProbeAction::TCPSocket(tcp) => {
-                                    HealthChecker::check_tcp(tcp, config.timeout()).await
-                                }
-                            };
-                            let ok = matches!(status, HealthStatus::Healthy);
-                            p_ready.store(ok, Ordering::SeqCst);
-                            *p_healthy.lock().await = ok;
-                            if !ok {
-                                warn!("Probe for {} failed", cid);
+                for config in &probes_owned {
+                    tokio::time::sleep(Duration::from_secs(config.initial_delay_seconds as u64)).await;
+                    loop {
+                        let status = match &config.action {
+                            ProbeAction::Exec(exec) => {
+                                HealthChecker::check_exec(exec.command.as_deref().unwrap_or(&[]), config.timeout()).await
                             }
-                            tokio::time::sleep(Duration::from_secs(
-                                config.period_seconds as u64,
-                            ))
-                            .await;
-                        }
+                            ProbeAction::HTTPGet(http) => {
+                                HealthChecker::check_http(http, config.timeout()).await
+                            }
+                            ProbeAction::TCPSocket(tcp) => {
+                                HealthChecker::check_tcp(tcp, config.timeout()).await
+                            }
+                        };
+                        let ok = matches!(status, HealthStatus::Healthy);
+                        p_ready.store(ok, Ordering::SeqCst);
+                        *p_healthy.lock().await = ok;
+                        if !ok { warn!("Probe for {} failed", cid); }
+                        tokio::time::sleep(Duration::from_secs(config.period_seconds as u64)).await;
                     }
                 }
             });
@@ -1096,33 +781,6 @@ impl ProcessSupervisor {
         container_port
     }
 
-    fn set_resource_limits(&self, pod_uid: &str, containers: &[Container]) -> Result<()> {
-        for container in containers {
-            if let Some(resources) = &container.resources {
-                if let Some(limits) = &resources.limits {
-                    if let Some(memory) = limits.get("memory") {
-                        let bytes = parse_quantity_bytes(memory);
-                        if bytes > 0 {
-                            self.cgroup_manager.set_memory_limit(pod_uid, bytes as i64)?;
-                        }
-                    }
-                    if let Some(cpu) = limits.get("cpu") {
-                        let (quota, period) = parse_quantity_cpu(cpu);
-                        self.cgroup_manager.set_cpu_limit(pod_uid, quota, period)?;
-                    }
-                }
-                if let Some(requests) = &resources.requests {
-                    if let Some(memory) = requests.get("memory") {
-                        let bytes = parse_quantity_bytes(memory);
-                        if bytes > 0 {
-                            self.cgroup_manager.set_memory_low(pod_uid, bytes as i64)?;
-                        }
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
 
     pub async fn stop_container(&self, container_id: &str) {
         let mut running = self.running.lock().await;
@@ -1159,17 +817,18 @@ impl ProcessSupervisor {
     }
 
     pub async fn stop_pod(&self, resource: &AnyResource) {
-        let pod_name = resource.name();
-        for container in &extract_containers(resource) {
-            let cid = format!("{}-{}", pod_name, container.name);
-            self.stop_container(&cid).await;
-            // Clear restart backoff so the next explicit start begins fresh
-            self.restart_counts.lock().await.remove(&cid);
+        let spec = crate::resources::compute::spec_builder::build_spec(resource, &self.store).await;
+        self.stop_pod_from_spec(&spec).await;
+    }
+
+    pub async fn stop_pod_from_spec(&self, spec: &crate::cri::spec::ContainerSpec) {
+        for cfg in &spec.containers {
+            self.stop_container(&cfg.container_id).await;
+            self.restart_counts.lock().await.remove(&cfg.container_id);
         }
-        let pod_uid = resource.uid();
-        self.cgroup_manager.remove_cgroup(&pod_uid).ok();
-        self.store.update_state(&pod_uid, ResourceState::Terminated).await;
-        crate::cri::volumes::cleanup_emptydir(&pod_uid);
+        self.cgroup_manager.remove_cgroup(&spec.pod_uid).ok();
+        self.store.update_state(&spec.pod_uid, ResourceState::Terminated).await;
+        crate::cri::volumes::cleanup_emptydir(&spec.pod_uid);
     }
 
     pub async fn is_pod_running(&self, pod_name: &str) -> bool {

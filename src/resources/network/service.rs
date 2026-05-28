@@ -9,7 +9,6 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tracing::info;
 
-use crate::net::ServiceEndpoint;
 
 struct RunningProxy {
     handle: JoinHandle<()>,

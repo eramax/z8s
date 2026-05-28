@@ -1,5 +1,6 @@
 pub mod deployment;
 pub mod pod;
+pub mod spec_builder;
 
 use crate::api::AnyResource;
 use k8s_openapi::api::core::v1::PodSpec;

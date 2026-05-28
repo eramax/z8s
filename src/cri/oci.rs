@@ -1,6 +1,5 @@
 //! OCI image Entrypoint/Cmd persisted at pull time and merged with Kubernetes overrides.
 
-use k8s_openapi::api::core::v1::Container;
 use serde::{Deserialize, Serialize};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -90,57 +89,4 @@ pub fn guess_image_config(rootfs_path: &str) -> SavedImageConfig {
         }
     }
     SavedImageConfig::default()
-}
-
-/// Resolve argv per Kubernetes rules (command/args override image Entrypoint/Cmd).
-pub fn resolve_argv(container: &Container, rootfs_path: &str) -> (String, Vec<String>) {
-    let img = read_image_config(rootfs_path);
-    let image_ep = img.entrypoint.unwrap_or_default();
-    let image_cmd = img.cmd.unwrap_or_default();
-
-    let k8s_cmd = container.command.clone().unwrap_or_default();
-    let k8s_args = container.args.clone().unwrap_or_default();
-
-    let (program, args) = match (k8s_cmd.is_empty(), k8s_args.is_empty()) {
-        (true, true) => {
-            let ep = if image_ep.is_empty() {
-                vec!["/bin/sh".to_string()]
-            } else {
-                image_ep
-            };
-            let prog = ep[0].clone();
-            let rest: Vec<String> = ep[1..]
-                .iter()
-                .chain(image_cmd.iter())
-                .cloned()
-                .collect();
-            (prog, rest)
-        }
-        (false, true) => {
-            let prog = k8s_cmd[0].clone();
-            let rest = k8s_cmd[1..].to_vec();
-            (prog, rest)
-        }
-        (true, false) => {
-            let ep = if image_ep.is_empty() {
-                vec!["/bin/sh".to_string()]
-            } else {
-                image_ep
-            };
-            let prog = ep[0].clone();
-            let rest: Vec<String> = ep[1..].iter().chain(k8s_args.iter()).cloned().collect();
-            (prog, rest)
-        }
-        (false, false) => {
-            let prog = k8s_cmd[0].clone();
-            let rest: Vec<String> = k8s_cmd[1..]
-                .iter()
-                .chain(k8s_args.iter())
-                .cloned()
-                .collect();
-            (prog, rest)
-        }
-    };
-
-    (program, args)
 }

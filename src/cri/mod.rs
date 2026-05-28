@@ -13,7 +13,6 @@ use anyhow::Result;
 use std::collections::HashMap;
 
 use crate::cri::spec::ContainerSpec;
-use crate::cri::port_publish::PortPublish;
 
 #[async_trait]
 pub trait RuntimeProvider: Send + Sync {

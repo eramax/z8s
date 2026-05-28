@@ -175,7 +175,7 @@ async fn main() -> Result<()> {
 
     // API server
     let store_clone = store.clone();
-    let s2 = supervisor.clone();
+    let _s2 = supervisor.clone();
     let pt2 = process_tracker.clone();
     let net2 = network.clone();
     tokio::spawn(async move {
