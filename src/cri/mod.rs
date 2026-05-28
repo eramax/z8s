@@ -25,5 +25,8 @@ pub trait RuntimeProvider: Send + Sync {
     async fn backend_connect_port(&self, pod_name: &str, port: u16) -> u16;
     async fn get_container_logs(&self, pod_name: &str, container_name: &str) -> Vec<String>;
     async fn pod_restart_counts(&self, pod_name: &str) -> HashMap<String, u32>;
+    async fn unpack_image(&self, image_ref: &str, container_id: &str) -> Result<String>;
+    fn create_pod_cgroup(&self, pod_uid: &str) -> Result<String>;
+    fn remove_cgroup(&self, pod_uid: &str) -> Result<()>;
 }
 

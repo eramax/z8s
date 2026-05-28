@@ -935,4 +935,16 @@ impl RuntimeProvider for ContainerRuntime {
     async fn pod_restart_counts(&self, pod_name: &str) -> HashMap<String, u32> {
         self.supervisor.pod_restart_counts(pod_name).await
     }
+
+    async fn unpack_image(&self, image_ref: &str, container_id: &str) -> Result<String> {
+        self.supervisor.image_manager.unpack_image(image_ref, container_id).await
+    }
+
+    fn create_pod_cgroup(&self, pod_uid: &str) -> Result<String> {
+        self.cgroup_manager.create_pod_cgroup(pod_uid)
+    }
+
+    fn remove_cgroup(&self, pod_uid: &str) -> Result<()> {
+        self.cgroup_manager.remove_cgroup(pod_uid)
+    }
 }

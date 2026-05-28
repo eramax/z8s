@@ -357,16 +357,19 @@ impl crate::net::NetworkEngine for NetworkManager {
         crate::config::dns_port()
     }
 
-    async fn sync_service(&self, svc: &Service) {
+    async fn sync_service(&self, svc: &Service) -> anyhow::Result<()> {
         NetworkManager::sync_service(self, svc).await;
+        Ok(())
     }
 
-    async fn remove_service(&self, ns: &str, name: &str) {
+    async fn remove_service(&self, ns: &str, name: &str) -> anyhow::Result<()> {
         NetworkManager::remove_service(self, ns, name).await;
+        Ok(())
     }
 
-    async fn sync_services_for_labels(&self, ns: &str, labels: &BTreeMap<String, String>) {
+    async fn sync_services_for_labels(&self, ns: &str, labels: &BTreeMap<String, String>) -> anyhow::Result<()> {
         NetworkManager::sync_services_for_labels(self, ns, labels).await;
+        Ok(())
     }
 
     async fn compute_endpoints(&self, svc: &Service) -> k8s_openapi::api::core::v1::Endpoints {

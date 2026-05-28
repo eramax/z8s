@@ -7,22 +7,9 @@ use tracing::{info, warn};
 
 use crate::api::types::{AnyResource, ResourceState, ResourceStore};
 use crate::cri::runtime::RunningContainer;
-use crate::cri::spec::ContainerSpec;
 use crate::cri::RuntimeProvider;
 use crate::net::PodResolver;
 use async_trait::async_trait;
-
-fn build_spec(resource: &AnyResource) -> ContainerSpec {
-    ContainerSpec {
-        pod_name: resource.name().to_string(),
-        pod_uid: resource.uid(),
-        namespace: resource.namespace().to_string(),
-        hostname: resource.name().to_string(),
-        containers: vec![],
-        cgroup_path: String::new(),
-        labels: std::collections::BTreeMap::new(),
-    }
-}
 
 pub struct ProcessTracker {
     pub running: Arc<Mutex<HashMap<String, RunningContainer>>>,
@@ -42,13 +29,15 @@ impl ProcessTracker {
     }
 
     pub async fn start_pod(&self, resource: &AnyResource) -> anyhow::Result<()> {
-        self.cri.start_pod(&build_spec(resource)).await?;
+        let spec = crate::resources::compute::spec_builder::build_spec(resource, &self.store).await;
+        self.cri.start_pod(&spec).await?;
         self.store.update_state(&resource.uid(), ResourceState::Running).await;
         Ok(())
     }
 
     pub async fn stop_pod(&self, resource: &AnyResource) {
-        let _ = self.cri.stop_pod(&build_spec(resource)).await;
+        let spec = crate::resources::compute::spec_builder::build_spec(resource, &self.store).await;
+        let _ = self.cri.stop_pod(&spec).await;
         self.store.update_state(&resource.uid(), ResourceState::Terminated).await;
     }
 
