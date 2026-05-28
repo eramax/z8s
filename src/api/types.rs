@@ -145,18 +145,26 @@ pub fn extract_containers(resource: &AnyResource) -> Vec<Container> {
 /// Parse a k8s resource Quantity string into bytes.
 pub fn parse_quantity_bytes(q: &Quantity) -> u64 {
     let s = q.0.trim();
-    if let Some(rest) = s.strip_suffix("Ki") {
-        rest.parse::<u64>().unwrap_or(0) * 1024
-    } else if let Some(rest) = s.strip_suffix("Mi") {
-        rest.parse::<u64>().unwrap_or(0) * 1024 * 1024
+    if let Some(rest) = s.strip_suffix("Ti") {
+        rest.parse::<u64>().unwrap_or(0) * 1024u64.pow(4)
     } else if let Some(rest) = s.strip_suffix("Gi") {
-        rest.parse::<u64>().unwrap_or(0) * 1024 * 1024 * 1024
-    } else if let Some(rest) = s.strip_suffix('k') {
-        rest.parse::<u64>().unwrap_or(0) * 1000
-    } else if let Some(rest) = s.strip_suffix('M') {
-        rest.parse::<u64>().unwrap_or(0) * 1_000_000
+        rest.parse::<u64>().unwrap_or(0) * 1024u64.pow(3)
+    } else if let Some(rest) = s.strip_suffix("Mi") {
+        rest.parse::<u64>().unwrap_or(0) * 1024u64.pow(2)
+    } else if let Some(rest) = s.strip_suffix("Ki") {
+        rest.parse::<u64>().unwrap_or(0) * 1024
+    } else if let Some(rest) = s.strip_suffix("Pi") {
+        rest.parse::<u64>().unwrap_or(0) * 1024u64.pow(5)
+    } else if let Some(rest) = s.strip_suffix("Ei") {
+        rest.parse::<u64>().unwrap_or(0) * 1024u64.pow(6)
+    } else if let Some(rest) = s.strip_suffix('T') {
+        rest.parse::<u64>().unwrap_or(0) * 1_000_000_000_000
     } else if let Some(rest) = s.strip_suffix('G') {
         rest.parse::<u64>().unwrap_or(0) * 1_000_000_000
+    } else if let Some(rest) = s.strip_suffix('M') {
+        rest.parse::<u64>().unwrap_or(0) * 1_000_000
+    } else if let Some(rest) = s.strip_suffix('k') {
+        rest.parse::<u64>().unwrap_or(0) * 1000
     } else {
         s.parse::<u64>().unwrap_or(0)
     }

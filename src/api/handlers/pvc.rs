@@ -54,6 +54,9 @@ pub async fn create_pvc(
     if pvc.metadata.namespace.is_none() {
         pvc.metadata.namespace = Some(namespace);
     }
+    if pvc.metadata.uid.is_none() {
+        pvc.metadata.uid = Some(uuid::Uuid::new_v4().to_string());
+    }
     if pvc.metadata.creation_timestamp.is_none() {
         pvc.metadata.creation_timestamp = Some(now_time());
     }
@@ -70,6 +73,7 @@ pub async fn delete_pvc(
     let trackers = state.store.get_by_kind("PersistentVolumeClaim").await;
     for t in &trackers {
         if t.resource.namespace() == namespace && t.resource.name() == name {
+            state.registry.on_delete(&state.ctx, &t.resource).await;
             state.store.delete(&t.resource).await.ok();
             return Ok(Json(ok_status()));
         }

@@ -33,8 +33,14 @@ pub async fn create_pv(
     raw: axum::body::Bytes,
 ) -> Result<axum::response::Response, ApiError> {
     let body = parse_body(&raw)?;
-    let pv: PersistentVolume = serde_json::from_value(body)
+    let mut pv: PersistentVolume = serde_json::from_value(body)
         .map_err(|e| ApiError::bad_request(format!("invalid PersistentVolume: {}", e)))?;
+    if pv.metadata.uid.is_none() {
+        pv.metadata.uid = Some(uuid::Uuid::new_v4().to_string());
+    }
+    if pv.metadata.creation_timestamp.is_none() {
+        pv.metadata.creation_timestamp = Some(now_time());
+    }
     let resource = AnyResource::PersistentVolume(pv);
     state.store.apply(resource.clone()).await.map_err(|e| ApiError::bad_request(e.to_string()))?;
     state.registry.on_apply(&state.ctx, &resource).await;
@@ -48,6 +54,7 @@ pub async fn delete_pv(
     let trackers = state.store.get_by_kind("PersistentVolume").await;
     for t in &trackers {
         if t.resource.name() == name {
+            state.registry.on_delete(&state.ctx, &t.resource).await;
             state.store.delete(&t.resource).await.ok();
             return Ok(Json(ok_status()));
         }

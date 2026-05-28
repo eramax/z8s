@@ -52,12 +52,16 @@ impl Component for PvcResource {
         let pv = find_matching_pv(&pvc, &pv_trackers);
         let Some(pv) = pv else { return Ok(()) };
 
-        let pv_name = pv.metadata.name.as_deref().unwrap_or("").to_string();
+        let pv_name = match pv.metadata.name.as_deref() {
+            Some(n) => n.to_string(),
+            None => return Ok(()),
+        };
         let pvc_namespace = pvc.metadata.namespace.as_deref().unwrap_or("default").to_string();
         let pvc_name = pvc.metadata.name.as_deref().unwrap_or("").to_string();
 
         let mut updated_pv = pv;
-        updated_pv.spec.as_mut().unwrap().claim_ref = Some(ObjectReference {
+        let Some(pv_spec) = updated_pv.spec.as_mut() else { return Ok(()) };
+        pv_spec.claim_ref = Some(ObjectReference {
             kind: Some("PersistentVolumeClaim".to_string()),
             name: Some(pvc_name.clone()),
             namespace: Some(pvc_namespace.clone()),
@@ -69,7 +73,8 @@ impl Component for PvcResource {
         });
 
         let mut updated_pvc = pvc.clone();
-        updated_pvc.spec.as_mut().unwrap().volume_name = Some(pv_name.clone());
+        let Some(pvc_spec) = updated_pvc.spec.as_mut() else { return Ok(()) };
+        pvc_spec.volume_name = Some(pv_name.clone());
         updated_pvc.status = Some(PersistentVolumeClaimStatus {
             phase: Some("Bound".to_string()),
             capacity: updated_pv.spec.as_ref().and_then(|s| s.capacity.clone()),
@@ -82,7 +87,25 @@ impl Component for PvcResource {
         Ok(())
     }
 
-    async fn on_delete(&self, _ctx: &ReconcileContext, _resource: &AnyResource) -> Result<()> {
+    async fn on_delete(&self, ctx: &ReconcileContext, resource: &AnyResource) -> Result<()> {
+        let pvc = match resource {
+            AnyResource::PersistentVolumeClaim(p) => p,
+            _ => return Ok(()),
+        };
+        let vol_name = match pvc.spec.as_ref().and_then(|s| s.volume_name.as_ref()) {
+            Some(n) => n.clone(),
+            None => return Ok(()),
+        };
+        let pv_trackers = self.store.get_by_kind("PersistentVolume").await;
+        for t in &pv_trackers {
+            if t.resource.name() == vol_name {
+                if let AnyResource::PersistentVolume(ref pv) = t.resource {
+                    ctx.vol.deprovision_pv(pv).await.ok();
+                }
+                let _ = self.store.delete(&t.resource).await;
+                break;
+            }
+        }
         Ok(())
     }
 }
