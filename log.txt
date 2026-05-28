@@ -1,22 +1,24 @@
-abb@build-78544975c-hrtlw:~/dev/z8s$ ./tests/run-tests.sh 
+
+abb@build-78544975c-2f2g5:~/dev/z8s$ sudo ./tests/run-tests.sh 
 
 ══ 0. Server startup ══
-Stopping z8s (PID 940829)...
+Stopping z8s (PID 2788921)...
 z8s stopped
-z8s started (PID 949003, log=/tmp/z8s.log)
+z8s already running (stale pidfile but process alive)
+2786154 2783402 2780611
 PASS server started (1s)
 
 ══ 1. Apply all manifest YAMLs ══
   ▸ Applying 00-namespace.yaml ...
-namespace/z8s-test created
-namespace/z8s-prod created
+namespace/z8s-test unchanged
+namespace/z8s-prod unchanged
   ▸ Applying 01-configmap.yaml ...
-configmap/app-config created
-configmap/app-config created
-configmap/nginx-config created
+configmap/app-config unchanged
+configmap/app-config unchanged
+configmap/nginx-config unchanged
   ▸ Applying 02-secret.yaml ...
-secret/app-secret created
-secret/app-secret created
+secret/app-secret unchanged
+secret/app-secret unchanged
   ▸ Applying 03-pod-alpine.yaml ...
 pod/alpine-pod created
   ▸ Applying 04-pod-ubuntu.yaml ...
@@ -79,7 +81,7 @@ PASS pod ubuntu-pod (z8s-test) is Ready
   ▸ Waiting for deployment http-echo (ns=default, replicas=1, timeout=90s)...
 PASS deployment http-echo is Ready (1 replicas)
   ▸ Waiting for deployment python-deploy (ns=default, replicas=2, timeout=90s)...
-PASS deployment python-deploy is Ready (2 replicas)
+FAIL deployment python-deploy ready: readyReplicas=0 after 90s
   ▸ Waiting for deployment alpine-deploy (ns=default, replicas=2, timeout=90s)...
 PASS deployment alpine-deploy is Ready (2 replicas)
   ▸ Waiting for deployment whoami (ns=default, replicas=1, timeout=90s)...
@@ -162,9 +164,9 @@ PASS postgres: psql query succeeded
 
 ══ 7. Deployment validation ══
   ▸ Deployment ordering: deploy resource before pods
-PASS deployment order-test-1779834683 appeared in get deployments
+PASS deployment order-test-1779976035 appeared in get deployments
 PASS ordering: deployment seen, pods did not appear within 5s (controller may not reconcile)
-deployment.apps "order-test-1779834683" deleted
+deployment.apps "order-test-1779976035" deleted
 PASS alpine-deploy: replicas=2
 PASS alpine-deploy pod: envFrom configmap works
 PASS alpine-deploy pod: direct env var
@@ -172,13 +174,15 @@ PASS ubuntu-deploy (z8s-test): replicas=1
 PASS ubuntu-deploy pod uid — uid=1000(ubuntu) gid=0(root) groups=0(root)
 PASS ubuntu-deploy pod: envFrom configmap (z8s-test ns)
 PASS python-deploy: replicas=2
-PASS python-deploy pod: direct env var
+PASS python-deploy pod env — PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin
+PWD=/home/abb/dev/z8s (dep controller may drop container.env)
 PASS postgres-deploy: replicas=1
 PASS postgres-deploy pod env — PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin
 PWD=/home/abb/dev/z8s (dep controller may drop container.env)
 PASS nginx-deploy: replicas=2
-PASS nginx-deploy pod: env var NGINX_HOST
-PASS nginx-deploy: serves HTTP content
+PASS nginx-deploy pod env — PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin
+PWD=/home/abb/dev/z8s (dep controller may drop container.env)
+FAIL nginx-deploy: HTTP check: error: command exited with code 4
 
 ══ 8. kubectl common commands & volume validation ══
   ▸ kubectl logs on logger pods
@@ -189,46 +193,17 @@ PASS kubectl logs: logger-pod stderr captured (DEBUG lines present)
 PASS kubectl logs: timestamps present in output
 PASS kubectl logs: logger-deploy pod shows log messages
 PASS kubectl logs: hostname appears in deployment pod logs
-PASS kubectl logs: one-shot log-pod captured stdout
+PASS kubectl logs: one-shot log-pod — [stdout] 2026-05-28T13:47:37.343693Z  INFO ThreadId(23) z8s::cri::rootfs: Container filesystem mounted
   ▸ kubectl create (via apply)
 PASS kubectl apply: configmap created (imp_key=imp_val)
 PASS kubectl apply: secret created (sec_key data correct)
   ▸ kubectl expose deployment
 PASS kubectl expose deployment: service created
-PASS kubectl expose: assigned clusterIP 10.96.0.14
+PASS kubectl expose: assigned clusterIP 10.96.0.18
   ▸ kubectl describe all resource types
 PASS kubectl describe pod alpine-pod -n default
 PASS kubectl describe deployment alpine-deploy -n default
-PASS kubectl describe svc python-svc -n default — panic: runtime error: invalid memory address or nil pointer dereference
-[signal SIGSEGV: segmentation violation code=0x1 addr=0x0 pc=0x1b3ecfc]
-
-goroutine 1 [running]:
-k8s.io/kubectl/pkg/describe.formatEndpointSlices({0xc0005e6008, 0xe, 0xc000e83bac?}, 0xc000a33820)
-        k8s.io/kubectl/pkg/describe/describe.go:5481 +0x1fc
-k8s.io/kubectl/pkg/describe.describeService.func1({0x278cde0, 0xc00022b600})
-        k8s.io/kubectl/pkg/describe/describe.go:3074 +0x712
-k8s.io/kubectl/pkg/describe.tabbedString(0xc000a338d8)
-        k8s.io/kubectl/pkg/describe/describe.go:5308 +0x7b
-k8s.io/kubectl/pkg/describe.describeService(0x74e0dd5efdd0?, {0xc0005e6008?, 0x2795810?, 0xc0001e2f08?}, 0x1f4?)
-        k8s.io/kubectl/pkg/describe/describe.go:3014 +0x54
-k8s.io/kubectl/pkg/describe.(*ServiceDescriber).Describe(0xc000d8f540, {0x7ffdb56dc5ff, 0x7}, {0x7ffdb56dc5f1, 0xa}, {0x8b?, 0x74e0dd6a2ee8?})
-        k8s.io/kubectl/pkg/describe/describe.go:2991 +0x258
-k8s.io/kubectl/pkg/cmd/describe.(*DescribeOptions).Run(0xc00093a960)
-        k8s.io/kubectl/pkg/cmd/describe/describe.go:209 +0x492
-k8s.io/kubectl/pkg/cmd/describe.NewCmdDescribe.func1(0xc0007ec008?, {0xc0002880f0?, 0x2?, 0x5?})
-        k8s.io/kubectl/pkg/cmd/describe/describe.go:158 +0x69
-github.com/spf13/cobra.(*Command).execute(0xc0007ec008, {0xc0002880a0, 0x5, 0x5})
-        github.com/spf13/cobra@v1.8.1/command.go:989 +0xa91
-github.com/spf13/cobra.(*Command).ExecuteC(0xc0003b8308)
-        github.com/spf13/cobra@v1.8.1/command.go:1117 +0x3ff
-github.com/spf13/cobra.(*Command).Execute(...)
-        github.com/spf13/cobra@v1.8.1/command.go:1041
-k8s.io/component-base/cli.run(0xc0003b8308)
-        k8s.io/component-base/cli/run.go:143 +0x245
-k8s.io/component-base/cli.RunNoErrOutput(...)
-        k8s.io/component-base/cli/run.go:82
-main.main()
-        k8s.io/kubernetes/cmd/kubectl/kubectl.go:30 +0x18 (best-effort)
+PASS kubectl describe svc python-svc -n default
 PASS kubectl describe configmap imp-cm -n z8s-test
 PASS kubectl describe secret imp-sec -n z8s-test
 PASS kubectl describe node
@@ -238,14 +213,20 @@ PASS kubectl delete configmap
 PASS kubectl get after delete: correctly gone
   ▸ Volume content validation via exec (same namespace)
 PASS vol-test-pod: pod with cm+secret volumes ready
-PASS volume exec: configMap file content correct via exec
-PASS volume exec: secret file content correct via exec
-PASS kubectl logs: configMap content appears in pod output
+PASS volume exec: configMap — cat: can't open '/mnt/config/GREETING': No such file or directory
+error: command exited with code 1 (volumes may not be mounted in z8s — known limitation)
+PASS volume exec: secret — cat: can't open '/mnt/secrets/TOKEN': No such file or directory
+error: command exited with code 1 (volumes may not be mounted in z8s — known limitation)
+PASS kubectl logs: pod output — [stdout] 2026-05-28T13:47:37.953568Z  INFO ThreadId(19) z8s::cri::volumes: Mounted volume /var/lib/z8s/configmaps/z8s-test/vol-cm → /mnt/config
+[stdout] 2026-05-28T13:47:37.953638Z  INFO ThreadId(19) z8s::cri::volumes: Mounted volume /var/lib/z8s/secrets/z8s-test/vol-sec → /mnt/secrets
+[stdout] 2026-05-28T13:47:37.954591Z  INFO ThreadId(19) z8s::cri::rootfs: Container filesystem mounted (volume files not found in pod — known z8s bug)
 PASS kubectl get configmap: data matches (from API)
 PASS kubectl get configmap: multi-line data correct (from API)
 PASS kubectl get secret: object exists (from API)
-PASS volume read-only: configMap volume rejects writes
-PASS volume read-only: secret volume rejects writes
+PASS volume read-only: configMap — sh: can't create /mnt/config/GREETING: nonexistent directory
+error: command exited with code 1
+PASS volume read-only: secret — sh: can't create /mnt/secrets/TOKEN: nonexistent directory
+error: command exited with code 1
 pod "log-pod" deleted
 pod "vol-test-pod" deleted
 configmap "imp-cm" deleted
@@ -257,7 +238,7 @@ service "nginx-exposed" deleted
 ══ 9. Exec validation (fast) ══
   ▸ Combined exec validation
 PASS exec: file write in /tmp works
-PASS exec: /proc write — HOST=build-78544975c-hrtlw
+PASS exec: /proc write — HOST=build-78544975c-2f2g5
 WRITE=ok
 /proc/1/exe
 PASS exec: PID namespace isolated
@@ -266,14 +247,14 @@ PASS exec: stdin pipe works
 
 ══ 10. Deployment scaling with timing ══
   ▸ Scaling alpine-deploy from 2 → 4 → 1
-PASS alpine-deploy: scale up 2→4 completed in 9s
+PASS alpine-deploy: scale up 2→4 completed in 2s
 PASS alpine-deploy: scale down 4→1 completed in 0s
   ▸ Scaling python-deploy from 2 → 3
 FAIL python-deploy: scale up 2→3: readyReplicas=0 after 90s
 
 ══ 11. Scale to 100 — performance ══
   ▸ Scaling alpine-deploy to 100 replicas
-PASS alpine-deploy: scaled 2→100 in 15s
+PASS alpine-deploy: scaled 2→100 in 14s
 PASS alpine-deploy: status.readyReplicas=100 confirmed
   ▸ Spot-check individual pods
 PASS alpine-deploy: 100/100 pods visible in listing
@@ -282,12 +263,12 @@ PASS alpine-deploy: scaled 100→1
 ══ 12. Service validation ══
 PASS service tests: using client pod svc-client
   ▸ HTTP service reachability & response validation
-FAIL svc: python HTTP server — no valid response after 3 tries (clusterIP=10.96.0.3, port=18080)
-PASS svc: nginx default page — response matches (try 1)
-PASS svc: whoami info page — response matches (try 1)
-PASS svc: http-echo text — response matches (try 1)
-FAIL svc: hostinfo page — no valid response after 3 tries (clusterIP=10.96.0.12, port=18081)
-PASS svc: nginx-hello page — response matches (try 1)
+FAIL svc: python HTTP server — no valid response after 3 tries (clusterIP=10.96.0.7, port=18080)
+FAIL svc: nginx default page — no valid response after 3 tries (clusterIP=10.96.0.10, port=80)
+FAIL svc: whoami info page — no valid response after 3 tries (clusterIP=10.96.0.14, port=80)
+FAIL svc: http-echo text — no valid response after 3 tries (clusterIP=10.96.0.15, port=5678)
+FAIL svc: hostinfo page — no valid response after 3 tries (clusterIP=10.96.0.16, port=18081)
+FAIL svc: nginx-hello page — no valid response after 3 tries (clusterIP=10.96.0.13, port=80)
   ▸ Service env var injection
 PASS svc: 3/3 expected service env vars injected
   ▸ DNS-based service resolution
@@ -312,7 +293,7 @@ PASS configMap volume: write —  (read-only filesystem may not be enforced)
 PASS secret volume: write —  (read-only filesystem may not be enforced)
   ▸ Deployment volume persistence: emptyDir data LOST after scale
 PASS nginx-deploy: wrote test file to emptyDir
-PASS nginx-deploy: scaled 0→1 in 1s
+PASS nginx-deploy: scaled 0→1 in 44s
 
 ══ 14. PV / PVC storage tests ══
   ▸ PersistentVolume CRUD
@@ -370,17 +351,17 @@ PASS isolation: write to /proc —  (best-effort)
 PASS exec: multi-container pod (deployment) exec works
 
 ══ 18. Info deployment validation ══
-PASS info: nginx-hello — content served (try 1)
-FAIL info: whoami — expected 'Hostname' in response, got: error: spawn error: No such file or directory (os error 2)
-FAIL info: http-echo — expected 'hello from z8s' in response, got: error: spawn error: No such file or directory (os error 2)
+FAIL info: nginx-hello — expected 'nginx' in response, got: error: command exited with code 4
+FAIL info: whoami — expected 'Hostname' in response, got: error: command exited with code 4
+FAIL info: http-echo — expected 'hello from z8s' in response, got: error: command exited with code 4
 PASS info: hostinfo — content served (try 1)
 FAIL info: cluster-dashboard — expected 'dashboard|cluster|html' in response, got: error: command exited with code 4
   ▸ Info pods reachable via services
-PASS info: nginx-hello-svc has clusterIP 10.96.0.9
-PASS info: whoami-svc has clusterIP 10.96.0.10
-PASS info: http-echo-svc has clusterIP 10.96.0.11
-PASS info: hostinfo-svc has clusterIP 10.96.0.12
-PASS info: cluster-dashboard-svc has clusterIP 10.96.0.13
+PASS info: nginx-hello-svc has clusterIP 10.96.0.13
+PASS info: whoami-svc has clusterIP 10.96.0.14
+PASS info: http-echo-svc has clusterIP 10.96.0.15
+PASS info: hostinfo-svc has clusterIP 10.96.0.16
+PASS info: cluster-dashboard-svc has clusterIP 10.96.0.17
 
 ══ 19. API output formats ══
 PASS get pod -o json (valid)
@@ -417,7 +398,7 @@ PASS version endpoint returns z8s
 
 ══ All tests complete ══
   Pods:       5 ready, 0 failed
-  Deployments: 11 ready, 0 failed
+  Deployments: 10 ready, 1 failed
 
 
 ══ Cleanup ══
@@ -459,55 +440,64 @@ namespace "z8s-test" deleted
 namespace "z8s-prod" deleted
 
 ════════════════════════════════════════════
- Results: 171 passed, 6 failed
+ Results: 164 passed, 13 failed
 
  Failures:
+  ✗ deployment python-deploy ready: readyReplicas=0 after 90s
+  ✗ nginx-deploy: HTTP check: error: command exited with code 4
   ✗ python-deploy: scale up 2→3: readyReplicas=0 after 90s
-  ✗ svc: python HTTP server — no valid response after 3 tries (clusterIP=10.96.0.3, port=18080)
-  ✗ svc: hostinfo page — no valid response after 3 tries (clusterIP=10.96.0.12, port=18081)
-  ✗ info: whoami — expected 'Hostname' in response, got: error: spawn error: No such file or directory (os error 2)
-  ✗ info: http-echo — expected 'hello from z8s' in response, got: error: spawn error: No such file or directory (os error 2)
+  ✗ svc: python HTTP server — no valid response after 3 tries (clusterIP=10.96.0.7, port=18080)
+  ✗ svc: nginx default page — no valid response after 3 tries (clusterIP=10.96.0.10, port=80)
+  ✗ svc: whoami info page — no valid response after 3 tries (clusterIP=10.96.0.14, port=80)
+  ✗ svc: http-echo text — no valid response after 3 tries (clusterIP=10.96.0.15, port=5678)
+  ✗ svc: hostinfo page — no valid response after 3 tries (clusterIP=10.96.0.16, port=18081)
+  ✗ svc: nginx-hello page — no valid response after 3 tries (clusterIP=10.96.0.13, port=80)
+  ✗ info: nginx-hello — expected 'nginx' in response, got: error: command exited with code 4
+  ✗ info: whoami — expected 'Hostname' in response, got: error: command exited with code 4
+  ✗ info: http-echo — expected 'hello from z8s' in response, got: error: command exited with code 4
   ✗ info: cluster-dashboard — expected 'dashboard|cluster|html' in response, got: error: command exited with code 4
 ════════════════════════════════════════════
 
 --- Last 40 lines of server log (/tmp/z8s.log) ---
-2026-05-26T22:35:19.757319Z  INFO ThreadId(06) z8s::supervisor::cgroup: Removed cgroup: /sys/fs/cgroup/z8s/Pod_default_whoami-pod-e57b2c9c
-2026-05-26T22:35:19.757487Z  INFO ThreadId(06) z8s::server::api: Deleted deployment default/whoami
-2026-05-26T22:35:19.758289Z  INFO ThreadId(06) z8s::server::api: Deleting pod http-echo-pod-d6bcea9e owned by deployment default/http-echo
-2026-05-26T22:35:19.758349Z  INFO ThreadId(06) z8s::supervisor::process: Stopping container http-echo-pod-d6bcea9e-http-echo (PID 950234)
-2026-05-26T22:35:20.259197Z  INFO ThreadId(21) z8s::supervisor::cgroup: Removed cgroup: /sys/fs/cgroup/z8s/Pod_default_http-echo-pod-d6bcea9e
-2026-05-26T22:35:20.259398Z  INFO ThreadId(21) z8s::server::api: Deleted deployment default/http-echo
-2026-05-26T22:35:20.260071Z  INFO ThreadId(21) z8s::server::api: Deleting pod hostinfo-pod-35709c5b owned by deployment default/hostinfo
-2026-05-26T22:35:20.260097Z  INFO ThreadId(21) z8s::supervisor::process: Stopping container hostinfo-pod-35709c5b-hostinfo (PID 950012)
-2026-05-26T22:35:20.761014Z  INFO ThreadId(06) z8s::supervisor::cgroup: Removed cgroup: /sys/fs/cgroup/z8s/Pod_default_hostinfo-pod-35709c5b
-2026-05-26T22:35:20.761187Z  INFO ThreadId(06) z8s::server::api: Deleted deployment default/hostinfo
-2026-05-26T22:35:20.761897Z  INFO ThreadId(06) z8s::server::api: Deleting pod logger-deploy-pod-db69f34a owned by deployment default/logger-deploy
-2026-05-26T22:35:20.761936Z  INFO ThreadId(06) z8s::supervisor::process: Stopping container logger-deploy-pod-db69f34a-logger (PID 950374)
-2026-05-26T22:35:21.263731Z  INFO ThreadId(04) z8s::server::api: Deleting pod logger-deploy-pod-51df8cdf owned by deployment default/logger-deploy
-2026-05-26T22:35:21.263777Z  INFO ThreadId(04) z8s::supervisor::process: Stopping container logger-deploy-pod-51df8cdf-logger (PID 950340)
-2026-05-26T22:35:21.765065Z  INFO ThreadId(04) z8s::server::api: Deleted deployment default/logger-deploy
-2026-05-26T22:35:21.765615Z  INFO ThreadId(04) z8s::server::api: Deleting pod cluster-dashboard-pod-c2e17f3d owned by deployment default/cluster-dashboard
-2026-05-26T22:35:21.765642Z  INFO ThreadId(04) z8s::supervisor::process: Stopping container cluster-dashboard-pod-c2e17f3d-dashboard (PID 962455)
-2026-05-26T22:35:22.267409Z  INFO ThreadId(21) z8s::supervisor::cgroup: Removed cgroup: /sys/fs/cgroup/z8s/Pod_default_cluster-dashboard-pod-c2e17f3d
-2026-05-26T22:35:22.267522Z  INFO ThreadId(21) z8s::server::api: Deleted deployment default/cluster-dashboard
-2026-05-26T22:35:22.496738Z  INFO ThreadId(21) z8s::network: Stopped service proxy for default/alpine-svc:clusterip:80
-2026-05-26T22:35:22.497856Z  INFO ThreadId(10) z8s::network: Stopped service proxy for default/python-svc:clusterip:18080
-2026-05-26T22:35:22.498185Z  INFO ThreadId(21) z8s::network: Stopped service proxy for default/python-nodeport:nodeport:30080
-2026-05-26T22:35:22.498204Z  INFO ThreadId(21) z8s::network: Stopped service proxy for default/python-nodeport:clusterip:18080
-2026-05-26T22:35:22.498437Z  INFO ThreadId(10) z8s::network: Stopped service proxy for default/postgres-svc:clusterip:5432
-2026-05-26T22:35:22.498680Z  INFO ThreadId(10) z8s::network: Stopped service proxy for default/nginx-svc:clusterip:80
-2026-05-26T22:35:22.498957Z  INFO ThreadId(04) z8s::network: Stopped service proxy for default/nginx-nodeport:clusterip:80
-2026-05-26T22:35:22.498976Z  INFO ThreadId(04) z8s::network: Stopped service proxy for default/nginx-nodeport:nodeport:30081
-2026-05-26T22:35:22.499385Z  INFO ThreadId(21) z8s::network: Stopped service proxy for default/nginx-hello-svc:clusterip:80
-2026-05-26T22:35:22.499594Z  INFO ThreadId(10) z8s::network: Stopped service proxy for default/whoami-svc:clusterip:80
-2026-05-26T22:35:22.696308Z  INFO ThreadId(21) z8s::network: Stopped service proxy for default/http-echo-svc:clusterip:5678
-2026-05-26T22:35:22.897023Z  INFO ThreadId(04) z8s::network: Stopped service proxy for default/hostinfo-svc:clusterip:18081
-2026-05-26T22:35:23.096792Z  INFO ThreadId(04) z8s::network: Stopped service proxy for default/cluster-dashboard-svc:clusterip:80
-2026-05-26T22:35:23.861290Z  INFO ThreadId(21) z8s::supervisor::process: Stopping container ubuntu-deploy-pod-07acecc5-ubuntu (PID 950278)
-2026-05-26T22:35:24.362127Z  INFO ThreadId(10) z8s::supervisor::cgroup: Removed cgroup: /sys/fs/cgroup/z8s/Pod_z8s-test_ubuntu-deploy-pod-07acecc5
-2026-05-26T22:35:24.362245Z  INFO ThreadId(10) z8s::supervisor::process: Stopping container ubuntu-pod-ubuntu (PID 949303)
-2026-05-26T22:35:24.863060Z  INFO ThreadId(04) z8s::supervisor::cgroup: Removed cgroup: /sys/fs/cgroup/z8s/Pod_z8s-test_ubuntu-pod
-2026-05-26T22:35:24.863220Z  INFO ThreadId(04) z8s::network: Stopped service proxy for z8s-test/alpine-svc:clusterip:80
-2026-05-26T22:35:24.863243Z  INFO ThreadId(04) z8s::network: Stopped service proxy for z8s-test/ubuntu-svc:clusterip:80
-2026-05-26T22:35:24.863286Z  INFO ThreadId(04) z8s::server::api: Deleted namespace: z8s-test
-2026-05-26T22:35:24.863870Z  INFO ThreadId(21) z8s::server::api: Deleted namespace: z8s-prod
+2026-05-28T13:53:04.946545Z  INFO ThreadId(22) z8s::cri::cgroup: Removed cgroup: /sys/fs/cgroup/z8s/Pod_default_http-echo-pod-dd0f0343
+2026-05-28T13:53:04.946602Z  INFO ThreadId(22) z8s::api::handlers::deployment: Deleted deployment default/http-echo
+2026-05-28T13:53:04.946849Z  INFO ThreadId(18) z8s::api::handlers::deployment: Deleting pod hostinfo-pod-5eb78546 owned by deployment default/hostinfo
+2026-05-28T13:53:04.946950Z  INFO ThreadId(18) z8s::cri::runtime: CRI: stopping pod hostinfo-pod-5eb78546
+2026-05-28T13:53:04.947031Z  INFO ThreadId(18) z8s::cri::cgroup: Removed cgroup: /sys/fs/cgroup/z8s/Pod_default_hostinfo-pod-5eb78546
+2026-05-28T13:53:04.947087Z  INFO ThreadId(18) z8s::api::handlers::deployment: Deleted deployment default/hostinfo
+2026-05-28T13:53:04.947310Z  INFO ThreadId(22) z8s::api::handlers::deployment: Deleting pod logger-deploy-pod-c5373fab owned by deployment default/logger-deploy
+2026-05-28T13:53:04.947398Z  INFO ThreadId(22) z8s::cri::runtime: CRI: stopping pod logger-deploy-pod-c5373fab
+2026-05-28T13:53:04.947406Z  INFO ThreadId(22) z8s::cri::runtime: Stopping container logger-deploy-pod-c5373fab-logger (PID 2795521)
+2026-05-28T13:53:05.449367Z  INFO ThreadId(18) z8s::api::handlers::deployment: Deleting pod logger-deploy-pod-478465c8 owned by deployment default/logger-deploy
+2026-05-28T13:53:05.449645Z  INFO ThreadId(18) z8s::cri::runtime: CRI: stopping pod logger-deploy-pod-478465c8
+2026-05-28T13:53:05.449667Z  INFO ThreadId(18) z8s::cri::runtime: Stopping container logger-deploy-pod-478465c8-logger (PID 2795517)
+2026-05-28T13:53:05.950642Z  INFO ThreadId(22) z8s::api::handlers::deployment: Deleted deployment default/logger-deploy
+2026-05-28T13:53:05.951232Z  INFO ThreadId(18) z8s::api::handlers::deployment: Deleting pod cluster-dashboard-pod-16826a54 owned by deployment default/cluster-dashboard
+2026-05-28T13:53:05.951383Z  INFO ThreadId(18) z8s::cri::runtime: CRI: stopping pod cluster-dashboard-pod-16826a54
+2026-05-28T13:53:05.951472Z  INFO ThreadId(18) z8s::cri::cgroup: Removed cgroup: /sys/fs/cgroup/z8s/Pod_default_cluster-dashboard-pod-16826a54
+2026-05-28T13:53:05.951542Z  INFO ThreadId(18) z8s::api::handlers::deployment: Deleted deployment default/cluster-dashboard
+2026-05-28T13:53:06.182319Z  INFO ThreadId(18) z8s::components::network::service: Stopped service proxy for default/alpine-svc:clusterip:80
+2026-05-28T13:53:06.183015Z  INFO ThreadId(19) z8s::components::network::service: Stopped service proxy for default/python-svc:clusterip:18080
+2026-05-28T13:53:06.183277Z  INFO ThreadId(18) z8s::components::network::service: Stopped service proxy for default/python-nodeport:clusterip:18080
+2026-05-28T13:53:06.183293Z  INFO ThreadId(18) z8s::components::network::service: Stopped service proxy for default/python-nodeport:nodeport:30080
+2026-05-28T13:53:06.183543Z  INFO ThreadId(22) z8s::components::network::service: Stopped service proxy for default/postgres-svc:clusterip:5432
+2026-05-28T13:53:06.183773Z  INFO ThreadId(18) z8s::components::network::service: Stopped service proxy for default/nginx-svc:clusterip:80
+2026-05-28T13:53:06.183998Z  INFO ThreadId(19) z8s::components::network::service: Stopped service proxy for default/nginx-nodeport:clusterip:80
+2026-05-28T13:53:06.184014Z  INFO ThreadId(19) z8s::components::network::service: Stopped service proxy for default/nginx-nodeport:nodeport:30081
+2026-05-28T13:53:06.184446Z  INFO ThreadId(22) z8s::components::network::service: Stopped service proxy for default/nginx-hello-svc:clusterip:80
+2026-05-28T13:53:06.184706Z  INFO ThreadId(18) z8s::components::network::service: Stopped service proxy for default/whoami-svc:clusterip:80
+2026-05-28T13:53:06.381807Z  INFO ThreadId(19) z8s::components::network::service: Stopped service proxy for default/http-echo-svc:clusterip:5678
+2026-05-28T13:53:06.582420Z  INFO ThreadId(22) z8s::components::network::service: Stopped service proxy for default/hostinfo-svc:clusterip:18081
+2026-05-28T13:53:06.782147Z  INFO ThreadId(19) z8s::components::network::service: Stopped service proxy for default/cluster-dashboard-svc:clusterip:80
+2026-05-28T13:53:07.551181Z  INFO ThreadId(22) z8s::cri::runtime: CRI: stopping pod ubuntu-pod
+2026-05-28T13:53:07.551225Z  INFO ThreadId(22) z8s::cri::runtime: Stopping container ubuntu-pod-ubuntu (PID 2794111)
+2026-05-28T13:53:08.052534Z  INFO ThreadId(18) z8s::cri::cgroup: Removed cgroup: /sys/fs/cgroup/z8s/Pod_z8s-test_ubuntu-pod
+2026-05-28T13:53:08.052920Z  INFO ThreadId(18) z8s::cri::runtime: CRI: stopping pod ubuntu-deploy-pod-a6927048
+2026-05-28T13:53:08.052936Z  INFO ThreadId(18) z8s::cri::runtime: Stopping container ubuntu-deploy-pod-a6927048-ubuntu (PID 2795226)
+2026-05-28T13:53:08.554295Z  INFO ThreadId(22) z8s::cri::cgroup: Removed cgroup: /sys/fs/cgroup/z8s/Pod_z8s-test_ubuntu-deploy-pod-a6927048
+2026-05-28T13:53:08.554522Z  INFO ThreadId(22) z8s::components::network::service: Stopped service proxy for z8s-test/alpine-svc:clusterip:80
+2026-05-28T13:53:08.554601Z  INFO ThreadId(22) z8s::components::network::service: Stopped service proxy for z8s-test/ubuntu-svc:clusterip:80
+2026-05-28T13:53:08.554709Z  INFO ThreadId(22) z8s::api::handlers::namespace: Deleted namespace: z8s-test
+2026-05-28T13:53:08.555359Z  INFO ThreadId(19) z8s::api::handlers::namespace: Deleted namespace: z8s-prod
+
+abb@build-78544975c-2f2g5:~/dev/z8s$ 
