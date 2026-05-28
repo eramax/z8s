@@ -85,6 +85,15 @@ pub async fn delete_namespace(
                 }
             }
         }
+        for kind in ["PersistentVolumeClaim"] {
+            let trackers = state.store.get_by_kind(kind).await;
+            for t in &trackers {
+                if t.resource.namespace() == name.as_str() {
+                    state.registry.on_delete(&state.ctx, &t.resource).await;
+                    state.store.delete(&t.resource).await.ok();
+                }
+            }
+        }
         info!("Deleted namespace: {}", name);
         Ok(Json(ok_status()))
     } else {

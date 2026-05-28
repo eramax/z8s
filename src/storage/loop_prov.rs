@@ -16,8 +16,12 @@ impl LoopProvisioner {
         let img_path = format!("{}.img", host_path);
 
         if Path::new(&host_path).exists() {
-            info!("Loop PV {} already mounted at {}", pv.metadata.name.as_deref().unwrap_or("?"), host_path);
-            return Ok(());
+            if is_mounted(host_path) {
+                info!("Loop PV {} already mounted at {}", pv.metadata.name.as_deref().unwrap_or("?"), host_path);
+                return Ok(());
+            }
+            info!("Loop PV {} hostPath exists but not mounted, re-provisioning", pv.metadata.name.as_deref().unwrap_or("?"));
+            let _ = std::fs::remove_dir_all(host_path);
         }
 
         let capacity = pv.spec.as_ref()
@@ -64,6 +68,8 @@ impl LoopProvisioner {
             .insert("z8s.io/loop-device".into(), loop_dev);
         pv.metadata.annotations.get_or_insert_with(Default::default)
             .insert("z8s.io/image-path".into(), img_path);
+
+        let _ = run("chmod", &["0777", host_path]);
 
         Ok(())
     }
@@ -116,4 +122,12 @@ fn run_with_output(cmd: &str, args: &[&str]) -> Result<Vec<u8>> {
 
 fn cleanup_file(path: &str) {
     let _ = std::fs::remove_file(path);
+}
+
+fn is_mounted(path: &str) -> bool {
+    let output = std::process::Command::new("mountpoint")
+        .arg("-q")
+        .arg(path)
+        .status();
+    matches!(output, Ok(s) if s.success())
 }
