@@ -311,6 +311,8 @@ fn resolve_volume_source(
     get_secret: &dyn Fn(&str, &str) -> Option<Secret>,
 ) -> Result<Option<(String, bool)>> {
     if let Some(hp) = &vol.host_path {
+        std::fs::create_dir_all(&hp.path)
+            .with_context(|| format!("Failed to create hostPath dir {}", hp.path))?;
         return Ok(Some((hp.path.clone(), false)));
     }
 
