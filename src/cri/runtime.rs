@@ -91,6 +91,7 @@ struct ContainerSpawnCtx<'a> {
     privileged: bool,
     extra_caps: Vec<String>,
     published_ports: Vec<u16>,
+    working_dir: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -156,19 +157,31 @@ impl ProcessSupervisor {
         rootfs_path: &str,
         pod_uid: &str,
     ) -> Result<RunningContainer> {
-        let (entrypoint, cmd_args) = if cfg.entrypoint.is_empty() {
+        let (entrypoint, cmd_args, working_dir) = if cfg.entrypoint.is_empty() {
             let oci = crate::cri::oci::read_image_config(rootfs_path);
-            let ep = oci.entrypoint.and_then(|v| v.into_iter().next()).unwrap_or_default();
-            if ep.is_empty() {
-                (cfg.entrypoint.clone(), cfg.args.clone())
-            } else if cfg.args.is_empty() {
-                let cmd = oci.cmd.unwrap_or_default();
-                (ep, cmd)
-            } else {
-                (ep, cfg.args.clone())
+            let oci_ep = oci.entrypoint.as_ref().and_then(|v| v.first()).cloned();
+            let oci_cmd = oci.cmd.unwrap_or_default();
+            let oci_wd = oci.working_dir;
+            let wd = cfg.working_dir.clone().or(oci_wd);
+            match (oci_ep, cfg.args.is_empty()) {
+                (Some(ep), true) => {
+                    let mut args = oci_cmd;
+                    (ep, args, wd)
+                }
+                (Some(ep), false) => {
+                    (ep, cfg.args.clone(), wd)
+                }
+                (None, _) if !oci_cmd.is_empty() => {
+                    let prog = oci_cmd[0].clone();
+                    let args: Vec<String> = oci_cmd[1..].to_vec();
+                    (prog, args, wd)
+                }
+                (None, _) => {
+                    (cfg.entrypoint.clone(), cfg.args.clone(), wd)
+                }
             }
         } else {
-            (cfg.entrypoint.clone(), cfg.args.clone())
+            (cfg.entrypoint.clone(), cfg.args.clone(), cfg.working_dir.clone())
         };
         let image = &cfg.image;
         let is_native = cfg.is_native;
@@ -211,6 +224,7 @@ impl ProcessSupervisor {
                 privileged,
                 extra_caps: extra_caps.clone(),
                 published_ports: published_ports_data.clone(),
+                working_dir: working_dir.clone(),
             };
             if rootfs::is_root() {
                 return self.spawn_root_ns_container(ctx, &published_ports_data).await;
@@ -289,7 +303,7 @@ impl ProcessSupervisor {
         ctx: ContainerSpawnCtx<'_>,
         _service_ports: &[u16],
     ) -> Result<RunningContainer> {
-        let ContainerSpawnCtx { entrypoint, cmd_args, env_vars, rootfs_path, container_id, pod_uid, image, container_name, volumes, run_as_user, run_as_group, isolate_net, privileged, extra_caps, published_ports } = ctx;
+        let ContainerSpawnCtx { entrypoint, cmd_args, env_vars, rootfs_path, container_id, pod_uid, image, container_name, volumes, run_as_user, run_as_group, isolate_net, privileged, extra_caps, published_ports, working_dir } = ctx;
         let (stdout_r, stdout_w) = nix::unistd::pipe().context("Failed to create stdout pipe")?;
         let (stderr_r, stderr_w) = nix::unistd::pipe().context("Failed to create stderr pipe")?;
 
@@ -397,6 +411,10 @@ impl ProcessSupervisor {
                     let _ = nix::unistd::setuid(nix::unistd::Uid::from_raw(uid));
                 }
 
+                if let Some(wd) = &working_dir {
+                    let _ = nix::unistd::chdir(std::path::Path::new(wd));
+                }
+
                 raise_nproc_limit();
                 rootfs::drop_capabilities(privileged, &extra_caps);
                 if isolation != rootfs::RootfsIsolation::Degraded {
@@ -472,7 +490,7 @@ impl ProcessSupervisor {
         ctx: ContainerSpawnCtx<'_>,
         _service_ports: &[u16],
     ) -> Result<RunningContainer> {
-        let ContainerSpawnCtx { entrypoint, cmd_args, env_vars, rootfs_path, container_id, pod_uid, image, container_name, volumes, run_as_user, run_as_group, isolate_net, privileged, extra_caps, published_ports } = ctx;
+        let ContainerSpawnCtx { entrypoint, cmd_args, env_vars, rootfs_path, container_id, pod_uid, image, container_name, volumes, run_as_user, run_as_group, isolate_net, privileged, extra_caps, published_ports, working_dir } = ctx;
         let (stdout_r, stdout_w) = nix::unistd::pipe()
             .context("Failed to create stdout pipe")?;
         let (stderr_r, stderr_w) = nix::unistd::pipe()
@@ -628,6 +646,10 @@ impl ProcessSupervisor {
                 }
                 if let Some(uid) = run_as_user {
                     let _ = nix::unistd::setuid(nix::unistd::Uid::from_raw(uid));
+                }
+
+                if let Some(wd) = &working_dir {
+                    let _ = nix::unistd::chdir(std::path::Path::new(wd));
                 }
 
                 raise_nproc_limit();

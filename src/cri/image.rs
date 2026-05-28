@@ -137,10 +137,11 @@ impl ImageManager {
                     // Backfill OCI config for caches created before we stored Entrypoint/Cmd
                     let oci_cfg = Path::new(&cache_path).join(OCI_CONFIG_FILE);
                     let needs_guess = !oci_cfg.exists()
-                        || crate::cri::oci::read_image_config(&cache_path)
-                            .entrypoint
-                            .as_ref()
-                            .is_none_or(|ep| ep.is_empty());
+                        || {
+                            let cfg = crate::cri::oci::read_image_config(&cache_path);
+                            cfg.entrypoint.as_ref().is_none_or(|ep| ep.is_empty())
+                                && cfg.cmd.as_ref().is_none_or(|c| c.is_empty())
+                        };
                     if needs_guess {
                         let guessed = crate::cri::oci::guess_image_config(&cache_path);
                         save_image_config(
@@ -148,6 +149,7 @@ impl ImageManager {
                             guessed.entrypoint.clone(),
                             guessed.cmd.clone(),
                             guessed.env.clone(),
+                            None,
                         );
                         Self::copy_oci_config(&cache_path, &container_rootfs);
                     }
@@ -184,13 +186,15 @@ impl ImageManager {
             .clone()
             .try_into()
             .context("Failed to parse OCI image config")?;
-        let (image_ep, image_cmd, image_env) = config_file
+        let (image_ep, image_cmd, image_env, image_wd) = config_file
             .config
             .as_ref()
-            .map(|c| (c.entrypoint.clone(), c.cmd.clone(), c.env.clone()))
-            .unwrap_or((None, None, None));
-        let needs_guess = image_ep.as_ref().is_none_or(|ep| ep.is_empty());
-        save_image_config(&cache_path, image_ep, image_cmd, image_env);
+            .map(|c| (c.entrypoint.clone(), c.cmd.clone(), c.env.clone(), c.working_dir.clone()))
+            .unwrap_or((None, None, None, None));
+        let has_ep = image_ep.as_ref().is_some_and(|ep| !ep.is_empty());
+        let has_cmd = image_cmd.as_ref().is_some_and(|c| !c.is_empty());
+        let needs_guess = !has_ep && !has_cmd;
+        save_image_config(&cache_path, image_ep, image_cmd, image_env, image_wd);
 
         for (i, layer) in layers.iter().enumerate() {
             self.unpack_layer(layer, &cache_path, i)?;
@@ -202,6 +206,7 @@ impl ImageManager {
                 guessed.entrypoint.clone(),
                 guessed.cmd.clone(),
                 guessed.env.clone(),
+                None,
             );
         }
         std::fs::write(&cache_meta, image_ref)?;

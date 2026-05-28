@@ -11,6 +11,8 @@ pub struct SavedImageConfig {
     pub entrypoint: Option<Vec<String>>,
     pub cmd: Option<Vec<String>>,
     pub env: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<String>,
 }
 
 pub fn save_image_config(
@@ -18,9 +20,10 @@ pub fn save_image_config(
     entrypoint: Option<Vec<String>>,
     cmd: Option<Vec<String>>,
     env: Option<Vec<String>>,
+    working_dir: Option<String>,
 ) {
     let path = Path::new(dir).join(OCI_CONFIG_FILE);
-    let saved = SavedImageConfig { entrypoint, cmd, env };
+    let saved = SavedImageConfig { entrypoint, cmd, env, working_dir };
     if let Ok(json) = serde_json::to_string(&saved) {
         std::fs::write(path, json).ok();
     }
@@ -54,12 +57,13 @@ pub fn guess_image_config(rootfs_path: &str) -> SavedImageConfig {
         "bin/sh",
     ] {
         let path = root.join(rel);
-        if path.is_file() {
+        if path.symlink_metadata().is_ok() {
             let ep = format!("/{}", rel.trim_start_matches('/'));
             return SavedImageConfig {
                 entrypoint: Some(vec![ep]),
                 cmd: None,
                 env: None,
+                working_dir: None,
             };
         }
     }
@@ -73,7 +77,10 @@ pub fn guess_image_config(rootfs_path: &str) -> SavedImageConfig {
                     return None;
                 }
                 let meta = e.metadata().ok()?;
-                if !meta.is_file() || meta.permissions().mode() & 0o111 == 0 {
+                if !meta.is_file() && !meta.file_type().is_symlink() {
+                    return None;
+                }
+                if meta.is_file() && meta.permissions().mode() & 0o111 == 0 {
                     return None;
                 }
                 Some(format!("/{}", e.file_name().to_string_lossy()))
@@ -85,6 +92,7 @@ pub fn guess_image_config(rootfs_path: &str) -> SavedImageConfig {
                 entrypoint: Some(exes),
                 cmd: None,
                 env: None,
+                working_dir: None,
             };
         }
     }
