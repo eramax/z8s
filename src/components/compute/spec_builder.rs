@@ -61,9 +61,13 @@ pub async fn build_spec(resource: &AnyResource, store: &ResourceStore) -> Contai
 
         let (entrypoint, args) = if let Some(cmd) = &container.command {
             if cmd.is_empty() {
-                (String::new(), vec![])
+                (String::new(), container.args.clone().unwrap_or_default())
             } else {
-                (cmd[0].clone(), cmd[1..].to_vec())
+                let mut a = cmd[1..].to_vec();
+                if let Some(extra) = &container.args {
+                    a.extend(extra.iter().cloned());
+                }
+                (cmd[0].clone(), a)
             }
         } else {
             (String::new(), container.args.clone().unwrap_or_default())
@@ -94,7 +98,7 @@ pub async fn build_spec(resource: &AnyResource, store: &ResourceStore) -> Contai
             privileged,
             extra_capabilities,
             isolated_net,
-            published_ports: Default::default(),
+            published_ports: declared_ports.iter().map(|&p| (p, p)).collect(),
             probes,
         });
     }
