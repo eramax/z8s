@@ -71,10 +71,10 @@ pub fn resource_to_deploy_json(
 }
 
 
-pub fn count_deployment_pods(
+pub async fn count_deployment_pods(
     resource: &AnyResource,
     pods: &[crate::api::types::ResourceTracker],
-    running: &HashMap<String, crate::cri::runtime::RunningContainer>,
+    tracker: &crate::scheduler::process::ProcessTracker,
 ) -> (usize, usize) {
     use crate::api::types::extract_containers;
     let deploy = match resource {
@@ -102,18 +102,16 @@ pub fn count_deployment_pods(
         })
         .collect();
 
-    let ready = matching
-        .iter()
-        .filter(|t| {
-            extract_containers(&t.resource).iter().any(|c| {
-                let cid = format!("{}-{}", t.resource.name(), c.name);
-                running
-                    .get(&cid)
-                    .map(|rc| rc.ready.load(std::sync::atomic::Ordering::SeqCst))
-                    .unwrap_or(false)
-            })
-        })
-        .count();
+    let mut ready = 0;
+    for t in &matching {
+        for c in extract_containers(&t.resource) {
+            let cid = format!("{}-{}", t.resource.name(), c.name);
+            if tracker.is_container_ready(&cid).await {
+                ready += 1;
+                break;
+            }
+        }
+    }
 
     (ready, matching.len())
 }
@@ -179,18 +177,16 @@ pub async fn list_deployments_in_ns(
     headers: axum::http::HeaderMap,
 ) -> Result<axum::response::Response, ApiError> {
     let trackers = state.store.get_by_kind("Deployment").await;
-    let running = state.process_tracker.running.lock().await;
+    let tracker = state.process_tracker.clone();
     let pods = state.store.get_by_kind("Pod").await;
 
-    let items: Vec<serde_json::Value> = trackers
-        .iter()
-        .filter(|t| namespace.as_deref().map_or(true, |ns| t.resource.namespace() == ns))
-        .map(|t| {
-            let (ready, avail) = count_deployment_pods(&t.resource, &pods, &running);
-            resource_to_deploy_json(&t.resource, Some(ready), Some(avail))
-        })
-        .collect();
-    drop(running);
+    let mut items: Vec<serde_json::Value> = Vec::new();
+    for t in &trackers {
+        if namespace.as_deref().map_or(true, |ns| t.resource.namespace() == ns) {
+            let (ready, avail) = count_deployment_pods(&t.resource, &pods, &tracker).await;
+            items.push(resource_to_deploy_json(&t.resource, Some(ready), Some(avail)));
+        }
+    }
 
     if accepts_table(&headers) {
         return Ok((StatusCode::OK, Json(deployment_list_to_table(&items))).into_response());
@@ -209,11 +205,10 @@ pub async fn get_deployment(
     Path((namespace, name)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let trackers = state.store.get_by_kind("Deployment").await;
-    let running = state.process_tracker.running.lock().await;
     let pods = state.store.get_by_kind("Pod").await;
     for t in &trackers {
         if t.resource.namespace() == namespace && t.resource.name() == name {
-            let (ready, avail) = count_deployment_pods(&t.resource, &pods, &running);
+            let (ready, avail) = count_deployment_pods(&t.resource, &pods, &state.process_tracker).await;
             return Ok(Json(resource_to_deploy_json(&t.resource, Some(ready), Some(avail))));
         }
     }

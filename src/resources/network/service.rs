@@ -9,11 +9,7 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tracing::info;
 
-#[derive(Debug, Clone)]
-pub struct ServiceEndpoint {
-    pub host: String,
-    pub port: u16,
-}
+use crate::net::ServiceEndpoint;
 
 struct RunningProxy {
     handle: JoinHandle<()>,
@@ -359,7 +355,7 @@ impl NetworkManager {
 #[async_trait]
 impl crate::net::NetworkEngine for NetworkManager {
     fn dns_port(&self) -> Option<u16> {
-        crate::net::dns_port()
+        crate::config::dns_port()
     }
 
     async fn sync_service(&self, svc: &Service) {

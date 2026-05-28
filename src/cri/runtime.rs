@@ -72,11 +72,11 @@ fn merge_publish_ports(container: &Container, service_ports: &[u16]) -> Vec<u16>
 fn attach_port_publish(
     pid: u32,
     ports: &[u16],
-) -> (std::collections::HashMap<u16, u16>, Option<crate::net::port_publish::PortPublish>) {
+) -> (std::collections::HashMap<u16, u16>, Option<crate::cri::port_publish::PortPublish>) {
     if ports.is_empty() {
         return (std::collections::HashMap::new(), None);
     }
-    let publish = crate::net::port_publish::publish_ports(pid, ports);
+    let publish = crate::cri::port_publish::publish_ports(pid, ports);
     (publish.map.clone(), Some(publish))
 }
 
@@ -154,7 +154,7 @@ pub struct RunningContainer {
     pub log_buffer: Arc<Mutex<Vec<String>>>,
     pub ready: Arc<AtomicBool>,
     pub healthy: Arc<Mutex<bool>>,
-    port_publish: Option<crate::net::port_publish::PortPublish>,
+    port_publish: Option<crate::cri::port_publish::PortPublish>,
 }
 
 pub struct ProcessSupervisor {

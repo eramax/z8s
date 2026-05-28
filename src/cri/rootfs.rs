@@ -278,7 +278,7 @@ pub fn prepare_rootfs(rootfs_path: &str) -> Result<()> {
     }
 
     let resolv_conf = rootfs.join("etc/resolv.conf");
-    let content = if crate::net::dns_port().is_some() {
+    let content = if crate::config::dns_port().is_some() {
         let domain = &crate::config::get().cluster_domain;
         format!("nameserver 127.0.0.1\nsearch default.svc.{domain} svc.{domain} {domain}\noptions ndots:5\n")
     } else {
@@ -471,7 +471,7 @@ pub fn child_enter_ns_fork(
     sethostname(hostname).context("Failed to set container hostname")?;
 
     if isolate_net {
-        crate::net::port_publish::setup_loopback();
+        crate::cri::port_publish::setup_loopback();
     }
 
     nix::unistd::write(&sync_w, b"S")
@@ -543,7 +543,7 @@ pub fn child_enter_ns_root(
     sethostname(hostname).context("Failed to set container hostname")?;
 
     if isolate_net {
-        crate::net::port_publish::setup_loopback();
+        crate::cri::port_publish::setup_loopback();
     }
 
     mount(
@@ -998,7 +998,7 @@ pub fn setup_exec_mounts(rootfs: &str) -> Result<()> {
     let etc_path = root_path.join("etc");
     let _ = std::fs::create_dir_all(&etc_path);
     let resolv = etc_path.join("resolv.conf");
-    let content = if crate::net::dns_port().is_some() {
+    let content = if crate::config::dns_port().is_some() {
         let domain = &crate::config::get().cluster_domain;
         format!("nameserver 127.0.0.1\nsearch default.svc.{domain} svc.{domain} {domain}\noptions ndots:5\n")
     } else {

@@ -79,6 +79,13 @@ impl ProcessTracker {
         container_port
     }
 
+    pub async fn is_container_ready(&self, container_id: &str) -> bool {
+        let running = self.running.lock().await;
+        running.get(container_id)
+            .map(|rc| rc.ready.load(Ordering::SeqCst))
+            .unwrap_or(false)
+    }
+
     fn is_pid_alive(pid: u32) -> bool {
         nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None).is_ok()
     }

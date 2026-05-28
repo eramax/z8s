@@ -118,7 +118,7 @@ async fn main() -> Result<()> {
     ));
 
     if let Some(port) = crate::net::dns::run_dns(store.clone()).await {
-        crate::net::set_dns_port(port);
+        crate::config::set_dns_port(port);
     }
 
     let watcher = Arc::new(ManifestWatcher::new(store.clone()));

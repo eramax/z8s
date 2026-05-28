@@ -2,6 +2,7 @@ pub mod cgroup;
 pub mod health;
 pub mod image;
 pub mod oci;
+pub mod port_publish;
 pub mod rootfs;
 pub mod runtime;
 pub mod spec;
@@ -12,6 +13,7 @@ use anyhow::Result;
 use std::collections::HashMap;
 
 use crate::cri::spec::ContainerSpec;
+use crate::cri::port_publish::PortPublish;
 
 #[async_trait]
 pub trait RuntimeProvider: Send + Sync {

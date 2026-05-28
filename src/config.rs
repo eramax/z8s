@@ -157,6 +157,16 @@ fn parse_cidr(s: &str) -> Option<([u8; 4], u8)> {
     Some(([parts[0], parts[1], parts[2], parts[3]], prefix))
 }
 
+static DNS_PORT: std::sync::OnceLock<u16> = std::sync::OnceLock::new();
+
+pub fn set_dns_port(port: u16) {
+    DNS_PORT.set(port).ok();
+}
+
+pub fn dns_port() -> Option<u16> {
+    DNS_PORT.get().copied()
+}
+
 const HELP: &str = "\
 z8s — minimal Kubernetes-compatible container orchestrator
 
