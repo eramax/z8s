@@ -2,10 +2,10 @@ use crate::api::types::{
     extract_containers, parse_quantity_bytes, parse_quantity_cpu, ResourceState, ResourceStore,
 };
 use crate::api::AnyResource;
-use crate::container::image::ImageManager;
-use crate::container::rootfs;
-use crate::supervisor::cgroup::CgroupManager;
-use crate::supervisor::health::{HealthChecker, HealthStatus, ProbeAction, ProbeConfig};
+use crate::cri::image::ImageManager;
+use crate::cri::rootfs;
+use crate::cri::cgroup::CgroupManager;
+use crate::cri::health::{HealthChecker, HealthStatus, ProbeAction, ProbeConfig};
 use anyhow::{Context, Result};
 use k8s_openapi::api::core::v1::{ConfigMap, Container, Pod, PodSecurityContext, Secret};
 use nix::sys::signal::{kill, Signal};
@@ -68,11 +68,11 @@ fn merge_publish_ports(container: &Container, service_ports: &[u16]) -> Vec<u16>
 fn attach_port_publish(
     pid: u32,
     ports: &[u16],
-) -> (std::collections::HashMap<u16, u16>, Option<crate::network::port_publish::PortPublish>) {
+) -> (std::collections::HashMap<u16, u16>, Option<crate::net::port_publish::PortPublish>) {
     if ports.is_empty() {
         return (std::collections::HashMap::new(), None);
     }
-    let publish = crate::network::port_publish::publish_ports(pid, ports);
+    let publish = crate::net::port_publish::publish_ports(pid, ports);
     (publish.map.clone(), Some(publish))
 }
 
@@ -122,7 +122,7 @@ struct ContainerSpawnCtx<'a> {
     pod_uid: &'a str,
     image: &'a str,
     container: &'a Container,
-    volumes: Vec<crate::container::volumes::ResolvedVolume>,
+    volumes: Vec<crate::cri::volumes::ResolvedVolume>,
     run_as_user: Option<u32>,
     run_as_group: Option<u32>,
 }
@@ -150,7 +150,7 @@ pub struct RunningContainer {
     pub log_buffer: Arc<Mutex<Vec<String>>>,
     pub ready: Arc<AtomicBool>,
     pub healthy: Arc<Mutex<bool>>,
-    port_publish: Option<crate::network::port_publish::PortPublish>,
+    port_publish: Option<crate::net::port_publish::PortPublish>,
 }
 
 pub struct ProcessSupervisor {
@@ -159,7 +159,7 @@ pub struct ProcessSupervisor {
     pub cgroup_manager: Arc<CgroupManager>,
     pub store: Arc<ResourceStore>,
     restart_counts: Arc<Mutex<HashMap<String, u32>>>,
-    network: Arc<std::sync::Mutex<Option<Arc<crate::network::NetworkManager>>>>,
+    network: Arc<std::sync::Mutex<Option<Arc<crate::components::network::service::NetworkManager>>>>,
 }
 
 impl ProcessSupervisor {
@@ -184,7 +184,7 @@ impl ProcessSupervisor {
         }
     }
 
-    pub fn set_network(&self, network: Arc<crate::network::NetworkManager>) {
+    pub fn set_network(&self, network: Arc<crate::components::network::service::NetworkManager>) {
         *self.network.lock().unwrap() = Some(network);
     }
 
@@ -203,7 +203,7 @@ impl ProcessSupervisor {
         let pod_name = resource.name().to_string();
 
         // Clean stale emptyDir data from a previous run (e.g. after crash before stop_pod)
-        crate::container::volumes::cleanup_emptydir(&pod_uid);
+        crate::cri::volumes::cleanup_emptydir(&pod_uid);
 
         // Guard against concurrent start by multiple reconcile rounds
         {
@@ -544,7 +544,7 @@ impl ProcessSupervisor {
             let rest: Vec<String> = command[1..].iter().chain(args.iter()).cloned().collect();
             (ep, rest)
         } else {
-            crate::container::oci_config::resolve_argv(container, rootfs_path)
+            crate::cri::oci::resolve_argv(container, rootfs_path)
         };
 
         let pod_sc = match resource {
@@ -571,7 +571,7 @@ impl ProcessSupervisor {
             // Inject service env vars (K8s-style: SVCNAME_SERVICE_HOST, SVCNAME_SERVICE_PORT)
             env_vars.extend(self.resolve_service_env(pod).await);
             if !is_native {
-                crate::container::volumes::prepare_volumes(
+                crate::cri::volumes::prepare_volumes(
                     pod,
                     &container.name,
                     pod_uid,
@@ -597,7 +597,7 @@ impl ProcessSupervisor {
 
         // Merge OCI image environment variables if not native and not overridden by manifest
         if !is_native {
-            let img_cfg = crate::container::oci_config::read_image_config(rootfs_path);
+            let img_cfg = crate::cri::oci::read_image_config(rootfs_path);
             if let Some(img_env) = img_cfg.env {
                 for entry in img_env {
                     if let Some(pos) = entry.find('=') {
@@ -625,8 +625,8 @@ impl ProcessSupervisor {
             c
         } else {
             if !volumes.is_empty() {
-                crate::container::volumes::scrub_rootfs_volume_mounts(rootfs_path, &volumes);
-                crate::container::volumes::stage_volumes_in_rootfs(rootfs_path, &volumes);
+                crate::cri::volumes::scrub_rootfs_volume_mounts(rootfs_path, &volumes);
+                crate::cri::volumes::stage_volumes_in_rootfs(rootfs_path, &volumes);
             }
             rootfs::prepare_rootfs(rootfs_path)?;
 
@@ -1290,7 +1290,7 @@ impl ProcessSupervisor {
         let pod_uid = resource.uid();
         self.cgroup_manager.remove_cgroup(&pod_uid).ok();
         self.store.update_state(&pod_uid, ResourceState::Terminated).await;
-        crate::container::volumes::cleanup_emptydir(&pod_uid);
+        crate::cri::volumes::cleanup_emptydir(&pod_uid);
     }
 
     pub async fn is_pod_running(&self, pod_name: &str) -> bool {

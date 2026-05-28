@@ -1,0 +1,14 @@
+pub mod configmap;
+pub mod deployment;
+pub mod endpoints;
+pub mod endpointslices;
+pub mod event;
+pub mod metrics;
+pub mod namespace;
+pub mod node;
+pub mod pod;
+pub mod pv;
+pub mod pvc;
+pub mod secret;
+pub mod service;
+pub mod system;

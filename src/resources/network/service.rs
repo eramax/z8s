@@ -1,20 +1,5 @@
-pub mod dns;
-pub mod port_publish;
-pub mod service_proxy;
-
-/// The port the z8s DNS server is listening on (53 or 5353). Set once at startup.
-static DNS_PORT: std::sync::OnceLock<u16> = std::sync::OnceLock::new();
-
-pub fn set_dns_port(port: u16) {
-    DNS_PORT.set(port).ok();
-}
-
-pub fn dns_port() -> Option<u16> {
-    DNS_PORT.get().copied()
-}
-
 use crate::api::types::ResourceStore;
-use crate::supervisor::process::ProcessSupervisor;
+use crate::cri::runtime::ProcessSupervisor;
 use k8s_openapi::api::core::v1::Service;
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use std::collections::{BTreeMap, HashMap};
@@ -99,7 +84,7 @@ impl NetworkManager {
                 let target_port_c = target_port.clone();
                 let listen_addr_log = listen_addr.clone();
                 let handle = tokio::spawn(async move {
-                    service_proxy::run_proxy_addr_when_ready(
+                    crate::net::service_proxy::run_proxy_addr_when_ready(
                         &listen_addr,
                         selector_c,
                         target_port_c,
@@ -116,7 +101,7 @@ impl NetworkManager {
             }
 
             // Also bind NodePort for external access
-            if (svc_type == "NodePort" || svc_type == "LoadBalancer") {
+            if svc_type == "NodePort" || svc_type == "LoadBalancer"  {
                 if let Some(node_port) = svc_port.node_port.map(|p| p as u16) {
                     let listen_addr = format!("0.0.0.0:{}", node_port);
                     let port_key = format!("{}:nodeport:{}", key, node_port);
@@ -132,7 +117,7 @@ impl NetworkManager {
                     let target_port_c = target_port.clone();
                     let listen_addr_log = listen_addr.clone();
                     let handle = tokio::spawn(async move {
-                        service_proxy::run_proxy_addr(
+                        crate::net::service_proxy::run_proxy_addr(
                             &listen_addr,
                             selector_c,
                             target_port_c,
@@ -368,5 +353,77 @@ impl NetworkManager {
         }
 
         slices
+    }
+}
+
+#[async_trait]
+impl crate::net::NetworkEngine for NetworkManager {
+    fn dns_port(&self) -> Option<u16> {
+        crate::net::dns_port()
+    }
+
+    async fn sync_service(&self, svc: &Service) {
+        NetworkManager::sync_service(self, svc).await;
+    }
+
+    async fn remove_service(&self, ns: &str, name: &str) {
+        NetworkManager::remove_service(self, ns, name).await;
+    }
+
+    async fn sync_services_for_labels(&self, ns: &str, labels: &BTreeMap<String, String>) {
+        NetworkManager::sync_services_for_labels(self, ns, labels).await;
+    }
+
+    async fn compute_endpoints(&self, svc: &Service) -> k8s_openapi::api::core::v1::Endpoints {
+        NetworkManager::compute_endpoints(self, svc).await
+    }
+
+    async fn compute_endpointslices(&self, svc: &Service) -> Vec<k8s_openapi::api::discovery::v1::EndpointSlice> {
+        NetworkManager::compute_endpointslices(self, svc).await
+    }
+}
+
+use async_trait::async_trait;
+use anyhow::Result;
+use crate::api::types::{AnyResource, ResourceTracker};
+use crate::resources::{Component, ReconcileContext, ResourceCategory};
+
+pub struct ServiceResource {
+    pub store: Arc<ResourceStore>,
+    pub network: Arc<NetworkManager>,
+}
+
+impl ServiceResource {
+    pub fn new(store: Arc<ResourceStore>, network: Arc<NetworkManager>) -> Self {
+        Self { store, network }
+    }
+}
+
+#[async_trait]
+impl Component for ServiceResource {
+    fn kind(&self) -> &'static str {
+        "Service"
+    }
+
+    fn category(&self) -> ResourceCategory {
+        ResourceCategory::Network
+    }
+
+    async fn reconcile(&self, _ctx: &ReconcileContext, _tracker: &ResourceTracker) -> Result<()> {
+        Ok(())
+    }
+
+    async fn on_apply(&self, _ctx: &ReconcileContext, resource: &AnyResource) -> Result<()> {
+        if let AnyResource::Service(svc) = resource {
+            self.network.sync_service(svc).await;
+        }
+        Ok(())
+    }
+
+    async fn on_delete(&self, _ctx: &ReconcileContext, resource: &AnyResource) -> Result<()> {
+        let ns = resource.namespace();
+        let name = resource.name();
+        self.network.remove_service(ns, name).await;
+        Ok(())
     }
 }

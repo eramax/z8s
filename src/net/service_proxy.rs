@@ -1,5 +1,5 @@
 use crate::api::types::ResourceStore;
-use crate::supervisor::process::ProcessSupervisor;
+use crate::cri::runtime::ProcessSupervisor;
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};

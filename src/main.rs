@@ -1,21 +1,30 @@
 mod api;
+mod resources;
 mod config;
-mod container;
-mod controller;
+mod cri;
 mod init;
 mod manifest;
-mod network;
-mod server;
-mod supervisor;
+mod net;
+mod scheduler;
 
 use crate::api::types::ResourceStore;
-use crate::container::image::ImageManager;
-use crate::controller::DeploymentController;
+use crate::resources::{ComponentRegistry, PipelineBuilder, ReconcileContext};
+use crate::resources::compute::deployment::DeploymentResource;
+use crate::resources::compute::pod::PodResource;
+use crate::resources::network::service::ServiceResource;
+use crate::resources::storage::configmap::ConfigMapResource;
+use crate::resources::storage::pv::PvResource;
+use crate::resources::storage::pvc::PvcResource;
+use crate::resources::storage::secret::SecretResource;
+use crate::cri::image::ImageManager;
+use crate::cri::runtime::ContainerRuntime;
 use crate::init::InitHandler;
 use crate::manifest::watcher::ManifestWatcher;
-use crate::network::NetworkManager;
-use crate::supervisor::cgroup::CgroupManager;
-use crate::supervisor::process::ProcessSupervisor;
+use crate::resources::network::service::NetworkManager;
+use crate::scheduler::reconciler::Reconciler;
+use crate::cri::cgroup::CgroupManager;
+use crate::cri::runtime::ProcessSupervisor;
+use crate::scheduler::process::ProcessTracker;
 use anyhow::Result;
 use std::sync::Arc;
 use tokio::signal;
@@ -66,7 +75,7 @@ async fn main() -> Result<()> {
     .unwrap_or(0)
         == 1;
 
-    if apparmor_restricted && !crate::container::rootfs::is_root() {
+    if apparmor_restricted && !crate::cri::rootfs::is_root() {
         warn!(
             "AppArmor restricts unprivileged user namespaces \
              (kernel.apparmor_restrict_unprivileged_userns=1). \
@@ -90,22 +99,51 @@ async fn main() -> Result<()> {
 
     let supervisor = Arc::new(ProcessSupervisor::new(
         image_manager,
-        cgroup_manager,
+        cgroup_manager.clone(),
         store.clone(),
     ));
+
+    let process_tracker = Arc::new(ProcessTracker {
+        running: supervisor.running.clone(),
+        restart_counts: supervisor.restart_counts.clone(),
+        supervisor: supervisor.clone(),
+    });
 
     let network = Arc::new(NetworkManager::new(store.clone(), supervisor.clone()));
     supervisor.set_network(network.clone());
 
-    // Start in-cluster DNS (127.0.0.1:53 or :5353)
-    if let Some(port) = crate::network::dns::run_dns(store.clone()).await {
-        crate::network::set_dns_port(port);
+    let cri = Arc::new(ContainerRuntime::new(
+        supervisor.clone(),
+        store.clone(),
+        cgroup_manager.clone(),
+    ));
+
+    if let Some(port) = crate::net::dns::run_dns(store.clone()).await {
+        crate::net::set_dns_port(port);
     }
 
     let watcher = Arc::new(ManifestWatcher::new(store.clone()));
 
-    let controller =
-        Arc::new(DeploymentController::new(store.clone(), supervisor.clone()));
+    let pipeline = Arc::new(PipelineBuilder::new()
+        .stage(Box::new(crate::resources::network::dns_stage::DnsStage::new()))
+        .build());
+
+    let ctx = Arc::new(ReconcileContext {
+        store: store.clone(),
+        pipeline: pipeline.clone(),
+        cri: cri.clone(),
+        net: network.clone() as Arc<dyn crate::net::NetworkEngine>,
+    });
+
+    let mut registry = ComponentRegistry::new();
+    registry.register(Box::new(PodResource::new(supervisor.clone(), store.clone())));
+    registry.register(Box::new(DeploymentResource::new(store.clone(), supervisor.clone())));
+    registry.register(Box::new(ServiceResource::new(store.clone(), network.clone())));
+    registry.register(Box::new(ConfigMapResource::new(store.clone())));
+    registry.register(Box::new(SecretResource::new(store.clone())));
+    registry.register(Box::new(PvResource::new(store.clone())));
+    registry.register(Box::new(PvcResource::new(store.clone())));
+    let registry = Arc::new(registry);
 
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
 
@@ -118,7 +156,7 @@ async fn main() -> Result<()> {
         error!("Failed to load existing manifests: {}", e);
     }
 
-    // Start all background tasks BEFORE reconcile (so API server is up immediately)
+    // Watcher
     let watcher_clone = watcher.clone();
     tokio::spawn(async move {
         if let Err(e) = watcher_clone.start_watching().await {
@@ -126,33 +164,35 @@ async fn main() -> Result<()> {
         }
     });
 
-    let controller_clone = controller.clone();
-    tokio::spawn(async move {
-        controller_clone.run().await;
-    });
+    // Unified reconciler: zombie reaping + component reconciliation
+    let reconciler = Arc::new(Reconciler::new(
+        registry.clone(),
+        ctx.clone(),
+        process_tracker.clone(),
+    ));
+    let rec = reconciler.clone();
+    tokio::spawn(async move { rec.run().await });
 
-    let s1 = supervisor.clone();
-    tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(tokio::time::Duration::from_secs(10));
-        loop {
-            ticker.tick().await;
-            s1.reconcile().await;
-        }
-    });
-
+    // API server
     let store_clone = store.clone();
     let s2 = supervisor.clone();
+    let pt2 = process_tracker.clone();
     let net2 = network.clone();
     tokio::spawn(async move {
-        server::run_server(store_clone, s2, net2).await;
+        api::server::run_server(store_clone, pt2, net2).await;
     });
 
-    // Initial reconcile runs in background (don't block startup on slow image pulls)
-    let s3 = supervisor.clone();
-    let c1 = controller.clone();
+    // Initial reconcile
+    let pt = process_tracker.clone();
+    let s = store.clone();
+    let rc = registry.clone();
+    let cx = ctx.clone();
     tokio::spawn(async move {
-        s3.reconcile().await;
-        c1.reconcile_deployments().await;
+        let reaped = pt.reap_zombies();
+        if !reaped.is_empty() {
+            pt.handle_exited_containers(reaped, &s).await;
+        }
+        rc.reconcile_all(&cx).await;
     });
 
     info!("z8s is ready. Watching /etc/z8s/manifests/ for manifests.");
