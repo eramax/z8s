@@ -156,10 +156,22 @@ impl ProcessSupervisor {
         rootfs_path: &str,
         pod_uid: &str,
     ) -> Result<RunningContainer> {
+        let (entrypoint, cmd_args) = if cfg.entrypoint.is_empty() {
+            let oci = crate::cri::oci::read_image_config(rootfs_path);
+            let ep = oci.entrypoint.and_then(|v| v.into_iter().next()).unwrap_or_default();
+            if ep.is_empty() {
+                (cfg.entrypoint.clone(), cfg.args.clone())
+            } else if cfg.args.is_empty() {
+                let cmd = oci.cmd.unwrap_or_default();
+                (ep, cmd)
+            } else {
+                (ep, cfg.args.clone())
+            }
+        } else {
+            (cfg.entrypoint.clone(), cfg.args.clone())
+        };
         let image = &cfg.image;
         let is_native = cfg.is_native;
-        let entrypoint = &cfg.entrypoint;
-        let cmd_args = &cfg.args;
         let env_vars = &cfg.env;
         let volumes = &cfg.volumes;
         let run_as_user = cfg.run_as_user;
@@ -172,7 +184,7 @@ impl ProcessSupervisor {
 
         let mut child_cmd = if is_native {
             let mut c = Command::new(&entrypoint);
-            c.args(cmd_args);
+            c.args(&cmd_args);
             c
         } else {
             if !volumes.is_empty() {
@@ -184,8 +196,8 @@ impl ProcessSupervisor {
             let rootfs_owned = rootfs_path.to_string();
 
             let ctx = ContainerSpawnCtx {
-                entrypoint,
-                cmd_args,
+                entrypoint: &entrypoint,
+                cmd_args: &cmd_args,
                 env_vars,
                 rootfs_path: &rootfs_owned,
                 container_id,
