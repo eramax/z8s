@@ -59,6 +59,16 @@ pub async fn build_spec(resource: &AnyResource, store: &ResourceStore) -> Contai
             .unwrap_or_default();
         let isolated_net = !declared_ports.is_empty();
 
+        let (entrypoint, args) = if let Some(cmd) = &container.command {
+            if cmd.is_empty() {
+                (String::new(), vec![])
+            } else {
+                (cmd[0].clone(), cmd[1..].to_vec())
+            }
+        } else {
+            (String::new(), container.args.clone().unwrap_or_default())
+        };
+
         let mut probes = Vec::new();
         for probe in [&container.liveness_probe, &container.readiness_probe, &container.startup_probe].into_iter().flatten() {
             if let Some(config) = convert_probe(probe) { probes.push(config); }
@@ -70,8 +80,8 @@ pub async fn build_spec(resource: &AnyResource, store: &ResourceStore) -> Contai
             image: image_ref,
             rootfs_path: String::new(),
             is_native,
-            entrypoint: String::new(),
-            args: vec![],
+            entrypoint,
+            args,
             working_dir: container.working_dir.clone(),
             env: env_vars,
             volumes,
