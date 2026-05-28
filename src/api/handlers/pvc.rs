@@ -59,6 +59,7 @@ pub async fn create_pvc(
     }
     let resource = AnyResource::PersistentVolumeClaim(pvc);
     state.store.apply(resource.clone()).await.map_err(|e| ApiError::bad_request(e.to_string()))?;
+    state.registry.on_apply(&state.ctx, &resource).await;
     Ok((StatusCode::CREATED, Json(resource)).into_response())
 }
 

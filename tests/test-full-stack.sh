@@ -3,20 +3,36 @@ set -uo pipefail
 
 SERVER="${Z8S_SERVER:-http://localhost:6443}"
 NS="fulltest"
-NP=30091
-SP=9091
 GREEN='\033[0;32m'; RED='\033[0;31m'; CYAN='\033[0;36m'; NC='\033[0m'
 pass() { echo -e "${GREEN}PASS${NC} $1"; }
 fail() { echo -e "${RED}FAIL${NC} $1"; }
 k()   { kubectl --server="$SERVER" "$@"; }
 check() { local m="$1"; shift; "$@" && pass "$m" || fail "$m"; }
 
+pick_free_port() {
+  python3 -c "import socket; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(('$1',0)); print(s.getsockname()[1]); s.close()"
+}
+SP=$(pick_free_port 127.0.0.1)
+NP=$(pick_free_port 0.0.0.0)
+
 cleanup() {
-  sudo killall z8s 2>/dev/null || true
-  for p in "$NP" "$SP"; do
-    local pid
-    pid=$(ss -tlnp 2>/dev/null | grep ":$p " | grep -oP 'pid=\K[0-9]+' | head -1)
-    [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+  for pid in $(fuser "$SP/tcp" "$NP/tcp" 2>/dev/null | xargs); do
+    kill "$pid" 2>/dev/null || true
+  done
+  # fallback: scan /proc/net/tcp for orphaned sockets
+  for port in "$SP" "$NP"; do
+    hex=$(printf '%04X' "$port")
+    while IFS= read -r line; do
+      inode=$(echo "$line" | awk '{print $10}')
+      [ -z "$inode" ] && continue
+      for d in /proc/[0-9]*/fd; do
+        pid="${d%/fd*}"; pid="${pid#/proc/}"
+        for f in "$d"/*; do
+          target=$(readlink "$f" 2>/dev/null) || continue
+          [ "$target" = "socket:[$inode]" ] && kill "$pid" 2>/dev/null || true
+        done 2>/dev/null
+      done 2>/dev/null
+    done < <(awk -v h=":$(printf '%04X' "$port")" '$2 ~ h && $4 == "0A" {print}' /proc/net/tcp 2>/dev/null)
   done
 }
 
@@ -97,7 +113,7 @@ spec:
           echo '=== boot ==='
           echo "DB_HOST=\$DB_HOST"
           echo "APP_MODE=\$app_mode"
-          nohup python3 -m http.server $SP --bind 127.0.0.1 &>/dev/null &
+          nohup python3 -m http.server $SP --bind 127.0.0.1 >/dev/null 2>&1 &
           exec sleep infinity
         env:
         - name: DIRECT_ENV
@@ -224,6 +240,9 @@ check "HTTP after scale" grep -qiE "directory listing|http|html" <<< "$out"
 echo -e "${CYAN}═══ 10: PV/PVC ═══${NC}"
 check "PV cap=1Gi"  test "$(k get pv pv-fulltest -o jsonpath='{.spec.capacity.storage}' 2>/dev/null)" = "1Gi"
 check "PVC req=100Mi" test "$(k get pvc pvc-fulltest -n "$NS" -o jsonpath='{.spec.resources.requests.storage}' 2>/dev/null)" = "100Mi"
+check "PVC bound"  test "$(k get pvc pvc-fulltest -n "$NS" -o jsonpath='{.status.phase}' 2>/dev/null)" = "Bound"
+check "PV bound"   test "$(k get pv pv-fulltest -o jsonpath='{.status.phase}' 2>/dev/null)" = "Bound"
+check "PVC volumeName" test -n "$(k get pvc pvc-fulltest -n "$NS" -o jsonpath='{.spec.volumeName}' 2>/dev/null)"
 
 echo -e "${GREEN}════════════════════════════════════════════${NC}"
 echo -e "${GREEN}  FULL STACK TEST PASSED${NC}"
