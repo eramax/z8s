@@ -303,7 +303,6 @@ pub async fn delete_deployment(
     for t in &trackers {
         if t.resource.name() == name && t.resource.namespace() == namespace {
             if let AnyResource::Deployment(deploy) = &t.resource {
-                // Cascade delete: stop and remove all pods matching this deployment's selector
                 let selector = deploy.spec.as_ref()
                     .and_then(|s| s.selector.match_labels.as_ref());
                 if let Some(match_labels) = selector {
@@ -312,14 +311,11 @@ pub async fn delete_deployment(
                         if pt.resource.namespace() != namespace { continue; }
                         if let AnyResource::Pod(pod) = &pt.resource {
                             let pod_labels = pod.metadata.labels.clone().unwrap_or_default();
-                            // Only cascade-delete pods that belong to this deployment
-                            // (by OwnerReference or naming convention). Standalone pods
-                            // that happen to share the same labels must NOT be removed.
                             if labels_match(match_labels, &pod_labels)
                                 && crate::components::compute::deployment::pod_owned_by_deployment(pod, &name)
                             {
                                 info!("Deleting pod {} owned by deployment {}/{}", pt.resource.name(), namespace, name);
-                                state.process_tracker.stop_pod(&pt.resource).await;
+                                state.registry.on_delete(&state.ctx, &pt.resource).await;
                                 state.store.delete(&pt.resource).await.ok();
                             }
                         }

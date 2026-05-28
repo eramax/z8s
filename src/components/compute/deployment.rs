@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::api::types::{AnyResource, ResourceState, ResourceStore, ResourceTracker};
-use crate::components::{Component, ReconcileContext};
+use crate::components::{Component, ReconcileContext, ResourceCategory};
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::core::v1::Pod;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
@@ -73,7 +73,28 @@ impl Component for DeploymentResource {
         "Deployment"
     }
 
+    fn category(&self) -> ResourceCategory {
+        ResourceCategory::Compute
+    }
+
     async fn reconcile(&self, ctx: &ReconcileContext, tracker: &ResourceTracker) -> Result<()> {
+        self.reconcile_impl(ctx, tracker).await
+    }
+
+    async fn on_apply(&self, ctx: &ReconcileContext, resource: &AnyResource) -> Result<()> {
+        if let Some(tracker) = ctx.store.get(&resource.uid()).await {
+            self.reconcile_impl(ctx, &tracker).await?;
+        }
+        Ok(())
+    }
+
+    async fn on_delete(&self, _ctx: &ReconcileContext, _resource: &AnyResource) -> Result<()> {
+        Ok(())
+    }
+}
+
+impl DeploymentResource {
+    async fn reconcile_impl(&self, ctx: &ReconcileContext, tracker: &ResourceTracker) -> Result<()> {
         let AnyResource::Deployment(deploy) = &tracker.resource else {
             return Ok(());
         };

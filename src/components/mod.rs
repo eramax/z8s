@@ -8,11 +8,21 @@ use crate::cri::RuntimeProvider;
 use crate::net::NetworkEngine;
 use crate::scheduler::process::ProcessTracker;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResourceCategory {
+    Compute,
+    Network,
+    Storage,
+}
+
 #[async_trait]
 pub trait Component: Send + Sync + 'static {
     fn kind(&self) -> &'static str;
+    fn category(&self) -> ResourceCategory;
 
     async fn reconcile(&self, ctx: &ReconcileContext, tracker: &ResourceTracker) -> Result<()>;
+    async fn on_apply(&self, ctx: &ReconcileContext, resource: &AnyResource) -> Result<()>;
+    async fn on_delete(&self, ctx: &ReconcileContext, resource: &AnyResource) -> Result<()>;
 }
 
 pub struct ReconcileContext {
@@ -42,6 +52,14 @@ impl ComponentRegistry {
         self.components.get(kind).map(|c| c.as_ref())
     }
 
+    pub fn by_category(&self, cat: ResourceCategory) -> Vec<&dyn Component> {
+        self.components
+            .values()
+            .filter(|c| c.category() == cat)
+            .map(|c| c.as_ref())
+            .collect()
+    }
+
     pub async fn reconcile_all(&self, ctx: &ReconcileContext) {
         let trackers = ctx.store.get_all().await;
         for tracker in &trackers {
@@ -55,6 +73,40 @@ impl ComponentRegistry {
                 }
             }
         }
+    }
+
+    pub async fn on_apply(&self, ctx: &ReconcileContext, resource: &AnyResource) {
+        let kind = resource.kind();
+
+        if let Some(component) = self.get(kind) {
+            if let Err(e) = component.on_apply(ctx, resource).await {
+                tracing::error!("on_apply failed for {}: {}", resource.uid(), e);
+            }
+        }
+
+        let stage_ctx = StageContext {
+            store: ctx.store.clone(),
+            cri: ctx.cri.clone(),
+            net: ctx.net.clone(),
+        };
+        ctx.pipeline.dispatch_created(resource, &stage_ctx).await;
+    }
+
+    pub async fn on_delete(&self, ctx: &ReconcileContext, resource: &AnyResource) {
+        let kind = resource.kind();
+
+        if let Some(component) = self.get(kind) {
+            if let Err(e) = component.on_delete(ctx, resource).await {
+                tracing::error!("on_delete failed for {}: {}", resource.uid(), e);
+            }
+        }
+
+        let stage_ctx = StageContext {
+            store: ctx.store.clone(),
+            cri: ctx.cri.clone(),
+            net: ctx.net.clone(),
+        };
+        ctx.pipeline.dispatch_deleted(kind, &resource.uid(), &stage_ctx).await;
     }
 }
 

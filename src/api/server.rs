@@ -26,6 +26,7 @@ pub use tokio::sync::{Mutex, RwLock};
 pub use tracing::info;
 
 use crate::scheduler::process::ProcessTracker;
+use crate::components::{ComponentRegistry, ReconcileContext};
 
 impl axum::extract::FromRef<AppState> for crate::cri::exec::ExecState {
     fn from_ref(state: &AppState) -> Self {
@@ -49,6 +50,8 @@ pub struct AppState {
     pub network: Arc<dyn crate::net::NetworkEngine>,
     pub namespaces: NamespaceStore,
     pub events: EventStore,
+    pub registry: Arc<ComponentRegistry>,
+    pub ctx: Arc<ReconcileContext>,
 }
 
 impl AppState {
@@ -77,6 +80,8 @@ pub async fn build_app_state(
     store: Arc<ResourceStore>,
     process_tracker: Arc<ProcessTracker>,
     network: Arc<dyn crate::net::NetworkEngine>,
+    registry: Arc<ComponentRegistry>,
+    ctx: Arc<ReconcileContext>,
 ) -> AppState {
     let namespaces: NamespaceStore = Arc::new(RwLock::new(HashMap::new()));
     {
@@ -88,7 +93,7 @@ pub async fn build_app_state(
         let mut ev = events.lock().await;
         ev.push(make_event("z8s-started", "default", "Node", "z8s-node", "Started", "z8s daemon started", "Normal"));
     }
-    AppState { store, process_tracker, network, namespaces, events }
+    AppState { store, process_tracker, network, namespaces, events, registry, ctx }
 }
 
 pub fn build_router(state: AppState) -> Router {
@@ -115,8 +120,10 @@ pub async fn run_server(
     store: Arc<ResourceStore>,
     process_tracker: Arc<ProcessTracker>,
     network: Arc<dyn crate::net::NetworkEngine>,
+    registry: Arc<ComponentRegistry>,
+    ctx: Arc<ReconcileContext>,
 ) {
-    let state = build_app_state(store, process_tracker, network).await;
+    let state = build_app_state(store, process_tracker, network, registry, ctx).await;
     let app = build_router(state);
     let addr = format!("0.0.0.0:{}", z8s_port());
     info!("Starting k8s API server on {}", addr);
@@ -325,7 +332,16 @@ mod tests {
             store: store.clone(),
         });
         let network = Arc::new(crate::components::network::service::NetworkManager::new(store.clone(), process_tracker.clone()));
-        let state = build_app_state(store, process_tracker, network).await;
+        let pipeline = Arc::new(crate::components::ReconciliationPipeline::builder().build());
+        let ctx = Arc::new(crate::components::ReconcileContext {
+            store: store.clone(),
+            pipeline: pipeline.clone(),
+            cri: container_runtime.clone() as Arc<dyn crate::cri::RuntimeProvider>,
+            net: network.clone() as Arc<dyn crate::net::NetworkEngine>,
+            process_tracker: process_tracker.clone(),
+        });
+        let registry = Arc::new(crate::components::ComponentRegistry::new());
+        let state = build_app_state(store, process_tracker, network, registry, ctx).await;
         build_router(state)
     }
 
@@ -344,7 +360,16 @@ mod tests {
             store: store.clone(),
         });
         let network = Arc::new(crate::components::network::service::NetworkManager::new(store.clone(), process_tracker.clone()));
-        let state = build_app_state(store.clone(), process_tracker, network).await;
+        let pipeline = Arc::new(crate::components::ReconciliationPipeline::builder().build());
+        let ctx = Arc::new(crate::components::ReconcileContext {
+            store: store.clone(),
+            pipeline: pipeline.clone(),
+            cri: container_runtime.clone() as Arc<dyn crate::cri::RuntimeProvider>,
+            net: network.clone() as Arc<dyn crate::net::NetworkEngine>,
+            process_tracker: process_tracker.clone(),
+        });
+        let registry = Arc::new(crate::components::ComponentRegistry::new());
+        let state = build_app_state(store.clone(), process_tracker, network, registry, ctx).await;
         (build_router(state), store)
     }
 

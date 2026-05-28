@@ -126,14 +126,8 @@ pub async fn pod_handler(
             let pod_name = resource.name().to_string();
             let already_running = state.process_tracker.is_running(&pod_name).await;
             if !already_running {
-                let pod_state = match state.process_tracker.start_pod(&resource).await {
-                    Ok(_) => ResourceState::Running,
-                    Err(e) => {
-                        tracing::warn!("Failed to start pod {}: {}", pod_name, e);
-                        ResourceState::Failed(e.to_string())
-                    }
-                };
-                state.store.update_state(&resource.uid(), pod_state).await;
+                state.registry.on_apply(&state.ctx, &resource).await;
+                state.store.update_state(&resource.uid(), ResourceState::Running).await;
             }
             let tracker_state = state.store.get(&resource.uid()).await
                 .map(|t| t.state)
@@ -154,7 +148,7 @@ pub async fn delete_pod(
     let trackers = state.store.get_by_kind("Pod").await;
     for t in &trackers {
         if t.resource.name() == name && t.resource.namespace() == namespace {
-            state.process_tracker.stop_pod(&t.resource).await;
+            state.registry.on_delete(&state.ctx, &t.resource).await;
             state.store.delete(&t.resource).await.ok();
             info!("Deleted pod {}/{}", namespace, name);
             return Ok(Json(ok_status()));
@@ -186,13 +180,10 @@ pub async fn create_pod(
         .apply(resource.clone())
         .await
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
-    let pod_state = match state.process_tracker.start_pod(&resource).await {
-        Ok(_) => ResourceState::Running,
-        Err(e) => {
-            tracing::warn!("Failed to start pod {}: {}", resource.name(), e);
-            ResourceState::Failed(e.to_string())
-        }
-    };
+
+    state.registry.on_apply(&state.ctx, &resource).await;
+
+    let pod_state = ResourceState::Running;
     state.store.update_state(&resource.uid(), pod_state).await;
     let tracker_state = state.store.get(&resource.uid()).await
         .map(|t| t.state)
@@ -260,7 +251,6 @@ pub fn resource_to_pod_json_with_status(
                 .iter()
                 .map(|c| {
                     let restarts = restart_counts.get(&c.name).copied().unwrap_or(0) as i32;
-                    // CrashLoopBackOff when restarting repeatedly and not currently ready
                     let crash_loop = restarts >= 3 && !is_ready;
                     let cstate = Some(match state {
                         ResourceState::Running if !crash_loop => ContainerState {

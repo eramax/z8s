@@ -177,8 +177,10 @@ async fn main() -> Result<()> {
     let _s2 = supervisor.clone();
     let pt2 = process_tracker.clone();
     let net2 = network.clone();
+    let reg2 = registry.clone();
+    let ctx2 = ctx.clone();
     tokio::spawn(async move {
-        api::server::run_server(store_clone, pt2, net2).await;
+        api::server::run_server(store_clone, pt2, net2, reg2, ctx2).await;
     });
 
     // Initial reconcile

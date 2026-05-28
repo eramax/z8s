@@ -72,7 +72,7 @@ pub async fn delete_namespace(
         let pod_trackers = state.store.get_by_kind("Pod").await;
         for t in &pod_trackers {
             if t.resource.namespace() == name.as_str() {
-                state.process_tracker.stop_pod(&t.resource).await;
+                state.registry.on_delete(&state.ctx, &t.resource).await;
                 state.store.delete(&t.resource).await.ok();
             }
         }
@@ -80,12 +80,7 @@ pub async fn delete_namespace(
             let trackers = state.store.get_by_kind(kind).await;
             for t in &trackers {
                 if t.resource.namespace() == name.as_str() {
-                    if kind == "Service" {
-                        state
-                            .network
-                            .remove_service(&name, t.resource.name())
-                            .await;
-                    }
+                    state.registry.on_delete(&state.ctx, &t.resource).await;
                     state.store.delete(&t.resource).await.ok();
                 }
             }

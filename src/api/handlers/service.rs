@@ -117,7 +117,6 @@ pub async fn create_service(
         svc.metadata.creation_timestamp = Some(now_time());
     }
 
-    // Fill in ClusterIP, NodePort, and targetPort defaults if missing
     if let Some(spec) = svc.spec.as_mut() {
         let svc_type = spec.type_.as_deref().unwrap_or("ClusterIP");
         if spec.cluster_ip.as_deref().unwrap_or("").is_empty() && svc_type != "ExternalName" {
@@ -145,8 +144,7 @@ pub async fn create_service(
     let resource = AnyResource::Service(svc.clone());
     state.store.apply(resource.clone()).await.map_err(|e| ApiError::bad_request(e.to_string()))?;
 
-    // Start service proxy for NodePort services
-    state.network.sync_service(&svc).await;
+    state.registry.on_apply(&state.ctx, &resource).await;
 
     let status = if already_exists { StatusCode::OK } else { StatusCode::CREATED };
     Ok((status, Json(serde_json::to_value(&resource).unwrap_or_default())).into_response())
@@ -169,7 +167,6 @@ pub async fn update_service(
         .map_err(|e| ApiError::bad_request(format!("invalid Service: {}", e)))?;
     if svc.metadata.namespace.is_none() { svc.metadata.namespace = Some(namespace); }
     if svc.metadata.name.is_none() { svc.metadata.name = Some(name); }
-    // Re-apply targetPort defaults in case the patch omitted them
     if let Some(spec) = svc.spec.as_mut() {
         if let Some(ports) = spec.ports.as_mut() {
             for p in ports.iter_mut() {
@@ -181,7 +178,7 @@ pub async fn update_service(
     }
     let resource = AnyResource::Service(svc.clone());
     state.store.apply(resource.clone()).await.map_err(|e| ApiError::bad_request(e.to_string()))?;
-    state.network.sync_service(&svc).await;
+    state.registry.on_apply(&state.ctx, &resource).await;
     Ok(Json(serde_json::to_value(&resource).unwrap_or_default()))
 }
 
@@ -193,8 +190,8 @@ pub async fn delete_service(
     let trackers = state.store.get_by_kind("Service").await;
     for t in &trackers {
         if t.resource.namespace() == namespace && t.resource.name() == name {
+            state.registry.on_delete(&state.ctx, &t.resource).await;
             state.store.delete(&t.resource).await.ok();
-            state.network.remove_service(&namespace, &name).await;
             return Ok(Json(ok_status()));
         }
     }

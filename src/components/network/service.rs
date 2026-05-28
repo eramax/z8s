@@ -383,8 +383,8 @@ impl crate::net::NetworkEngine for NetworkManager {
 
 use async_trait::async_trait;
 use anyhow::Result;
-use crate::api::types::ResourceTracker;
-use crate::components::{Component, ReconcileContext};
+use crate::api::types::{AnyResource, ResourceTracker};
+use crate::components::{Component, ReconcileContext, ResourceCategory};
 
 pub struct ServiceResource {
     pub store: Arc<ResourceStore>,
@@ -403,7 +403,25 @@ impl Component for ServiceResource {
         "Service"
     }
 
+    fn category(&self) -> ResourceCategory {
+        ResourceCategory::Network
+    }
+
     async fn reconcile(&self, _ctx: &ReconcileContext, _tracker: &ResourceTracker) -> Result<()> {
+        Ok(())
+    }
+
+    async fn on_apply(&self, _ctx: &ReconcileContext, resource: &AnyResource) -> Result<()> {
+        if let AnyResource::Service(svc) = resource {
+            self.network.sync_service(svc).await;
+        }
+        Ok(())
+    }
+
+    async fn on_delete(&self, _ctx: &ReconcileContext, resource: &AnyResource) -> Result<()> {
+        let ns = resource.namespace();
+        let name = resource.name();
+        self.network.remove_service(ns, name).await;
         Ok(())
     }
 }
