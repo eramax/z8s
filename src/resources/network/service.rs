@@ -1,5 +1,5 @@
 use crate::api::types::ResourceStore;
-use crate::cri::runtime::ProcessSupervisor;
+use crate::scheduler::process::ProcessTracker;
 use k8s_openapi::api::core::v1::Service;
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use std::collections::{BTreeMap, HashMap};
@@ -21,16 +21,16 @@ struct RunningProxy {
 
 pub struct NetworkManager {
     pub store: Arc<ResourceStore>,
-    pub supervisor: Arc<ProcessSupervisor>,
+    pub process_tracker: Arc<ProcessTracker>,
     proxies: Mutex<HashMap<String, RunningProxy>>,
     counter: Arc<AtomicUsize>,
 }
 
 impl NetworkManager {
-    pub fn new(store: Arc<ResourceStore>, supervisor: Arc<ProcessSupervisor>) -> Self {
+    pub fn new(store: Arc<ResourceStore>, process_tracker: Arc<ProcessTracker>) -> Self {
         Self {
             store,
-            supervisor,
+            process_tracker,
             proxies: Mutex::new(HashMap::new()),
             counter: Arc::new(AtomicUsize::new(0)),
         }
@@ -39,7 +39,7 @@ impl NetworkManager {
     /// Start or restart ClusterIP/NodePort proxies and reconcile pod port publish for backends.
     pub async fn sync_service(&self, svc: &Service) {
         self.sync_service_proxies(svc).await;
-        self.supervisor.reconcile_network_for_service(svc).await;
+        
     }
 
     /// Bind/rebind proxies only (safe to call from `start_pod` without async recursion).
@@ -76,7 +76,7 @@ impl NetworkManager {
                     old.handle.abort();
                 }
                 let store = self.store.clone();
-                let supervisor = self.supervisor.clone();
+                let resolver: Arc<dyn crate::net::PodResolver> = self.process_tracker.clone();
                 let counter = self.counter.clone();
                 let selector_c = selector.clone();
                 let svc_name_c = svc_name.clone();
@@ -89,7 +89,7 @@ impl NetworkManager {
                         selector_c,
                         target_port_c,
                         store,
-                        supervisor,
+                        resolver,
                         counter,
                         &svc_name_c,
                         &svc_ns_c,
@@ -109,7 +109,7 @@ impl NetworkManager {
                         old.handle.abort();
                     }
                     let store = self.store.clone();
-                    let supervisor = self.supervisor.clone();
+                    let resolver: Arc<dyn crate::net::PodResolver> = self.process_tracker.clone();
                     let counter = self.counter.clone();
                     let selector_c = selector.clone();
                     let svc_name_c = svc_name.clone();
@@ -122,7 +122,7 @@ impl NetworkManager {
                             selector_c,
                             target_port_c,
                             store,
-                            supervisor,
+                            resolver,
                             counter,
                             &svc_name_c,
                             &svc_ns_c,
@@ -204,7 +204,7 @@ impl NetworkManager {
                 }
                 // Check if pod is running
                 let pod_name = pod.metadata.name.as_deref().unwrap_or_default();
-                let is_running = self.supervisor.is_pod_ready(pod_name).await;
+                let is_running = self.process_tracker.is_ready(pod_name).await;
                 if !is_running {
                     continue;
                 }
@@ -290,7 +290,7 @@ impl NetworkManager {
                     continue;
                 }
                 let pod_name = pod.metadata.name.as_deref().unwrap_or_default();
-                let is_ready = self.supervisor.is_pod_ready(pod_name).await;
+                let is_ready = self.process_tracker.is_ready(pod_name).await;
                 if !is_ready {
                     continue;
                 }
@@ -305,7 +305,7 @@ impl NetworkManager {
                             IntOrString::Int(i) => i as u16,
                             IntOrString::String(_) => p.port as u16,
                         };
-                        self.supervisor.backend_connect_port(pod_name, cp).await
+                        self.process_tracker.backend_connect_port(pod_name, cp).await
                     }
                     None => 80,
                 };

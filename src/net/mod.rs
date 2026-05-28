@@ -34,3 +34,9 @@ pub trait NetworkEngine: Send + Sync {
     async fn compute_endpoints(&self, svc: &Service) -> Endpoints;
     async fn compute_endpointslices(&self, svc: &Service) -> Vec<EndpointSlice>;
 }
+
+#[async_trait]
+pub trait PodResolver: Send + Sync {
+    async fn is_pod_alive(&self, pod_name: &str) -> bool;
+    async fn backend_connect_port(&self, pod_name: &str, container_port: u16) -> u16;
+}

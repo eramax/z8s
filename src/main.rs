@@ -109,8 +109,7 @@ async fn main() -> Result<()> {
         supervisor: supervisor.clone(),
     });
 
-    let network = Arc::new(NetworkManager::new(store.clone(), supervisor.clone()));
-    supervisor.set_network(network.clone());
+    let network = Arc::new(NetworkManager::new(store.clone(), process_tracker.clone()));
 
     let cri = Arc::new(ContainerRuntime::new(
         supervisor.clone(),

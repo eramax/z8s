@@ -163,7 +163,6 @@ pub struct ProcessSupervisor {
     pub cgroup_manager: Arc<CgroupManager>,
     pub store: Arc<ResourceStore>,
     pub restart_counts: Arc<Mutex<HashMap<String, u32>>>,
-    network: Arc<std::sync::Mutex<Option<Arc<crate::resources::network::service::NetworkManager>>>>,
 }
 
 impl ProcessSupervisor {
@@ -184,19 +183,14 @@ impl ProcessSupervisor {
             cgroup_manager,
             store,
             restart_counts: Arc::new(Mutex::new(HashMap::new())),
-            network: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
-    pub fn set_network(&self, network: Arc<crate::resources::network::service::NetworkManager>) {
-        *self.network.lock().unwrap() = Some(network);
-    }
-
     pub async fn start_pod(&self, resource: &AnyResource) -> Result<()> {
-        self.start_pod_inner(resource, true).await
+        self.start_pod_inner(resource).await
     }
 
-    async fn start_pod_inner(&self, resource: &AnyResource, sync_services: bool) -> Result<()> {
+    async fn start_pod_inner(&self, resource: &AnyResource) -> Result<()> {
         let containers = extract_containers(resource);
         if containers.is_empty() {
             warn!("No containers in resource {}", resource.name());
@@ -259,126 +253,7 @@ impl ProcessSupervisor {
 
         self.store.update_state(&pod_uid, ResourceState::Running).await;
 
-        if sync_services {
-            if let AnyResource::Pod(pod) = resource {
-                let ns = pod.metadata.namespace.as_deref().unwrap_or("default");
-                let labels = pod.metadata.labels.clone().unwrap_or_default();
-                let net = self.network.lock().unwrap().clone();
-                if let Some(net) = net {
-                    net.sync_services_for_labels(ns, &labels).await;
-                }
-            }
-        }
-
         Ok(())
-    }
-
-    /// Ensure running pods publish ports from Services (pods often start before their Service exists).
-    pub async fn reconcile_network_for_service(&self, svc: &k8s_openapi::api::core::v1::Service) {
-        let selector = svc
-            .spec
-            .as_ref()
-            .and_then(|s| s.selector.as_ref())
-            .cloned()
-            .unwrap_or_default();
-        if selector.is_empty() {
-            return;
-        }
-        let svc_ns = svc.metadata.namespace.as_deref().unwrap_or("default");
-        let trackers = self.store.get_by_kind("Pod").await;
-        for t in &trackers {
-            if t.resource.namespace() != svc_ns {
-                continue;
-            }
-            if let AnyResource::Pod(pod) = &t.resource {
-                let labels = pod.metadata.labels.clone().unwrap_or_default();
-                if selector.iter().all(|(k, v)| labels.get(k) == Some(v)) {
-                    self.ensure_pod_network(&t.resource).await;
-                }
-            }
-        }
-    }
-
-    async fn ensure_pod_network(&self, resource: &AnyResource) {
-        let AnyResource::Pod(pod) = resource else {
-            return;
-        };
-        let pod_name = pod.metadata.name.as_deref().unwrap_or_default();
-        if pod_name.is_empty() || !self.is_pod_alive(pod_name).await {
-            return;
-        }
-
-        let service_ports = self.service_target_ports_for_pod(pod).await;
-        let containers = extract_containers(resource);
-
-        for container in &containers {
-            let cid = format!("{}-{}", pod_name, container.name);
-            let needed = merge_publish_ports(container, &service_ports);
-            let want_isolated = use_isolated_network(container, &service_ports);
-
-            let mut running = self.running.lock().await;
-            let Some(rc) = running.get_mut(&cid) else {
-                continue;
-            };
-
-            if want_isolated && !rc.instance.isolated_net {
-                drop(running);
-                info!(
-                    "Pod {} needs network namespace for ports {:?}; restarting",
-                    pod_name, needed
-                );
-                self.restart_pod_network(resource).await;
-                return;
-            }
-
-            if !want_isolated {
-                continue;
-            }
-
-            let missing: Vec<u16> = needed
-                .iter()
-                .filter(|p| !rc.instance.published_ports.contains_key(p))
-                .copied()
-                .collect();
-            if missing.is_empty() {
-                continue;
-            }
-
-            let Some(pid) = rc.instance.pid else {
-                continue;
-            };
-            if let Some(ref mut pp) = rc.port_publish {
-                pp.append_ports(pid, &missing);
-                for &cp in &missing {
-                    if let Some(hp) = pp.map.get(&cp) {
-                        rc.instance.published_ports.insert(cp, *hp);
-                    }
-                }
-            } else {
-                let (published_ports, port_publish) = attach_port_publish(pid, &missing);
-                rc.instance.published_ports.extend(published_ports);
-                rc.port_publish = port_publish;
-            }
-            info!(
-                "Pod {} container {}: late-published ports {:?}",
-                pod_name, container.name, missing
-            );
-        }
-    }
-
-    async fn restart_pod_network(&self, resource: &AnyResource) {
-        let uid = resource.uid();
-        let clone = resource.clone();
-        self.stop_pod(&clone).await;
-        self.store
-            .update_state(&uid, ResourceState::Pending)
-            .await;
-        if let Err(e) = self.start_pod_inner(&clone, false).await {
-            error!("Failed to restart pod {} for network: {}", resource.name(), e);
-            self.store
-                .update_state(&uid, ResourceState::Failed(e.to_string()))
-                .await;
-        }
     }
 
     async fn fetch_cms_and_secrets(

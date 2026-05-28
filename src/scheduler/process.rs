@@ -7,6 +7,8 @@ use tracing::{info, warn};
 
 use crate::api::types::{AnyResource, ResourceState, ResourceStore};
 use crate::cri::runtime::{ProcessSupervisor, RunningContainer};
+use crate::net::PodResolver;
+use async_trait::async_trait;
 
 pub struct ProcessTracker {
     pub running: Arc<Mutex<HashMap<String, RunningContainer>>>,
@@ -37,14 +39,10 @@ impl ProcessTracker {
     }
 
     pub async fn is_ready(&self, pod_name: &str) -> bool {
-        if !self.is_running(pod_name).await {
-            return false;
-        }
+        if !self.is_running(pod_name).await { return false; }
         let prefix = format!("{}-", pod_name);
         let running = self.running.lock().await;
-        running.iter().any(|(cid, rc)| {
-            cid.starts_with(&prefix) && rc.ready.load(Ordering::SeqCst)
-        })
+        running.iter().any(|(cid, rc)| cid.starts_with(&prefix) && rc.ready.load(Ordering::SeqCst))
     }
 
     pub async fn get_logs(&self, pod_name: &str, container_name: &str) -> Vec<String> {
@@ -81,6 +79,10 @@ impl ProcessTracker {
         container_port
     }
 
+    fn is_pid_alive(pid: u32) -> bool {
+        nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None).is_ok()
+    }
+
     pub fn reap_zombies(&self) -> Vec<(u32, i32)> {
         let mut reaped = Vec::new();
         loop {
@@ -106,7 +108,6 @@ impl ProcessTracker {
 
     pub async fn handle_exited_containers(&self, reaped: Vec<(u32, i32)>, store: &Arc<ResourceStore>) {
         let reaped_map: HashMap<u32, i32> = reaped.into_iter().collect();
-
         let dead: Vec<(String, u32, i32)> = {
             let running = self.running.lock().await;
             running.values()
@@ -117,7 +118,6 @@ impl ProcessTracker {
                 })
                 .collect()
         };
-
         for (container_id, pid, exit_code) in dead {
             let trackers = store.get_all().await;
             let pod_tracker = trackers.iter().find(|t| {
@@ -125,75 +125,59 @@ impl ProcessTracker {
                 let pod_name = t.resource.name();
                 container_id.starts_with(&format!("{}-", pod_name))
             });
-
-            let restart_policy = pod_tracker
-                .and_then(|t| {
-                    if let AnyResource::Pod(pod) = &t.resource {
-                        pod.spec.as_ref()?.restart_policy.clone()
-                    } else { None }
-                })
-                .unwrap_or_else(|| "Always".to_string());
-
+            let restart_policy = pod_tracker.and_then(|t| {
+                if let AnyResource::Pod(pod) = &t.resource { pod.spec.as_ref()?.restart_policy.clone() } else { None }
+            }).unwrap_or_else(|| "Always".to_string());
             let pod_uid = pod_tracker.map(|t| t.resource.uid()).unwrap_or_default();
-
             let should_restart = match restart_policy.as_str() {
-                "Always" => true,
-                "OnFailure" => exit_code != 0,
-                "Never" => false,
-                _ => true,
+                "Always" => true, "OnFailure" => exit_code != 0, "Never" => false, _ => true,
             };
-
-            info!(
-                "Container {} (PID {}) exited with code {}; restartPolicy={}, restart={}",
-                container_id, pid, exit_code, restart_policy, should_restart
-            );
-
+            info!("Container {} (PID {}) exited with code {}; restartPolicy={}, restart={}", container_id, pid, exit_code, restart_policy, should_restart);
             let log_lines = if let Some(rc) = self.running.lock().await.get(&container_id) {
                 rc.log_buffer.lock().await.clone()
             } else { Vec::new() };
             if !log_lines.is_empty() {
                 warn!("--- Container {} logs before exit: ---", container_id);
-                for line in log_lines {
-                    warn!("  {}", line);
-                }
+                for line in log_lines { warn!("  {}", line); }
                 warn!("---------------------------------------");
             }
-
             self.running.lock().await.remove(&container_id);
-
             if should_restart {
                 let mut counts = self.restart_counts.lock().await;
                 let count = counts.entry(container_id.clone()).or_insert(0);
                 *count += 1;
                 let restart_count = *count;
                 drop(counts);
-
                 if !pod_uid.is_empty() {
-                    let delay_secs: u64 = if restart_count <= 1 {
-                        0
-                    } else {
-                        std::cmp::min(10u64 << (restart_count - 2).min(5), 300)
-                    };
-
+                    let delay_secs: u64 = if restart_count <= 1 { 0 } else { std::cmp::min(10u64 << (restart_count - 2).min(5), 300) };
                     let store = store.clone();
                     let uid = pod_uid.clone();
                     tokio::spawn(async move {
-                        if delay_secs > 0 {
-                            info!("CrashLoopBackOff: restarting {} in {}s (restart #{})", uid, delay_secs, restart_count);
-                            tokio::time::sleep(Duration::from_secs(delay_secs)).await;
-                        }
+                        if delay_secs > 0 { info!("CrashLoopBackOff: restarting {} in {}s (restart #{})", uid, delay_secs, restart_count); tokio::time::sleep(Duration::from_secs(delay_secs)).await; }
                         store.update_state(&uid, ResourceState::Pending).await;
                     });
                 }
             } else {
                 if !pod_uid.is_empty() {
-                    if exit_code == 0 {
-                        store.update_state(&pod_uid, ResourceState::Succeeded).await;
-                    } else {
-                        store.update_state(&pod_uid, ResourceState::Failed(format!("exit code {}", exit_code))).await;
-                    }
+                    if exit_code == 0 { store.update_state(&pod_uid, ResourceState::Succeeded).await; }
+                    else { store.update_state(&pod_uid, ResourceState::Failed(format!("exit code {}", exit_code))).await; }
                 }
             }
         }
+    }
+}
+
+#[async_trait]
+impl PodResolver for ProcessTracker {
+    async fn is_pod_alive(&self, pod_name: &str) -> bool {
+        let prefix = format!("{}-", pod_name);
+        let running = self.running.lock().await;
+        running.iter().any(|(cid, rc)| {
+            cid.starts_with(&prefix) && rc.instance.pid.map(|p| Self::is_pid_alive(p)).unwrap_or(false)
+        })
+    }
+
+    async fn backend_connect_port(&self, pod_name: &str, container_port: u16) -> u16 {
+        self.backend_connect_port(pod_name, container_port).await
     }
 }

@@ -1,5 +1,5 @@
 use crate::api::types::ResourceStore;
-use crate::cri::runtime::ProcessSupervisor;
+use crate::net::PodResolver;
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -18,13 +18,13 @@ pub async fn run_proxy_addr_when_ready(
     selector: BTreeMap<String, String>,
     target_port: IntOrString,
     store: Arc<ResourceStore>,
-    supervisor: Arc<ProcessSupervisor>,
+    resolver: Arc<dyn PodResolver>,
     counter: Arc<AtomicUsize>,
     svc_name: &str,
     svc_ns: &str,
 ) {
     for _ in 0..120 {
-        let endpoints = find_endpoints(&selector, &target_port, &store, &supervisor, svc_ns).await;
+        let endpoints = find_endpoints(&selector, &target_port, &store, &*resolver, svc_ns).await;
         if !endpoints.is_empty() {
             let probe = format!("{}:{}", endpoints[0].host, endpoints[0].port);
             if TcpStream::connect(&probe).await.is_ok() {
@@ -38,7 +38,7 @@ pub async fn run_proxy_addr_when_ready(
         selector,
         target_port,
         store,
-        supervisor,
+        resolver,
         counter,
         svc_name,
         svc_ns,
@@ -135,7 +135,7 @@ pub async fn run_proxy_addr(
     selector: BTreeMap<String, String>,
     target_port: IntOrString,
     store: Arc<ResourceStore>,
-    supervisor: Arc<ProcessSupervisor>,
+    resolver: Arc<dyn PodResolver>,
     counter: Arc<AtomicUsize>,
     svc_name: &str,
     svc_ns: &str,
@@ -172,14 +172,14 @@ pub async fn run_proxy_addr(
         match listener.accept().await {
             Ok((client, _peer)) => {
                 let store = store.clone();
-                let supervisor = supervisor.clone();
+                let resolver = resolver.clone();
                 let counter = counter.clone();
                 let selector = selector.clone();
                 let target_port = target_port.clone();
                 let svc_ns = svc_ns.to_string();
                 let svc_name = svc_name.to_string();
                 tokio::spawn(async move {
-                    handle_connection(client, selector, target_port, store, supervisor, counter, &svc_ns, &svc_name).await;
+                    handle_connection(client, selector, target_port, store, resolver, counter, &svc_ns, &svc_name).await;
                 });
             }
             Err(e) => {
@@ -195,7 +195,7 @@ pub async fn run_proxy(
     selector: BTreeMap<String, String>,
     target_port: IntOrString,
     store: Arc<ResourceStore>,
-    supervisor: Arc<ProcessSupervisor>,
+    resolver: Arc<dyn PodResolver>,
     counter: Arc<AtomicUsize>,
     svc_name: &str,
     svc_ns: &str,
@@ -215,14 +215,14 @@ pub async fn run_proxy(
             Ok((client, peer)) => {
                 info!("Service proxy {}/{}: new connection from {}", svc_ns, svc_name, peer);
                 let store = store.clone();
-                let supervisor = supervisor.clone();
+                let resolver = resolver.clone();
                 let counter = counter.clone();
                 let selector = selector.clone();
                 let target_port = target_port.clone();
                 let svc_ns = svc_ns.to_string();
                 let svc_name = svc_name.to_string();
                 tokio::spawn(async move {
-                    handle_connection(client, selector, target_port, store, supervisor, counter, &svc_ns, &svc_name).await;
+                    handle_connection(client, selector, target_port, store, resolver, counter, &svc_ns, &svc_name).await;
                 });
             }
             Err(e) => {
@@ -238,12 +238,12 @@ async fn handle_connection(
     selector: BTreeMap<String, String>,
     target_port: IntOrString,
     store: Arc<ResourceStore>,
-    supervisor: Arc<ProcessSupervisor>,
+    resolver: Arc<dyn PodResolver>,
     counter: Arc<AtomicUsize>,
     svc_ns: &str,
     svc_name: &str,
 ) {
-    let endpoints = find_endpoints(&selector, &target_port, &store, &supervisor, svc_ns).await;
+    let endpoints = find_endpoints(&selector, &target_port, &store, &*resolver, svc_ns).await;
     if endpoints.is_empty() {
         warn!("Service {}/{}: no endpoints available", svc_ns, svc_name);
         return;
@@ -268,7 +268,7 @@ async fn find_endpoints(
     selector: &BTreeMap<String, String>,
     target_port: &IntOrString,
     store: &ResourceStore,
-    supervisor: &ProcessSupervisor,
+    resolver: &dyn PodResolver,
     svc_ns: &str,
 ) -> Vec<super::ServiceEndpoint> {
     let pod_trackers = store.get_by_kind("Pod").await;
@@ -286,7 +286,7 @@ async fn find_endpoints(
             }
 
             let pod_name = pod.metadata.name.as_deref().unwrap_or_default();
-            if !supervisor.is_pod_alive(pod_name).await {
+            if !resolver.is_pod_alive(pod_name).await {
                 continue;
             }
 
@@ -295,7 +295,7 @@ async fn find_endpoints(
                 None => continue,
             };
 
-            let connect_port = supervisor.backend_connect_port(pod_name, port).await;
+            let connect_port = resolver.backend_connect_port(pod_name, port).await;
 
             let addr = format!("127.0.0.1:{}", connect_port);
             if tokio::time::timeout(Duration::from_millis(500), TcpStream::connect(&addr))

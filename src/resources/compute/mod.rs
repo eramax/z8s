@@ -1,7 +1,7 @@
 pub mod deployment;
 pub mod pod;
 
-pub use crate::api::types::*;
+use crate::api::AnyResource;
 use k8s_openapi::api::core::v1::PodSpec;
 
 pub trait ComputeResource {
