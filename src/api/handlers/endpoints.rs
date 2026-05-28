@@ -19,7 +19,7 @@ pub async fn list_endpoints_ns(state: &AppState, namespace: Option<String>) -> J
     for t in &svc_trackers {
         if namespace.as_deref().map_or(false, |ns| t.resource.namespace() != ns) { continue; }
         if let AnyResource::Service(svc) = &t.resource {
-            items.push(state.network.compute_endpoints(svc).await);
+            items.push(state.ctx.net.compute_endpoints(svc).await);
         }
     }
     Json(List { items, metadata: make_list_meta() })
@@ -33,7 +33,7 @@ pub async fn get_endpoints(
     for t in &trackers {
         if t.resource.namespace() == namespace && t.resource.name() == name {
             if let AnyResource::Service(svc) = &t.resource {
-                return Ok(Json(state.network.compute_endpoints(svc).await));
+                return Ok(Json(state.ctx.net.compute_endpoints(svc).await));
             }
         }
     }

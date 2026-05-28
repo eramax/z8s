@@ -19,7 +19,7 @@ pub async fn list_endpointslices_ns(state: &AppState, namespace: Option<String>)
     for t in &svc_trackers {
         if namespace.as_deref().map_or(false, |ns| t.resource.namespace() != ns) { continue; }
         if let AnyResource::Service(svc) = &t.resource {
-            items.extend(state.network.compute_endpointslices(svc).await);
+            items.extend(state.ctx.net.compute_endpointslices(svc).await);
         }
     }
     Json(List { items, metadata: make_list_meta() })
@@ -33,7 +33,7 @@ pub async fn get_endpointslice(
     for t in &trackers {
         if t.resource.namespace() != namespace { continue; }
         if let AnyResource::Service(svc) = &t.resource {
-            for ep in state.network.compute_endpointslices(svc).await {
+            for ep in state.ctx.net.compute_endpointslices(svc).await {
                 if ep.metadata.name.as_deref() == Some(&name) {
                     return Ok(Json(ep));
                 }

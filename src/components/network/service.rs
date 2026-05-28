@@ -1,4 +1,4 @@
-use crate::types::ResourceStore;
+use crate::types::{AnyResource, ResourceStore};
 use crate::scheduler::process::ProcessTracker;
 use k8s_openapi::api::core::v1::Service;
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
@@ -135,7 +135,7 @@ impl NetworkManager {
     pub async fn sync_services_for_labels(&self, namespace: &str, pod_labels: &BTreeMap<String, String>) {
         let trackers = self.store.get_by_kind("Service").await;
         for t in &trackers {
-            if let crate::api::AnyResource::Service(svc) = &t.resource {
+            if let AnyResource::Service(svc) = &t.resource {
                 if svc.metadata.namespace.as_deref().unwrap_or("default") != namespace {
                     continue;
                 }
@@ -189,7 +189,7 @@ impl NetworkManager {
         // Find pods matching the selector
         let pod_trackers = self.store.get_by_kind("Pod").await;
         for t in &pod_trackers {
-            if let crate::api::AnyResource::Pod(pod) = &t.resource {
+            if let AnyResource::Pod(pod) = &t.resource {
                 if pod.metadata.namespace.as_deref().unwrap_or("default") != svc_ns {
                     continue;
                 }
@@ -276,7 +276,7 @@ impl NetworkManager {
 
         let pod_trackers = self.store.get_by_kind("Pod").await;
         for t in &pod_trackers {
-            if let crate::api::AnyResource::Pod(pod) = &t.resource {
+            if let AnyResource::Pod(pod) = &t.resource {
                 if pod.metadata.namespace.as_deref().unwrap_or("default") != svc_ns {
                     continue;
                 }
@@ -383,7 +383,7 @@ impl crate::net::NetworkEngine for NetworkManager {
 
 use async_trait::async_trait;
 use anyhow::Result;
-use crate::types::{AnyResource, ResourceTracker};
+use crate::types::ResourceTracker;
 use crate::components::{Component, ReconcileContext, ResourceCategory};
 
 pub struct ServiceResource {

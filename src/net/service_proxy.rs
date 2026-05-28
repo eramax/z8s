@@ -1,4 +1,4 @@
-use crate::types::ResourceStore;
+use crate::types::{AnyResource, ResourceStore};
 use crate::net::PodResolver;
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use std::collections::BTreeMap;
@@ -275,7 +275,7 @@ async fn find_endpoints(
     let mut endpoints = Vec::new();
 
     for t in &pod_trackers {
-        if let crate::api::AnyResource::Pod(pod) = &t.resource {
+        if let AnyResource::Pod(pod) = &t.resource {
             if pod.metadata.namespace.as_deref().unwrap_or("default") != svc_ns {
                 continue;
             }

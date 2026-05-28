@@ -47,7 +47,6 @@ type EventStore = Arc<Mutex<Vec<Event>>>;
 pub struct AppState {
     pub store: Arc<ResourceStore>,
     pub process_tracker: Arc<ProcessTracker>,
-    pub network: Arc<dyn crate::net::NetworkEngine>,
     pub namespaces: NamespaceStore,
     pub events: EventStore,
     pub registry: Arc<ComponentRegistry>,
@@ -79,7 +78,6 @@ impl AppState {
 pub async fn build_app_state(
     store: Arc<ResourceStore>,
     process_tracker: Arc<ProcessTracker>,
-    network: Arc<dyn crate::net::NetworkEngine>,
     registry: Arc<ComponentRegistry>,
     ctx: Arc<ReconcileContext>,
 ) -> AppState {
@@ -93,7 +91,7 @@ pub async fn build_app_state(
         let mut ev = events.lock().await;
         ev.push(make_event("z8s-started", "default", "Node", "z8s-node", "Started", "z8s daemon started", "Normal"));
     }
-    AppState { store, process_tracker, network, namespaces, events, registry, ctx }
+    AppState { store, process_tracker, namespaces, events, registry, ctx }
 }
 
 pub fn build_router(state: AppState) -> Router {
@@ -120,11 +118,10 @@ pub fn build_router(state: AppState) -> Router {
 pub async fn run_server(
     store: Arc<ResourceStore>,
     process_tracker: Arc<ProcessTracker>,
-    network: Arc<dyn crate::net::NetworkEngine>,
     registry: Arc<ComponentRegistry>,
     ctx: Arc<ReconcileContext>,
 ) {
-    let state = build_app_state(store, process_tracker, network, registry, ctx).await;
+    let state = build_app_state(store, process_tracker, registry, ctx).await;
     let app = build_router(state);
     let addr = format!("0.0.0.0:{}", z8s_port());
     info!("Starting k8s API server on {}", addr);
@@ -340,9 +337,10 @@ mod tests {
             cri: container_runtime.clone() as Arc<dyn crate::cri::RuntimeProvider>,
             net: network.clone() as Arc<dyn crate::net::NetworkEngine>,
             process_tracker: process_tracker.clone(),
+            vol: Arc::new(crate::storage::ProvisionerDispatcher::new(store.clone())) as Arc<dyn crate::storage::StorageProvisioner>,
         });
         let registry = Arc::new(crate::components::ComponentRegistry::new());
-        let state = build_app_state(store, process_tracker, network, registry, ctx).await;
+        let state = build_app_state(store, process_tracker, registry, ctx).await;
         build_router(state)
     }
 
@@ -368,9 +366,10 @@ mod tests {
             cri: container_runtime.clone() as Arc<dyn crate::cri::RuntimeProvider>,
             net: network.clone() as Arc<dyn crate::net::NetworkEngine>,
             process_tracker: process_tracker.clone(),
+            vol: Arc::new(crate::storage::ProvisionerDispatcher::new(store.clone())) as Arc<dyn crate::storage::StorageProvisioner>,
         });
         let registry = Arc::new(crate::components::ComponentRegistry::new());
-        let state = build_app_state(store.clone(), process_tracker, network, registry, ctx).await;
+        let state = build_app_state(store.clone(), process_tracker, registry, ctx).await;
         (build_router(state), store)
     }
 
