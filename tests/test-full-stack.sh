@@ -228,4 +228,4 @@ check "PVC req=100Mi" test "$(k get pvc pvc-fulltest -n "$NS" -o jsonpath='{.spe
 echo -e "${GREEN}════════════════════════════════════════════${NC}"
 echo -e "${GREEN}  FULL STACK TEST PASSED${NC}"
 echo -e "${GREEN}════════════════════════════════════════════${NC}"
-kubectl delete ns "$NS" --ignore-not-found --wait=false 2>/dev/null || true
+#kubectl delete ns "$NS" --ignore-not-found --wait=false 2>/dev/null || true
