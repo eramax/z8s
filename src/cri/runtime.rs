@@ -92,6 +92,7 @@ struct ContainerSpawnCtx<'a> {
     extra_caps: Vec<String>,
     published_ports: Vec<u16>,
     working_dir: Option<String>,
+    probes: Vec<ProbeConfig>,
 }
 
 #[derive(Debug, Clone)]
@@ -157,31 +158,38 @@ impl ProcessSupervisor {
         rootfs_path: &str,
         pod_uid: &str,
     ) -> Result<RunningContainer> {
-        let (entrypoint, cmd_args, working_dir) = if cfg.entrypoint.is_empty() {
-            let oci = crate::cri::oci::read_image_config(rootfs_path);
+        let oci = if cfg.entrypoint.is_empty() || cfg.working_dir.is_none() {
+            crate::cri::oci::read_image_config(rootfs_path)
+        } else {
+            crate::cri::oci::SavedImageConfig::default()
+        };
+        let oci_wd = oci.working_dir.clone();
+        let working_dir = cfg.working_dir.clone().or(oci_wd);
+        let (entrypoint, cmd_args) = if cfg.entrypoint.is_empty() {
             let oci_ep = oci.entrypoint.as_ref().and_then(|v| v.first()).cloned();
             let oci_cmd = oci.cmd.unwrap_or_default();
-            let oci_wd = oci.working_dir;
-            let wd = cfg.working_dir.clone().or(oci_wd);
             match (oci_ep, cfg.args.is_empty()) {
                 (Some(ep), true) => {
                     let mut args = oci_cmd;
-                    (ep, args, wd)
+                    (ep, args)
                 }
                 (Some(ep), false) => {
-                    (ep, cfg.args.clone(), wd)
+                    (ep, cfg.args.clone())
                 }
                 (None, _) if !oci_cmd.is_empty() => {
                     let prog = oci_cmd[0].clone();
                     let args: Vec<String> = oci_cmd[1..].to_vec();
-                    (prog, args, wd)
+                    (prog, args)
+                }
+                (None, false) if !cfg.args.is_empty() => {
+                    (cfg.args[0].clone(), cfg.args[1..].to_vec())
                 }
                 (None, _) => {
-                    (cfg.entrypoint.clone(), cfg.args.clone(), wd)
+                    (cfg.entrypoint.clone(), cfg.args.clone())
                 }
             }
         } else {
-            (cfg.entrypoint.clone(), cfg.args.clone(), cfg.working_dir.clone())
+            (cfg.entrypoint.clone(), cfg.args.clone())
         };
         let image = &cfg.image;
         let is_native = cfg.is_native;
@@ -225,6 +233,7 @@ impl ProcessSupervisor {
                 extra_caps: extra_caps.clone(),
                 published_ports: published_ports_data.clone(),
                 working_dir: working_dir.clone(),
+                probes: cfg.probes.clone(),
             };
             if rootfs::is_root() {
                 return self.spawn_root_ns_container(ctx, &published_ports_data).await;
@@ -268,6 +277,26 @@ impl ProcessSupervisor {
 
         self.cgroup_manager.create_pod_cgroup(pod_uid)?;
 
+        for cfg in &spec.containers {
+            if let Some(limit) = cfg.memory_limit_bytes {
+                if limit > 0 {
+                    self.cgroup_manager.set_memory_limit(pod_uid, limit).ok();
+                }
+            }
+            if let Some(low) = cfg.memory_low_bytes {
+                if low > 0 {
+                    self.cgroup_manager.set_memory_low(pod_uid, low).ok();
+                }
+            }
+            if let Some(quota) = cfg.cpu_quota {
+                if let Some(period) = cfg.cpu_period {
+                    if quota > 0 && period > 0 {
+                        self.cgroup_manager.set_cpu_limit(pod_uid, quota, period).ok();
+                    }
+                }
+            }
+        }
+
         let mut prepared = Vec::new();
         for cfg in &spec.containers {
             let image_ref = &cfg.image;
@@ -293,17 +322,61 @@ impl ProcessSupervisor {
         Ok(())
     }
 
-
-
-
-
+    fn spawn_probes(
+        probes: &[ProbeConfig],
+        container_id: &str,
+        container_port_map: &std::collections::HashMap<u16, u16>,
+    ) -> (Arc<AtomicBool>, Arc<Mutex<bool>>) {
+        let ready = Arc::new(AtomicBool::new(true));
+        let healthy = Arc::new(Mutex::new(true));
+        if probes.is_empty() {
+            return (ready, healthy);
+        }
+        let p_ready = ready.clone();
+        let p_healthy = healthy.clone();
+        let cid = container_id.to_string();
+        let probes_owned = probes.to_vec();
+        let port_map = container_port_map.clone();
+        tokio::spawn(async move {
+            for config in &probes_owned {
+                tokio::time::sleep(Duration::from_secs(config.initial_delay_seconds as u64)).await;
+                loop {
+                    let status = match &config.action {
+                        ProbeAction::Exec(exec) => {
+                            HealthChecker::check_exec(exec.command.as_deref().unwrap_or(&[]), config.timeout()).await
+                        }
+                        ProbeAction::HTTPGet(http) => {
+                            let mut h = http.clone();
+                            if let Some(&host_port) = port_map.get(&h.port) {
+                                h.port = host_port;
+                            }
+                            HealthChecker::check_http(&h, config.timeout()).await
+                        }
+                        ProbeAction::TCPSocket(tcp) => {
+                            let mut t = tcp.clone();
+                            if let Some(&host_port) = port_map.get(&t.port) {
+                                t.port = host_port;
+                            }
+                            HealthChecker::check_tcp(&t, config.timeout()).await
+                        }
+                    };
+                    let ok = matches!(status, HealthStatus::Healthy);
+                    p_ready.store(ok, Ordering::SeqCst);
+                    *p_healthy.lock().await = ok;
+                    if !ok { warn!("Probe for {} failed", cid); }
+                    tokio::time::sleep(Duration::from_secs(config.period_seconds as u64)).await;
+                }
+            }
+        });
+        (ready, healthy)
+    }
 
     async fn spawn_root_ns_container(
         &self,
         ctx: ContainerSpawnCtx<'_>,
         _service_ports: &[u16],
     ) -> Result<RunningContainer> {
-        let ContainerSpawnCtx { entrypoint, cmd_args, env_vars, rootfs_path, container_id, pod_uid, image, container_name, volumes, run_as_user, run_as_group, isolate_net, privileged, extra_caps, published_ports, working_dir } = ctx;
+        let ContainerSpawnCtx { entrypoint, cmd_args, env_vars, rootfs_path, container_id, pod_uid, image, container_name, volumes, run_as_user, run_as_group, isolate_net, privileged, extra_caps, published_ports, working_dir, probes } = ctx;
         let (stdout_r, stdout_w) = nix::unistd::pipe().context("Failed to create stdout pipe")?;
         let (stderr_r, stderr_w) = nix::unistd::pipe().context("Failed to create stderr pipe")?;
 
@@ -367,13 +440,15 @@ impl ProcessSupervisor {
                 let (published_ports_map, port_publish) = attach_port_publish(pid, &published_ports);
                 instance.published_ports = published_ports_map;
 
+                let (ready, healthy) = Self::spawn_probes(&probes, container_id, &instance.published_ports);
+
                 Ok(RunningContainer {
                     child: None,
                     instance,
                     restart_count: 0,
                     log_buffer,
-                    ready: Arc::new(AtomicBool::new(true)),
-                    healthy: Arc::new(Mutex::new(true)),
+                    ready,
+                    healthy,
                     port_publish,
                 })
             }
@@ -393,6 +468,8 @@ impl ProcessSupervisor {
                 ) {
                     let _ = nix::unistd::dup2_stdin(fd);
                 }
+
+                let _ = nix::unistd::setsid();
 
                 let pod_hostname = container_id.rsplit_once('-').map_or(container_id, |(pod, _)| pod);
                 let isolation = match rootfs::child_enter_ns_root(&rootfs_owned, &volumes, isolate_net, pod_hostname)
@@ -490,7 +567,7 @@ impl ProcessSupervisor {
         ctx: ContainerSpawnCtx<'_>,
         _service_ports: &[u16],
     ) -> Result<RunningContainer> {
-        let ContainerSpawnCtx { entrypoint, cmd_args, env_vars, rootfs_path, container_id, pod_uid, image, container_name, volumes, run_as_user, run_as_group, isolate_net, privileged, extra_caps, published_ports, working_dir } = ctx;
+        let ContainerSpawnCtx { entrypoint, cmd_args, env_vars, rootfs_path, container_id, pod_uid, image, container_name, volumes, run_as_user, run_as_group, isolate_net, privileged, extra_caps, published_ports, working_dir, probes } = ctx;
         let (stdout_r, stdout_w) = nix::unistd::pipe()
             .context("Failed to create stdout pipe")?;
         let (stderr_r, stderr_w) = nix::unistd::pipe()
@@ -515,8 +592,11 @@ impl ProcessSupervisor {
                 let child_pid = child.as_raw();
 
                 let mut sync_buf = [0u8; 1];
-                nix::unistd::read(&sync_r, &mut sync_buf)
+                let n = nix::unistd::read(&sync_r, &mut sync_buf)
                     .context("Failed to read sync from child")?;
+                if n == 0 || sync_buf[0] != b'S' {
+                    anyhow::bail!("Child process died before completing namespace setup");
+                }
                 drop(sync_r);
 
                 rootfs::write_userns_maps(child_pid, run_as_user, run_as_group)?;
@@ -589,8 +669,7 @@ impl ProcessSupervisor {
                 let (published_ports_map, port_publish) = attach_port_publish(pid, &published_ports);
                 instance.published_ports = published_ports_map;
 
-                let ready = Arc::new(AtomicBool::new(true));
-                let healthy = Arc::new(Mutex::new(true));
+                let (ready, healthy) = Self::spawn_probes(&probes, container_id, &instance.published_ports);
 
                 Ok(RunningContainer {
                     child: None,
@@ -607,6 +686,8 @@ impl ProcessSupervisor {
                 drop(stderr_r);
                 drop(sync_r);
                 drop(ack_w);
+
+                let _ = nix::unistd::setsid();
 
                 let pod_hostname = container_id.rsplit_once('-').map_or(container_id, |(pod, _)| pod);
                 let isolation = match rootfs::child_enter_ns_fork(
@@ -738,38 +819,7 @@ impl ProcessSupervisor {
         let (published_ports_map, port_publish) = attach_port_publish(pid, published_ports);
         instance.published_ports = published_ports_map;
 
-        let ready = Arc::new(AtomicBool::new(true));
-        let healthy = Arc::new(Mutex::new(true));
-
-        if !probes.is_empty() {
-            let p_ready = ready.clone();
-            let p_healthy = healthy.clone();
-            let cid = container_id.to_string();
-            let probes_owned = probes.to_vec();
-            tokio::spawn(async move {
-                for config in &probes_owned {
-                    tokio::time::sleep(Duration::from_secs(config.initial_delay_seconds as u64)).await;
-                    loop {
-                        let status = match &config.action {
-                            ProbeAction::Exec(exec) => {
-                                HealthChecker::check_exec(exec.command.as_deref().unwrap_or(&[]), config.timeout()).await
-                            }
-                            ProbeAction::HTTPGet(http) => {
-                                HealthChecker::check_http(http, config.timeout()).await
-                            }
-                            ProbeAction::TCPSocket(tcp) => {
-                                HealthChecker::check_tcp(tcp, config.timeout()).await
-                            }
-                        };
-                        let ok = matches!(status, HealthStatus::Healthy);
-                        p_ready.store(ok, Ordering::SeqCst);
-                        *p_healthy.lock().await = ok;
-                        if !ok { warn!("Probe for {} failed", cid); }
-                        tokio::time::sleep(Duration::from_secs(config.period_seconds as u64)).await;
-                    }
-                }
-            });
-        }
+        let (ready, healthy) = Self::spawn_probes(probes, container_id, &instance.published_ports);
 
         Ok(RunningContainer {
             child: Some(child),
