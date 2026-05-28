@@ -1,5 +1,5 @@
 mod api;
-mod resources;
+mod components;
 mod config;
 mod cri;
 mod init;
@@ -8,19 +8,19 @@ mod net;
 mod scheduler;
 
 use crate::api::types::ResourceStore;
-use crate::resources::{ComponentRegistry, PipelineBuilder, ReconcileContext};
-use crate::resources::compute::deployment::DeploymentResource;
-use crate::resources::compute::pod::PodResource;
-use crate::resources::network::service::ServiceResource;
-use crate::resources::storage::configmap::ConfigMapResource;
-use crate::resources::storage::pv::PvResource;
-use crate::resources::storage::pvc::PvcResource;
-use crate::resources::storage::secret::SecretResource;
+use crate::components::{ComponentRegistry, PipelineBuilder, ReconcileContext};
+use crate::components::compute::deployment::DeploymentResource;
+use crate::components::compute::pod::PodResource;
+use crate::components::network::service::ServiceResource;
+use crate::components::storage::configmap::ConfigMapResource;
+use crate::components::storage::pv::PvResource;
+use crate::components::storage::pvc::PvcResource;
+use crate::components::storage::secret::SecretResource;
 use crate::cri::image::ImageManager;
 use crate::cri::runtime::ContainerRuntime;
 use crate::init::InitHandler;
 use crate::manifest::watcher::ManifestWatcher;
-use crate::resources::network::service::NetworkManager;
+use crate::components::network::service::NetworkManager;
 use crate::scheduler::reconciler::Reconciler;
 use crate::cri::cgroup::CgroupManager;
 use crate::cri::runtime::ProcessSupervisor;
@@ -123,7 +123,7 @@ async fn main() -> Result<()> {
     let watcher = Arc::new(ManifestWatcher::new(store.clone()));
 
     let pipeline = Arc::new(PipelineBuilder::new()
-        .stage(Box::new(crate::resources::network::dns_stage::DnsStage::new()))
+        .stage(Box::new(crate::components::network::dns_stage::DnsStage::new()))
         .build());
 
     let ctx = Arc::new(ReconcileContext {
@@ -215,7 +215,7 @@ async fn main() -> Result<()> {
 
     let resources = store.get_all().await;
     for tracker in &resources {
-        let spec = crate::resources::compute::spec_builder::build_spec(&tracker.resource, &store).await;
+        let spec = crate::components::compute::spec_builder::build_spec(&tracker.resource, &store).await;
         let _ = crate::cri::RuntimeProvider::stop_pod(cri.as_ref(), &spec).await;
     }
 

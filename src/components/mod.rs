@@ -8,21 +8,11 @@ use crate::cri::RuntimeProvider;
 use crate::net::NetworkEngine;
 use crate::scheduler::process::ProcessTracker;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ResourceCategory {
-    Compute,
-    Network,
-    Storage,
-}
-
 #[async_trait]
 pub trait Component: Send + Sync + 'static {
     fn kind(&self) -> &'static str;
-    fn category(&self) -> ResourceCategory;
 
     async fn reconcile(&self, ctx: &ReconcileContext, tracker: &ResourceTracker) -> Result<()>;
-    async fn on_apply(&self, ctx: &ReconcileContext, resource: &AnyResource) -> Result<()>;
-    async fn on_delete(&self, ctx: &ReconcileContext, resource: &AnyResource) -> Result<()>;
 }
 
 pub struct ReconcileContext {
@@ -50,14 +40,6 @@ impl ComponentRegistry {
 
     pub fn get(&self, kind: &str) -> Option<&dyn Component> {
         self.components.get(kind).map(|c| c.as_ref())
-    }
-
-    pub fn by_category(&self, cat: ResourceCategory) -> Vec<&dyn Component> {
-        self.components
-            .values()
-            .filter(|c| c.category() == cat)
-            .map(|c| c.as_ref())
-            .collect()
     }
 
     pub async fn reconcile_all(&self, ctx: &ReconcileContext) {

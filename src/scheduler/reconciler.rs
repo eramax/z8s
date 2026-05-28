@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use tokio::time::Duration;
 
-use crate::resources::{ComponentRegistry, ReconcileContext};
+use crate::components::{ComponentRegistry, ReconcileContext};
 use crate::scheduler::process::ProcessTracker;
 
 pub struct Reconciler {

@@ -86,30 +86,30 @@ src/
       metrics.rs                   # top pods/nodes
       system.rs                    # healthz, readyz, version, API discovery
     proto.rs                       # k8s protobuf decoder (unchanged)
-    exec.rs                        # kubectl exec WebSocket (unchanged)
+    exec.rs                        # kubectl exec WebSocket (no api/ imports — uses ExecState newtype + FromRef)
 
   components/                      # Pluggable resource controllers
     mod.rs                         # Component trait, PipelineStage, ReconciliationPipeline, builder
     compute/                       # Compute resources (Pod, Deployment, Job)
-      mod.rs                       # ComputeResource trait, ComputeLifecycle shared impl
-      pod.rs                       # PodComponent
-      deployment.rs                # DeploymentComponent
+      pod.rs                       # PodResource
+      deployment.rs                # DeploymentResource
+      spec_builder.rs              # K8s→ContainerSpec converter
       # job.rs                     # (future)
     network/                       # Network resources (Service, VNet, NSG, NetworkPolicy)
-      mod.rs                       # NetworkResource trait
-      service.rs                   # ServiceComponent (ClusterIP, NodePort, endpoints)
+      service.rs                   # ServiceResource (ClusterIP, NodePort, endpoints), NetworkManager
+      dns_stage.rs                 # DNS pipeline stage
       # vnet.rs                    # (future — NetMux Phase 3)
       # nsg.rs                     # (future — NetMux Phase 3)
       # network_policy.rs          # (future — NetMux Phase 4)
     storage/                       # Storage resources (ConfigMap, Secret, PV, PVC)
-      mod.rs                       # StorageResource trait
-      configmap.rs                 # ConfigMapComponent
-      secret.rs                    # SecretComponent
-      storage.rs                   # PVComponent, PVCComponent
+      configmap.rs                 # ConfigMapResource
+      secret.rs                    # SecretResource
+      pv.rs                        # PvResource
+      pvc.rs                       # PvcResource
 
   cri/                             # Container Runtime Interface (renamed from container/)
     mod.rs
-    spec.rs                         # ContainerSpec, ContainerConfig, builders
+    spec.rs                         # ContainerSpec, ContainerConfig (builders removed — built directly in spec_builder.rs)
     runtime.rs                      # ContainerRuntime: spawn, stop, exec
     image.rs                        # OCI image pull + unpack
     rootfs.rs                       # Rootfs setup, pivot_root, chroot, mount ns
@@ -324,7 +324,7 @@ impl PipelineBuilder {
 
 ## 4. Compute Domain — Shared Code (Pod / Job / Deployment)
 
-### 4.1 ComputeResource Trait
+### 4.1 ComputeResource Trait (REMOVED — not needed yet; add when Job/CronJob arrive)
 
 Pod and Job both use `PodSpec`. They share: image pull, rootfs, container spawn, network attachment, IP allocation, DNS, health probes. The differences are restart policy and IP lifecycle.
 
@@ -711,12 +711,8 @@ No cascade. No O(n²) scans. Event-driven.
 ## 6. Storage Domain
 
 ```rust
-// components/storage/mod.rs
-
-pub trait StorageResource {
-    fn namespace(&self) -> &str;
-    fn name(&self) -> &str;
-}
+// components/storage/mod.rs — StorageResource trait REMOVED (not needed yet)
+// Storage components only implement Component trait.
 
 // ConfigMap and Secret are passive — other components (Pod env vars, volumes)
 // read them from the store. Their Component impls are minimal.
@@ -799,7 +795,7 @@ pub struct ResolvedVolume {
 }
 ```
 
-### 7.3 ContainerSpecBuilder
+### 7.3 ContainerSpecBuilder (REMOVED — ContainerSpec built directly in spec_builder.rs)
 
 Components build specs fluently. Each method returns `&mut Self` for chaining.
 
@@ -851,7 +847,7 @@ impl ContainerSpecBuilder {
 }
 ```
 
-### 7.4 ContainerConfigBuilder
+### 7.4 ContainerConfigBuilder (REMOVED — ContainerConfig built directly in spec_builder.rs)
 
 Each container within the spec also uses a builder:
 

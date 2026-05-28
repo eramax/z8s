@@ -29,14 +29,14 @@ impl ProcessTracker {
     }
 
     pub async fn start_pod(&self, resource: &AnyResource) -> anyhow::Result<()> {
-        let spec = crate::resources::compute::spec_builder::build_spec(resource, &self.store).await;
+        let spec = crate::components::compute::spec_builder::build_spec(resource, &self.store).await;
         self.cri.start_pod(&spec).await?;
         self.store.update_state(&resource.uid(), ResourceState::Running).await;
         Ok(())
     }
 
     pub async fn stop_pod(&self, resource: &AnyResource) {
-        let spec = crate::resources::compute::spec_builder::build_spec(resource, &self.store).await;
+        let spec = crate::components::compute::spec_builder::build_spec(resource, &self.store).await;
         let _ = self.cri.stop_pod(&spec).await;
         self.store.update_state(&resource.uid(), ResourceState::Terminated).await;
     }

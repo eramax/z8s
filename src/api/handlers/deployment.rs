@@ -316,7 +316,7 @@ pub async fn delete_deployment(
                             // (by OwnerReference or naming convention). Standalone pods
                             // that happen to share the same labels must NOT be removed.
                             if labels_match(match_labels, &pod_labels)
-                                && crate::resources::compute::deployment::pod_owned_by_deployment(pod, &name)
+                                && crate::components::compute::deployment::pod_owned_by_deployment(pod, &name)
                             {
                                 info!("Deleting pod {} owned by deployment {}/{}", pt.resource.name(), namespace, name);
                                 state.process_tracker.stop_pod(&pt.resource).await;

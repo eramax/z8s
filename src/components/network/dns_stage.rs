@@ -6,7 +6,7 @@ use tokio::sync::Mutex;
 use tracing::info;
 
 use crate::api::types::AnyResource;
-use crate::resources::{PipelineStage, StageContext};
+use crate::components::{PipelineStage, StageContext};
 
 pub struct DnsStage {
     records: Arc<Mutex<HashMap<String, String>>>,

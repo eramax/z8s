@@ -1,5 +1,4 @@
 use crate::cri::rootfs;
-use crate::api::server::AppState;
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use axum::extract::{Path, State, WebSocketUpgrade};
 use axum::http::request::Parts;
@@ -15,9 +14,16 @@ use std::os::fd::OwnedFd;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::process::Stdio;
+use std::sync::Arc;
 use tokio::process::Command;
+use tokio::sync::Mutex;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::info;
+
+use crate::cri::runtime::RunningContainer;
+
+#[derive(Clone)]
+pub struct ExecState(pub Arc<Mutex<HashMap<String, RunningContainer>>>);
 
 fn set_winsize(fd: RawFd, cols: u16, rows: u16) {
     let ws = nix::libc::winsize {
@@ -118,7 +124,7 @@ fn parse_query_params(query: &str) -> HashMap<String, Vec<String>> {
 
 pub async fn exec_handler(
     ws: WebSocketUpgrade,
-    State(state): State<AppState>,
+    State(state): State<ExecState>,
     Path((namespace, name)): Path<(String, String)>,
     params: ExecParams,
 ) -> impl IntoResponse {
@@ -137,7 +143,7 @@ pub async fn exec_handler(
 }
 
 pub async fn exec_post_handler(
-    State(_state): State<AppState>,
+    State(_state): State<ExecState>,
     Path((_namespace, name)): Path<(String, String)>,
     params: ExecParams,
 ) -> impl IntoResponse {
@@ -162,11 +168,11 @@ struct ContainerExecInfo {
 }
 
 async fn resolve_container(
-    state: &AppState,
+    state: &ExecState,
     pod_name: &str,
     container_name: Option<&str>,
 ) -> Option<ContainerExecInfo> {
-    let running = state.process_tracker.running.lock().await;
+    let running = state.0.lock().await;
     let prefix = format!("{}-", pod_name);
     let rc = if let Some(container) = container_name {
         running.get(&format!("{}-{}", pod_name, container))

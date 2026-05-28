@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::api::types::{AnyResource, ResourceState, ResourceStore, ResourceTracker};
-use crate::resources::{Component, ReconcileContext, ResourceCategory};
+use crate::components::{Component, ReconcileContext};
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::core::v1::Pod;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
@@ -71,10 +71,6 @@ impl DeploymentResource {
 impl Component for DeploymentResource {
     fn kind(&self) -> &'static str {
         "Deployment"
-    }
-
-    fn category(&self) -> ResourceCategory {
-        ResourceCategory::Compute
     }
 
     async fn reconcile(&self, ctx: &ReconcileContext, tracker: &ResourceTracker) -> Result<()> {
@@ -154,14 +150,6 @@ impl Component for DeploymentResource {
             }
         }
 
-        Ok(())
-    }
-
-    async fn on_apply(&self, _ctx: &ReconcileContext, _resource: &AnyResource) -> Result<()> {
-        Ok(())
-    }
-
-    async fn on_delete(&self, _ctx: &ReconcileContext, _resource: &AnyResource) -> Result<()> {
         Ok(())
     }
 }

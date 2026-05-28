@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use nix::mount::{mount, MsFlags};
 use std::path::Path;
 use tracing::{info, warn};

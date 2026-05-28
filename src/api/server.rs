@@ -27,6 +27,12 @@ pub use tracing::info;
 
 use crate::scheduler::process::ProcessTracker;
 
+impl axum::extract::FromRef<AppState> for crate::cri::exec::ExecState {
+    fn from_ref(state: &AppState) -> Self {
+        crate::cri::exec::ExecState(state.process_tracker.running.clone())
+    }
+}
+
 // ── Core server infrastructure ───────────────────────────────────────────────
 
 pub fn z8s_port() -> u16 {
@@ -318,7 +324,7 @@ mod tests {
             cri: container_runtime.clone(),
             store: store.clone(),
         });
-        let network = Arc::new(crate::resources::network::service::NetworkManager::new(store.clone(), process_tracker.clone()));
+        let network = Arc::new(crate::components::network::service::NetworkManager::new(store.clone(), process_tracker.clone()));
         let state = build_app_state(store, process_tracker, network).await;
         build_router(state)
     }
@@ -337,7 +343,7 @@ mod tests {
             cri: container_runtime.clone(),
             store: store.clone(),
         });
-        let network = Arc::new(crate::resources::network::service::NetworkManager::new(store.clone(), process_tracker.clone()));
+        let network = Arc::new(crate::components::network::service::NetworkManager::new(store.clone(), process_tracker.clone()));
         let state = build_app_state(store.clone(), process_tracker, network).await;
         (build_router(state), store)
     }
