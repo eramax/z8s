@@ -1,4 +1,4 @@
-use crate::api::types::ResourceStore;
+use crate::types::ResourceStore;
 use crate::scheduler::process::ProcessTracker;
 use k8s_openapi::api::core::v1::Service;
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
@@ -383,7 +383,7 @@ impl crate::net::NetworkEngine for NetworkManager {
 
 use async_trait::async_trait;
 use anyhow::Result;
-use crate::api::types::{AnyResource, ResourceTracker};
+use crate::types::{AnyResource, ResourceTracker};
 use crate::components::{Component, ReconcileContext, ResourceCategory};
 
 pub struct ServiceResource {

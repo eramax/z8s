@@ -5,7 +5,7 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
-use crate::api::types::{AnyResource, ResourceState, ResourceStore};
+use crate::types::{AnyResource, ResourceState, ResourceStore};
 use crate::cri::runtime::RunningContainer;
 use crate::cri::RuntimeProvider;
 use crate::net::PodResolver;

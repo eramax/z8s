@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::api::types::{AnyResource, ResourceStore, extract_containers, parse_quantity_bytes, parse_quantity_cpu};
+use crate::types::{AnyResource, ResourceStore, extract_containers, parse_quantity_bytes, parse_quantity_cpu};
 use crate::cri::spec::{ContainerConfig, ContainerSpec, ResolvedVolume};
 use crate::cri::health::{ProbeConfig, ProbeAction, ExecProbe, HttpProbe, TcpProbe};
 use k8s_openapi::api::core::v1::{ConfigMap, Container, Pod, Secret, Volume};
@@ -16,6 +16,7 @@ pub async fn build_spec(resource: &AnyResource, store: &ResourceStore) -> Contai
     let pod = match resource { AnyResource::Pod(p) => Some(p), _ => None };
 
     let (cms, secrets) = fetch_cms_and_secrets(store).await;
+    let pvc_hostpaths = fetch_pvc_hostpaths(store).await;
     let service_env = if let Some(pod) = pod { resolve_service_env(pod, store).await } else { vec![] };
 
     let mut configs = Vec::new();
@@ -48,6 +49,7 @@ pub async fn build_spec(resource: &AnyResource, store: &ResourceStore) -> Contai
                 prepare_volumes(pod, &container.name, &pod_uid,
                     &|ns, name| cms.get(&(ns.to_string(), name.to_string())).cloned(),
                     &|ns, name| secrets.get(&(ns.to_string(), name.to_string())).cloned(),
+                    &|ns, name| pvc_hostpaths.get(&(ns.to_string(), name.to_string())).cloned(),
                 ).unwrap_or_default()
             } else { vec![] }
         } else { vec![] };
@@ -235,12 +237,44 @@ fn convert_probe(probe: &k8s_openapi::api::core::v1::Probe) -> Option<ProbeConfi
     })
 }
 
+async fn fetch_pvc_hostpaths(store: &ResourceStore) -> HashMap<(String, String), String> {
+    let pvc_trackers = store.get_by_kind("PersistentVolumeClaim").await;
+    let pv_trackers = store.get_by_kind("PersistentVolume").await;
+    let mut map = HashMap::new();
+    for t in &pvc_trackers {
+        let pvc = match &t.resource {
+            AnyResource::PersistentVolumeClaim(p) => p,
+            _ => continue,
+        };
+        let ns = pvc.metadata.namespace.as_deref().unwrap_or("");
+        let name = pvc.metadata.name.as_deref().unwrap_or("");
+        let vol_name = match pvc.spec.as_ref().and_then(|s| s.volume_name.as_ref()) {
+            Some(n) => n,
+            None => continue,
+        };
+        let path = pv_trackers.iter().find_map(|t| {
+            let pv = match &t.resource {
+                AnyResource::PersistentVolume(p) => p,
+                _ => return None,
+            };
+            if pv.metadata.name.as_deref() != Some(vol_name.as_str()) { return None; }
+            pv.spec.as_ref()?.host_path.as_ref().map(|h| h.path.clone())
+        });
+        if let Some(path) = path {
+            let _ = std::fs::create_dir_all(&path);
+            map.insert((ns.to_string(), name.to_string()), path);
+        }
+    }
+    map
+}
+
 pub fn prepare_volumes(
     pod: &Pod,
     container_name: &str,
     pod_uid: &str,
     get_configmap: &dyn Fn(&str, &str) -> Option<ConfigMap>,
     get_secret: &dyn Fn(&str, &str) -> Option<Secret>,
+    get_pvc_hostpath: &dyn Fn(&str, &str) -> Option<String>,
 ) -> Result<Vec<ResolvedVolume>> {
     let spec = match pod.spec.as_ref() {
         Some(s) => s,
@@ -279,7 +313,7 @@ pub fn prepare_volumes(
             }
         };
 
-        match resolve_volume_source(vol, namespace, pod_uid, &base, get_configmap, get_secret) {
+        match resolve_volume_source(vol, namespace, pod_uid, &base, get_configmap, get_secret, get_pvc_hostpath) {
             Ok(Some((host_path, _))) => {
                 let final_host_path = if let Some(sub) = &mount.sub_path {
                     Path::new(&host_path).join(sub).to_string_lossy().to_string()
@@ -309,6 +343,7 @@ fn resolve_volume_source(
     base: &str,
     get_configmap: &dyn Fn(&str, &str) -> Option<ConfigMap>,
     get_secret: &dyn Fn(&str, &str) -> Option<Secret>,
+    get_pvc_hostpath: &dyn Fn(&str, &str) -> Option<String>,
 ) -> Result<Option<(String, bool)>> {
     if let Some(hp) = &vol.host_path {
         std::fs::create_dir_all(&hp.path)
@@ -357,8 +392,20 @@ fn resolve_volume_source(
         }
     }
 
+    if let Some(pvc_src) = &vol.persistent_volume_claim {
+        let claim_name = &pvc_src.claim_name;
+        match get_pvc_hostpath(namespace, claim_name) {
+            Some(path) => return Ok(Some((path, false))),
+            None => {
+                if !pvc_src.read_only.unwrap_or(false) {
+                    warn!("PVC {}/{} not found or not bound, volume will be empty", namespace, claim_name);
+                }
+            }
+        }
+    }
+
     warn!(
-        "Volume '{}' has no supported source (hostPath/emptyDir/configMap/secret), skipping",
+        "Volume '{}' has no supported source (hostPath/emptyDir/configMap/secret/PVC), skipping",
         vol.name
     );
     Ok(None)

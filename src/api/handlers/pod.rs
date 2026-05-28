@@ -81,7 +81,7 @@ pub async fn get_pod_log(
     let trackers = state.store.get_by_kind("Pod").await;
     for t in &trackers {
         if t.resource.namespace() == namespace && t.resource.name() == name {
-            let containers = crate::api::types::extract_containers(&t.resource);
+            let containers = crate::types::extract_containers(&t.resource);
             if let Some(container) = containers.first() {
                 let logs = state.process_tracker.get_logs(&name, &container.name).await;
                 return Ok(logs.join("\n"));

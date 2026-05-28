@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use anyhow::Result;
 use std::sync::Arc;
 
-use crate::api::types::{AnyResource, ResourceStore, ResourceTracker};
+use crate::types::{AnyResource, ResourceStore, ResourceTracker};
 use crate::components::{Component, ReconcileContext, ResourceCategory};
 
 pub struct PvResource {
@@ -70,12 +70,12 @@ fn try_bind_pvc(pv: &k8s_openapi::api::core::v1::PersistentVolume, pvc: &k8s_ope
     let req_storage = pvc_spec.resources.as_ref()
         .and_then(|r| r.requests.as_ref())
         .and_then(|m| m.get("storage"))
-        .map(|q| crate::api::types::parse_quantity_bytes(q))
+        .map(|q| crate::types::parse_quantity_bytes(q))
         .unwrap_or(0);
 
     let pv_capacity = pv_spec.capacity.as_ref()
         .and_then(|m| m.get("storage"))
-        .map(|q| crate::api::types::parse_quantity_bytes(q))
+        .map(|q| crate::types::parse_quantity_bytes(q))
         .unwrap_or(0);
 
     if pv_capacity < req_storage { return None; }

@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use anyhow::Result;
 use std::sync::Arc;
 
-use crate::api::types::{AnyResource, ResourceStore, ResourceTracker};
+use crate::types::{AnyResource, ResourceStore, ResourceTracker};
 use crate::components::{Component, ReconcileContext, ResourceCategory};
 
 pub struct ConfigMapResource {

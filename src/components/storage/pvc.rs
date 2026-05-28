@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use anyhow::Result;
 use std::sync::Arc;
 
-use crate::api::types::{AnyResource, ResourceStore, ResourceTracker};
+use crate::types::{AnyResource, ResourceStore, ResourceTracker};
 use crate::components::{Component, ReconcileContext, ResourceCategory};
 use k8s_openapi::api::core::v1::{ObjectReference, PersistentVolume, PersistentVolumeClaimStatus};
 
@@ -115,7 +115,7 @@ fn find_matching_pv(pvc: &k8s_openapi::api::core::v1::PersistentVolumeClaim, pvs
     let req_storage = pvc_spec.resources.as_ref()
         .and_then(|r| r.requests.as_ref())
         .and_then(|m| m.get("storage"))
-        .map(|q| crate::api::types::parse_quantity_bytes(q))
+        .map(|q| crate::types::parse_quantity_bytes(q))
         .unwrap_or(0);
 
     for t in pvs {
@@ -132,7 +132,7 @@ fn find_matching_pv(pvc: &k8s_openapi::api::core::v1::PersistentVolumeClaim, pvs
         let pv_capacity = pv.spec.as_ref()
             .and_then(|s| s.capacity.as_ref())
             .and_then(|m| m.get("storage"))
-            .map(|q| crate::api::types::parse_quantity_bytes(q))
+            .map(|q| crate::types::parse_quantity_bytes(q))
             .unwrap_or(0);
         if pv_capacity < req_storage {
             continue;

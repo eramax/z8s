@@ -23,7 +23,7 @@ impl LoopProvisioner {
         let capacity = pv.spec.as_ref()
             .and_then(|s| s.capacity.as_ref())
             .and_then(|m| m.get("storage"))
-            .map(|q| crate::api::types::parse_quantity_bytes(q))
+            .map(|q| crate::types::parse_quantity_bytes(q))
             .unwrap_or(0);
 
         if capacity == 0 {

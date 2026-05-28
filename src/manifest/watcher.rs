@@ -1,4 +1,4 @@
-use crate::api::types::{parse_manifest_yaml, ResourceStore};
+use crate::types::{parse_manifest_yaml, ResourceStore};
 use crate::api::AnyResource;
 use anyhow::{Context, Result};
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};

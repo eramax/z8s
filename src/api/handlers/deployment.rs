@@ -73,10 +73,10 @@ pub fn resource_to_deploy_json(
 
 pub async fn count_deployment_pods(
     resource: &AnyResource,
-    pods: &[crate::api::types::ResourceTracker],
+    pods: &[crate::types::ResourceTracker],
     tracker: &crate::scheduler::process::ProcessTracker,
 ) -> (usize, usize) {
-    use crate::api::types::extract_containers;
+    use crate::types::extract_containers;
     let deploy = match resource {
         AnyResource::Deployment(d) => d,
         _ => return (0, 0),

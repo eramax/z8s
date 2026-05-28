@@ -7,8 +7,9 @@ mod manifest;
 mod net;
 mod scheduler;
 mod storage;
+mod types;
 
-use crate::api::types::ResourceStore;
+use crate::types::ResourceStore;
 use crate::components::{ComponentRegistry, PipelineBuilder, ReconcileContext};
 use crate::components::compute::deployment::DeploymentResource;
 use crate::components::compute::pod::PodResource;

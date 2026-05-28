@@ -3,7 +3,7 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::api::types::{AnyResource, ResourceStore, ResourceTracker};
+use crate::types::{AnyResource, ResourceStore, ResourceTracker};
 use crate::cri::RuntimeProvider;
 use crate::net::NetworkEngine;
 use crate::scheduler::process::ProcessTracker;

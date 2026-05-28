@@ -1,4 +1,4 @@
-use crate::api::types::ResourceStore;
+use crate::types::ResourceStore;
 use crate::net::PodResolver;
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use std::collections::BTreeMap;

@@ -3,7 +3,7 @@ use anyhow::{Context, Result};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::api::types::{AnyResource, ResourceState, ResourceStore, ResourceTracker};
+use crate::types::{AnyResource, ResourceState, ResourceStore, ResourceTracker};
 use crate::components::{Component, ReconcileContext, ResourceCategory};
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::core::v1::Pod;

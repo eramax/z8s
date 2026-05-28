@@ -9,7 +9,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::info;
 
-use crate::api::types::{AnyResource, ResourceStore};
+use crate::types::{AnyResource, ResourceStore};
 
 #[derive(Clone, Debug)]
 pub struct StorageClass {

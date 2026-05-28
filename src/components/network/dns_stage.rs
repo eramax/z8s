@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::info;
 
-use crate::api::types::AnyResource;
+use crate::types::AnyResource;
 use crate::components::{PipelineStage, StageContext};
 
 pub struct DnsStage {

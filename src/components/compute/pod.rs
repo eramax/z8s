@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use anyhow::Result;
 
-use crate::api::types::{AnyResource, ResourceState, ResourceTracker};
+use crate::types::{AnyResource, ResourceState, ResourceTracker};
 use crate::components::{Component, ReconcileContext, ResourceCategory};
 
 pub struct PodResource;
