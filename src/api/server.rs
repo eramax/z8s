@@ -311,11 +311,12 @@ mod tests {
         let image = Arc::new(crate::cri::image::ImageManager::new()
             .unwrap_or_else(|_| crate::cri::image::ImageManager::new().unwrap()));
         let supervisor = Arc::new(crate::cri::runtime::ProcessSupervisor::new(image, cgroup.clone()));
-        let container_runtime = Arc::new(crate::cri::runtime::ContainerRuntime::new(supervisor.clone(), store.clone(), cgroup));
+        let container_runtime = Arc::new(crate::cri::runtime::ContainerRuntime::new(supervisor.clone(), cgroup));
         let process_tracker = Arc::new(ProcessTracker {
             running: supervisor.running.clone(),
             restart_counts: supervisor.restart_counts.clone(),
             cri: container_runtime.clone(),
+            store: store.clone(),
         });
         let network = Arc::new(crate::resources::network::service::NetworkManager::new(store.clone(), process_tracker.clone()));
         let state = build_app_state(store, process_tracker, network).await;
@@ -329,11 +330,12 @@ mod tests {
         let image = Arc::new(crate::cri::image::ImageManager::new()
             .unwrap_or_else(|_| crate::cri::image::ImageManager::new().unwrap()));
         let supervisor = Arc::new(crate::cri::runtime::ProcessSupervisor::new(image, cgroup.clone()));
-        let container_runtime = Arc::new(crate::cri::runtime::ContainerRuntime::new(supervisor.clone(), store.clone(), cgroup));
+        let container_runtime = Arc::new(crate::cri::runtime::ContainerRuntime::new(supervisor.clone(), cgroup));
         let process_tracker = Arc::new(ProcessTracker {
             running: supervisor.running.clone(),
             restart_counts: supervisor.restart_counts.clone(),
             cri: container_runtime.clone(),
+            store: store.clone(),
         });
         let network = Arc::new(crate::resources::network::service::NetworkManager::new(store.clone(), process_tracker.clone()));
         let state = build_app_state(store.clone(), process_tracker, network).await;

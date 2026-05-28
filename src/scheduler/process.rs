@@ -28,6 +28,7 @@ pub struct ProcessTracker {
     pub running: Arc<Mutex<HashMap<String, RunningContainer>>>,
     pub restart_counts: Arc<Mutex<HashMap<String, u32>>>,
     pub cri: Arc<dyn RuntimeProvider>,
+    pub store: Arc<ResourceStore>,
 }
 
 impl ProcessTracker {
@@ -35,16 +36,20 @@ impl ProcessTracker {
         running: Arc<Mutex<HashMap<String, RunningContainer>>>,
         restart_counts: Arc<Mutex<HashMap<String, u32>>>,
         cri: Arc<dyn RuntimeProvider>,
+        store: Arc<ResourceStore>,
     ) -> Self {
-        Self { running, restart_counts, cri }
+        Self { running, restart_counts, cri, store }
     }
 
     pub async fn start_pod(&self, resource: &AnyResource) -> anyhow::Result<()> {
-        self.cri.start_pod(&build_spec(resource)).await
+        self.cri.start_pod(&build_spec(resource)).await?;
+        self.store.update_state(&resource.uid(), ResourceState::Running).await;
+        Ok(())
     }
 
     pub async fn stop_pod(&self, resource: &AnyResource) {
         let _ = self.cri.stop_pod(&build_spec(resource)).await;
+        self.store.update_state(&resource.uid(), ResourceState::Terminated).await;
     }
 
     pub async fn is_running(&self, pod_name: &str) -> bool {

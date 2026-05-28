@@ -2,7 +2,6 @@ use crate::cri::cgroup::CgroupManager;
 use crate::cri::health::{HealthChecker, HealthStatus, ProbeAction, ProbeConfig};
 use crate::cri::image::ImageManager;
 use crate::cri::rootfs;
-use crate::api::types::ResourceStore;
 use anyhow::{Context, Result};
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
@@ -879,17 +878,15 @@ impl ProcessSupervisor {
 
 pub struct ContainerRuntime {
     pub supervisor: Arc<ProcessSupervisor>,
-    pub store: Arc<ResourceStore>,
     pub cgroup_manager: Arc<CgroupManager>,
 }
 
 impl ContainerRuntime {
     pub fn new(
         supervisor: Arc<ProcessSupervisor>,
-        store: Arc<ResourceStore>,
         cgroup_manager: Arc<CgroupManager>,
     ) -> Self {
-        Self { supervisor, store, cgroup_manager }
+        Self { supervisor, cgroup_manager }
     }
 
     pub fn create_pod_cgroup(&self, pod_uid: &str) -> Result<String> {
@@ -905,15 +902,12 @@ impl ContainerRuntime {
 impl RuntimeProvider for ContainerRuntime {
     async fn start_pod(&self, spec: &ContainerSpec) -> Result<()> {
         info!("CRI: starting pod {} (namespace={})", spec.pod_name, spec.namespace);
-        self.supervisor.start_pod_from_spec(spec).await?;
-        self.store.update_state(&spec.pod_uid, crate::api::types::ResourceState::Running).await;
-        Ok(())
+        self.supervisor.start_pod_from_spec(spec).await
     }
 
     async fn stop_pod(&self, spec: &ContainerSpec) -> Result<()> {
         info!("CRI: stopping pod {}", spec.pod_name);
         self.supervisor.stop_pod_from_spec(spec).await;
-        self.store.update_state(&spec.pod_uid, crate::api::types::ResourceState::Terminated).await;
         Ok(())
     }
 
