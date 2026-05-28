@@ -1,11 +1,8 @@
-use crate::api::types::{
-    ResourceState, ResourceStore,
-};
-use crate::api::AnyResource;
-use crate::cri::image::ImageManager;
-use crate::cri::rootfs;
 use crate::cri::cgroup::CgroupManager;
 use crate::cri::health::{HealthChecker, HealthStatus, ProbeAction, ProbeConfig};
+use crate::cri::image::ImageManager;
+use crate::cri::rootfs;
+use crate::api::types::ResourceStore;
 use anyhow::{Context, Result};
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
@@ -127,7 +124,6 @@ pub struct ProcessSupervisor {
     pub running: Arc<Mutex<HashMap<String, RunningContainer>>>,
     pub image_manager: Arc<ImageManager>,
     pub cgroup_manager: Arc<CgroupManager>,
-    pub store: Arc<ResourceStore>,
     pub restart_counts: Arc<Mutex<HashMap<String, u32>>>,
 }
 
@@ -137,7 +133,6 @@ impl ProcessSupervisor {
     pub fn new(
         image_manager: Arc<ImageManager>,
         cgroup_manager: Arc<CgroupManager>,
-        store: Arc<ResourceStore>,
     ) -> Self {
         let base = if rootfs::is_root() {
             "/var/lib/z8s".to_string()
@@ -149,7 +144,6 @@ impl ProcessSupervisor {
             running: Arc::new(Mutex::new(HashMap::new())),
             image_manager,
             cgroup_manager,
-            store,
             restart_counts: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -271,13 +265,7 @@ impl ProcessSupervisor {
         }
         drop(running);
 
-        self.store.update_state(pod_uid, ResourceState::Running).await;
         Ok(())
-    }
-
-    pub async fn start_pod(&self, resource: &AnyResource) -> Result<()> {
-        let spec = crate::resources::compute::spec_builder::build_spec(resource, &self.store).await;
-        self.start_pod_from_spec(&spec).await
     }
 
 
@@ -816,18 +804,12 @@ impl ProcessSupervisor {
         }
     }
 
-    pub async fn stop_pod(&self, resource: &AnyResource) {
-        let spec = crate::resources::compute::spec_builder::build_spec(resource, &self.store).await;
-        self.stop_pod_from_spec(&spec).await;
-    }
-
     pub async fn stop_pod_from_spec(&self, spec: &crate::cri::spec::ContainerSpec) {
         for cfg in &spec.containers {
             self.stop_container(&cfg.container_id).await;
             self.restart_counts.lock().await.remove(&cfg.container_id);
         }
         self.cgroup_manager.remove_cgroup(&spec.pod_uid).ok();
-        self.store.update_state(&spec.pod_uid, ResourceState::Terminated).await;
         crate::cri::volumes::cleanup_emptydir(&spec.pod_uid);
     }
 
@@ -922,22 +904,16 @@ impl ContainerRuntime {
 #[async_trait]
 impl RuntimeProvider for ContainerRuntime {
     async fn start_pod(&self, spec: &ContainerSpec) -> Result<()> {
-        let uid = &spec.pod_uid;
-        if let Some(tracker) = self.store.get(uid).await {
-            info!("CRI: starting pod {} (namespace={})", spec.pod_name, spec.namespace);
-            self.supervisor.start_pod(&tracker.resource).await?;
-        } else {
-            anyhow::bail!("Cannot start pod {}: resource not found (uid={})", spec.pod_name, uid);
-        }
+        info!("CRI: starting pod {} (namespace={})", spec.pod_name, spec.namespace);
+        self.supervisor.start_pod_from_spec(spec).await?;
+        self.store.update_state(&spec.pod_uid, crate::api::types::ResourceState::Running).await;
         Ok(())
     }
 
     async fn stop_pod(&self, spec: &ContainerSpec) -> Result<()> {
-        let uid = &spec.pod_uid;
-        if let Some(tracker) = self.store.get(uid).await {
-            info!("CRI: stopping pod {}", spec.pod_name);
-            self.supervisor.stop_pod(&tracker.resource).await;
-        }
+        info!("CRI: stopping pod {}", spec.pod_name);
+        self.supervisor.stop_pod_from_spec(spec).await;
+        self.store.update_state(&spec.pod_uid, crate::api::types::ResourceState::Terminated).await;
         Ok(())
     }
 

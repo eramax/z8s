@@ -458,5 +458,5 @@ pub fn routes() -> Router<AppState> {
         .route("/api/v1/namespaces/{namespace}/pods", get(list_pods).post(create_pod))
         .route("/api/v1/namespaces/{namespace}/pods/{name}", any(pod_handler))
         .route("/api/v1/namespaces/{namespace}/pods/{name}/log", get(get_pod_log))
-        .route("/api/v1/namespaces/{namespace}/pods/{name}/exec", get(crate::api::exec::exec_handler).post(crate::api::exec::exec_post_handler))
+        .route("/api/v1/namespaces/{namespace}/pods/{name}/exec", get(crate::cri::exec::exec_handler).post(crate::cri::exec::exec_post_handler))
 }

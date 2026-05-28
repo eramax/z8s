@@ -100,7 +100,6 @@ async fn main() -> Result<()> {
     let supervisor = Arc::new(ProcessSupervisor::new(
         image_manager,
         cgroup_manager.clone(),
-        store.clone(),
     ));
 
     let cri = Arc::new(ContainerRuntime::new(
@@ -216,7 +215,8 @@ async fn main() -> Result<()> {
 
     let resources = store.get_all().await;
     for tracker in &resources {
-        supervisor.stop_pod(&tracker.resource).await;
+        let spec = crate::resources::compute::spec_builder::build_spec(&tracker.resource, &store).await;
+        let _ = crate::cri::RuntimeProvider::stop_pod(cri.as_ref(), &spec).await;
     }
 
     info!("z8s shutdown complete.");
