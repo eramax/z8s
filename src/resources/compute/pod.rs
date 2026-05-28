@@ -1,19 +1,14 @@
 use async_trait::async_trait;
 use anyhow::Result;
-use std::sync::Arc;
 
-use crate::api::types::{AnyResource, ResourceState, ResourceStore, ResourceTracker};
+use crate::api::types::{AnyResource, ResourceState, ResourceTracker};
 use crate::resources::{Component, ReconcileContext, ResourceCategory};
-use crate::cri::runtime::ProcessSupervisor;
 
-pub struct PodResource {
-    pub supervisor: Arc<ProcessSupervisor>,
-    pub store: Arc<ResourceStore>,
-}
+pub struct PodResource;
 
 impl PodResource {
-    pub fn new(supervisor: Arc<ProcessSupervisor>, store: Arc<ResourceStore>) -> Self {
-        Self { supervisor, store }
+    pub fn new() -> Self {
+        Self
     }
 }
 
@@ -27,19 +22,19 @@ impl Component for PodResource {
         ResourceCategory::Compute
     }
 
-    async fn reconcile(&self, _ctx: &ReconcileContext, tracker: &ResourceTracker) -> Result<()> {
+    async fn reconcile(&self, ctx: &ReconcileContext, tracker: &ResourceTracker) -> Result<()> {
         if tracker.state == ResourceState::Pending {
-            self.supervisor.start_pod(&tracker.resource).await?;
+            ctx.process_tracker.start_pod(&tracker.resource).await?;
         }
         Ok(())
     }
 
-    async fn on_apply(&self, _ctx: &ReconcileContext, resource: &AnyResource) -> Result<()> {
-        self.supervisor.start_pod(resource).await
+    async fn on_apply(&self, ctx: &ReconcileContext, resource: &AnyResource) -> Result<()> {
+        ctx.process_tracker.start_pod(resource).await
     }
 
-    async fn on_delete(&self, _ctx: &ReconcileContext, resource: &AnyResource) -> Result<()> {
-        self.supervisor.stop_pod(resource).await;
+    async fn on_delete(&self, ctx: &ReconcileContext, resource: &AnyResource) -> Result<()> {
+        ctx.process_tracker.stop_pod(resource).await;
         Ok(())
     }
 }

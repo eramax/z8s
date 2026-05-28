@@ -103,19 +103,19 @@ async fn main() -> Result<()> {
         store.clone(),
     ));
 
-    let process_tracker = Arc::new(ProcessTracker {
-        running: supervisor.running.clone(),
-        restart_counts: supervisor.restart_counts.clone(),
-        supervisor: supervisor.clone(),
-    });
-
-    let network = Arc::new(NetworkManager::new(store.clone(), process_tracker.clone()));
-
     let cri = Arc::new(ContainerRuntime::new(
         supervisor.clone(),
         store.clone(),
         cgroup_manager.clone(),
     ));
+
+    let process_tracker = Arc::new(ProcessTracker {
+        running: supervisor.running.clone(),
+        restart_counts: supervisor.restart_counts.clone(),
+        cri: cri.clone(),
+    });
+
+    let network = Arc::new(NetworkManager::new(store.clone(), process_tracker.clone()));
 
     if let Some(port) = crate::net::dns::run_dns(store.clone()).await {
         crate::config::set_dns_port(port);
@@ -132,11 +132,12 @@ async fn main() -> Result<()> {
         pipeline: pipeline.clone(),
         cri: cri.clone(),
         net: network.clone() as Arc<dyn crate::net::NetworkEngine>,
+        process_tracker: process_tracker.clone(),
     });
 
     let mut registry = ComponentRegistry::new();
-    registry.register(Box::new(PodResource::new(supervisor.clone(), store.clone())));
-    registry.register(Box::new(DeploymentResource::new(store.clone(), supervisor.clone())));
+    registry.register(Box::new(PodResource::new()));
+    registry.register(Box::new(DeploymentResource::new(store.clone())));
     registry.register(Box::new(ServiceResource::new(store.clone(), network.clone())));
     registry.register(Box::new(ConfigMapResource::new(store.clone())));
     registry.register(Box::new(SecretResource::new(store.clone())));

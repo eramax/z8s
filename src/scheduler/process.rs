@@ -6,31 +6,45 @@ use tokio::sync::Mutex;
 use tracing::{info, warn};
 
 use crate::api::types::{AnyResource, ResourceState, ResourceStore};
-use crate::cri::runtime::{ProcessSupervisor, RunningContainer};
+use crate::cri::runtime::RunningContainer;
+use crate::cri::spec::ContainerSpec;
+use crate::cri::RuntimeProvider;
 use crate::net::PodResolver;
 use async_trait::async_trait;
+
+fn build_spec(resource: &AnyResource) -> ContainerSpec {
+    ContainerSpec {
+        pod_name: resource.name().to_string(),
+        pod_uid: resource.uid(),
+        namespace: resource.namespace().to_string(),
+        hostname: resource.name().to_string(),
+        containers: vec![],
+        cgroup_path: String::new(),
+        labels: std::collections::BTreeMap::new(),
+    }
+}
 
 pub struct ProcessTracker {
     pub running: Arc<Mutex<HashMap<String, RunningContainer>>>,
     pub restart_counts: Arc<Mutex<HashMap<String, u32>>>,
-    pub supervisor: Arc<ProcessSupervisor>,
+    pub cri: Arc<dyn RuntimeProvider>,
 }
 
 impl ProcessTracker {
     pub fn new(
         running: Arc<Mutex<HashMap<String, RunningContainer>>>,
         restart_counts: Arc<Mutex<HashMap<String, u32>>>,
-        supervisor: Arc<ProcessSupervisor>,
+        cri: Arc<dyn RuntimeProvider>,
     ) -> Self {
-        Self { running, restart_counts, supervisor }
+        Self { running, restart_counts, cri }
     }
 
     pub async fn start_pod(&self, resource: &AnyResource) -> anyhow::Result<()> {
-        self.supervisor.start_pod(resource).await
+        self.cri.start_pod(&build_spec(resource)).await
     }
 
     pub async fn stop_pod(&self, resource: &AnyResource) {
-        self.supervisor.stop_pod(resource).await
+        let _ = self.cri.stop_pod(&build_spec(resource)).await;
     }
 
     pub async fn is_running(&self, pod_name: &str) -> bool {

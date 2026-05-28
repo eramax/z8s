@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use crate::api::types::{AnyResource, ResourceState, ResourceStore, ResourceTracker};
 use crate::resources::{Component, ReconcileContext, ResourceCategory};
-use crate::cri::runtime::ProcessSupervisor;
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::core::v1::Pod;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
@@ -60,12 +59,11 @@ pub fn create_pod_from_template(deploy: &Deployment, name: &str) -> Result<Pod> 
 
 pub struct DeploymentResource {
     pub store: Arc<ResourceStore>,
-    pub supervisor: Arc<ProcessSupervisor>,
 }
 
 impl DeploymentResource {
-    pub fn new(store: Arc<ResourceStore>, supervisor: Arc<ProcessSupervisor>) -> Self {
-        Self { store, supervisor }
+    pub fn new(store: Arc<ResourceStore>) -> Self {
+        Self { store }
     }
 }
 
@@ -79,7 +77,7 @@ impl Component for DeploymentResource {
         ResourceCategory::Compute
     }
 
-    async fn reconcile(&self, _ctx: &ReconcileContext, tracker: &ResourceTracker) -> Result<()> {
+    async fn reconcile(&self, ctx: &ReconcileContext, tracker: &ResourceTracker) -> Result<()> {
         let AnyResource::Deployment(deploy) = &tracker.resource else {
             return Ok(());
         };
@@ -125,7 +123,7 @@ impl Component for DeploymentResource {
             tracing::info!("Creating pod {} for deployment {}", pod_name, name);
             self.store.apply(resource.clone()).await?;
 
-            if let Err(e) = self.supervisor.start_pod(&resource).await {
+            if let Err(e) = ctx.process_tracker.start_pod(&resource).await {
                 tracing::error!("Failed to start pod {}: {}", pod_name, e);
                 self.store
                     .update_state(&resource.uid(), ResourceState::Failed(e.to_string()))
@@ -150,7 +148,7 @@ impl Component for DeploymentResource {
                         excess_name,
                         name
                     );
-                    self.supervisor.stop_pod(&remove.resource).await;
+                    ctx.process_tracker.stop_pod(&remove.resource).await;
                     self.store.delete(&remove.resource).await.ok();
                 }
             }
