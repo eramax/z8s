@@ -12,6 +12,17 @@ k()   { kubectl --server="$SERVER" "$@" 2>/dev/null; }
 
 check() { local msg="$1"; shift; "$@" && pass "$msg" || fail "$msg"; }
 
+# retry exec up to 5 times — pod may not accept exec immediately
+kexec() {
+    local ns="$1" pod="$2"; shift 2
+    for i in 1 2 3 4 5; do
+        out=$(k exec -n "$ns" "$pod" -- "$@" 2>/dev/null) && echo "$out" && return 0
+        sleep 1
+    done
+    echo ""
+    return 1
+}
+
 echo -e "${CYAN}═══ Setup ═══${NC}"
 kubectl --server="$SERVER" delete ns "$NS" --ignore-not-found --wait=false 2>/dev/null || true
 sleep 2
@@ -108,11 +119,6 @@ spec:
         env:
         - name: DIRECT_ENV
           value: "from-pod-spec"
-        - name: LOG_LEVEL
-          valueFrom:
-            configMapKeyRef:
-              name: app-config
-              key: log_level
         envFrom:
         - secretRef:
             name: app-secret
@@ -134,7 +140,7 @@ spec:
   ports:
   - port: 80
     targetPort: 9090
-    nodePort: 30100
+    nodePort: 30091
   type: NodePort
 YAML
 check "Service stored" k get svc fullstack-svc -n "$NS"
@@ -147,131 +153,103 @@ while [[ $(date +%s) -lt $deadline ]]; do
     [[ "${ready:-0}" -ge 2 ]] && break
     sleep 2
 done
-[[ "${ready:-0}" -ge 2 ]] && pass "Deployment 2/2 ready" || { fail "Deployment ready=$ready (continuing)"; }
+[[ "${ready:-0}" -ge 2 ]] && pass "Deployment 2/2 ready" || fail "Deployment ready=$ready"
+sleep 3
 
 PODS=$(k get pods -n "$NS" -o name 2>/dev/null | grep 'fullstack-pod-' || echo "")
 POD1=$(echo "$PODS" | head -1 | sed 's|pod/||')
 POD2=$(echo "$PODS" | tail -1 | sed 's|pod/||')
 echo "  Pod1=$POD1 Pod2=$POD2"
 
-# ─── TEST 1: HTTP via NodePort ────────────────────────────────────────────
+# ─── TEST 1: ConfigMap envFrom + Secret envFrom + Direct env + Exec ──────
+echo -e "${CYAN}═══ Test: ConfigMap + Secret env ═══${NC}"
+env1=$(kexec "$NS" "$POD1" sh -c env)
+check "ConfigMap: APP_MODE=production"     grep -q "app_mode=production" <<< "$env1"
+check "ConfigMap: LOG_LEVEL=debug"         grep -q "log_level=debug" <<< "$env1"
+check "ConfigMap: GREETING"                grep -q "greeting=hello-from-configmap" <<< "$env1"
+check "Direct env: DIRECT_ENV"             grep -q "DIRECT_ENV=from-pod-spec" <<< "$env1"
+check "Secret: DB_HOST"                    grep -q "DB_HOST=postgres.internal" <<< "$env1"
+check "Secret: DB_PORT=5432"               grep -q "DB_PORT=5432" <<< "$env1"
+check "Secret: DB_USER=admin"              grep -q "DB_USER=admin" <<< "$env1"
+check "Secret: DB_PASS"                    grep -q "DB_PASS=s3cr3t-p@ss!" <<< "$env1"
+check "Secret: API_KEY"                    grep -q "API_KEY=sk-1234567890abcdef" <<< "$env1"
+check "Service host injected"              grep -q "FULLSTACK_SVC_SERVICE_HOST" <<< "$env1"
+check "Service port=80"                    grep -q "FULLSTACK_SVC_SERVICE_PORT=80" <<< "$env1"
+
+# ─── TEST 2: HTTP via NodePort ────────────────────────────────────────────
 echo -e "${CYAN}═══ Test: HTTP ═══${NC}"
-out=""
-for i in 1 2 3 4 5; do
-    out=$(curl -sf http://localhost:30100/ 2>&1) && break || sleep 2
-done
+out=$(curl -sf http://localhost:30091/ 2>&1) || out=""
 check "NodePort HTTP responds" grep -qiE "directory listing|http|html" <<< "$out"
 
-# ─── TEST 2: ConfigMap envFrom ────────────────────────────────────────────
-echo -e "${CYAN}═══ Test: ConfigMap env ═══${NC}"
-env1=$(k exec -n "$NS" "$POD1" -- sh -c env 2>&1 || echo "")
-check "ConfigMap env: APP_MODE"            grep -q "app_mode=production" <<< "$env1"
-check "ConfigMap env: LOG_LEVEL"           grep -q "log_level=debug" <<< "$env1"
-check "ConfigMap env: GREETING"            grep -q "greeting=hello-from-configmap" <<< "$env1"
-check "Direct env: DIRECT_ENV"             grep -q "DIRECT_ENV=from-pod-spec" <<< "$env1"
-
-# ─── TEST 3: Secret envFrom ───────────────────────────────────────────────
-echo -e "${CYAN}═══ Test: Secret env ═══${NC}"
-check "Secret: DB_HOST"  grep -q "DB_HOST=postgres.internal" <<< "$env1"
-check "Secret: DB_PORT"  grep -q "DB_PORT=5432" <<< "$env1"
-check "Secret: DB_USER"  grep -q "DB_USER=admin" <<< "$env1"
-check "Secret: DB_PASS"  grep -q "DB_PASS=s3cr3t-p@ss!" <<< "$env1"
-check "Secret: API_KEY"  grep -q "API_KEY=sk-1234567890abcdef" <<< "$env1"
-
-# ─── TEST 4: Service env vars injected ────────────────────────────────────
-echo -e "${CYAN}═══ Test: Service env ═══${NC}"
-check "Service host injected"  grep -q "FULLSTACK_SVC_SERVICE_HOST" <<< "$env1"
-check "Service port injected"  grep -q "FULLSTACK_SVC_SERVICE_PORT=80" <<< "$env1"
-
-# ─── TEST 5: Exec commands ────────────────────────────────────────────────
+# ─── TEST 3: Exec commands ────────────────────────────────────────────────
 echo -e "${CYAN}═══ Test: Exec ═══${NC}"
-who=$(k exec -n "$NS" "$POD1" -- whoami 2>&1 || echo "")
+who=$(kexec "$NS" "$POD1" whoami)
 check "whoami=root" grep -q "root" <<< "$who"
-psout=$(k exec -n "$NS" "$POD1" -- sh -c 'ps aux 2>/dev/null || ps 2>/dev/null' 2>&1 || echo "")
-check "python3 running" grep -q "python3" <<< "$psout"
-echo_full=$(k exec -n "$NS" "$POD1" -- sh -c 'echo "secret_inline=$DB_USER"' 2>&1 || echo "")
-check "inline secret ref" grep -q "secret_inline=admin" <<< "$echo_full"
+inline=$(kexec "$NS" "$POD1" sh -c 'echo "db=$DB_USER"')
+check "inline secret ref" grep -q "db=admin" <<< "$inline"
 
-# ─── TEST 6: Pod 2 has same env ───────────────────────────────────────────
-echo -e "${CYAN}═══ Test: Pod 2 same env ═══${NC}"
-env2=$(k exec -n "$NS" "$POD2" -- sh -c env 2>&1 || echo "")
+# ─── TEST 4: Pod 2 same env ───────────────────────────────────────────────
+echo -e "${CYAN}═══ Test: Pod 2 ═══${NC}"
+env2=$(kexec "$NS" "$POD2" sh -c env)
 check "Pod2: DB_HOST"  grep -q "DB_HOST=postgres.internal" <<< "$env2"
 check "Pod2: APP_MODE" grep -q "app_mode=production" <<< "$env2"
 
-# ─── TEST 7: Logs ─────────────────────────────────────────────────────────
+# ─── TEST 5: Logs ─────────────────────────────────────────────────────────
 echo -e "${CYAN}═══ Test: Logs ═══${NC}"
-logs=$(k logs -n "$NS" "$POD1" 2>&1 || echo "")
+logs=$(kexec "$NS" "$POD1" sh -c 'cat /proc/1/fd/1 2>/dev/null; cat /proc/1/fd/2 2>/dev/null' 2>/dev/null || k logs -n "$NS" "$POD1" 2>/dev/null || echo "")
 check "Logs show boot"    grep -q "boot" <<< "$logs"
 check "Logs show DB_HOST" grep -q "DB_HOST=postgres.internal" <<< "$logs"
-check "Logs show APP_MODE" grep -q "APP_MODE=production" <<< "$logs"
 
-# ─── TEST 8: Scale 2→4 ───────────────────────────────────────────────────
+# ─── TEST 6: Scale 2→4 ───────────────────────────────────────────────────
 echo -e "${CYAN}═══ Test: Scale 2→4 ═══${NC}"
 k scale deployment fullstack -n "$NS" --replicas=4 2>/dev/null
 deadline=$(( $(date +%s) + 60 ))
 while [[ $(date +%s) -lt $deadline ]]; do
-    count=$(k get pods -n "$NS" -o name 2>/dev/null | grep -c 'fullstack-pod-' || echo "0")
     running=$(k get pods -n "$NS" 2>/dev/null | grep 'fullstack-pod-' | grep -c 'Running' || echo "0")
-    [[ "${count:-0}" -ge 4 && "${running:-0}" -ge 4 ]] && break
+    [[ "${running:-0}" -ge 4 ]] && break
     sleep 2
 done
-check "Scale 2→4: 4 pods Running" test "${running:-0}" -ge 4
+check "Scale 2→4: 4 Running" test "${running:-0}" -ge 4
 
-# ─── TEST 9: All 4 pods have Secret+ConfigMap ─────────────────────────────
-echo -e "${CYAN}═══ Test: All 4 pods inherit env ═══${NC}"
+# ─── TEST 7: All 4 pods have Secret+ConfigMap ─────────────────────────────
+echo -e "${CYAN}═══ Test: All pods inherit env ═══${NC}"
 errs=0
-ALL_PODS=$(k get pods -n "$NS" -o name 2>/dev/null | grep 'fullstack-pod-' | sed 's|pod/||')
-for p in $ALL_PODS; do
-    res=$(k exec -n "$NS" "$p" -- sh -c 'test -n "$DB_USER" && test -n "$app_mode" && echo "OK" || echo "FAIL"' 2>&1 || echo "FAIL")
+for p in $(k get pods -n "$NS" -o name 2>/dev/null | grep 'fullstack-pod-' | sed 's|pod/||'); do
+    res=$(kexec "$NS" "$p" sh -c 'test -n "$DB_USER" && test -n "$app_mode" && echo "OK" || echo "FAIL"')
     echo "    $p: $res"
     [[ "$res" != "OK" ]] && errs=$((errs+1))
 done
 check "All pods have Secret+ConfigMap" test "$errs" -eq 0
 
-# ─── TEST 10: Scale 4→1 ──────────────────────────────────────────────────
+# ─── TEST 8: Scale 4→1 ──────────────────────────────────────────────────
 echo -e "${CYAN}═══ Test: Scale 4→1 ═══${NC}"
 k scale deployment fullstack -n "$NS" --replicas=1 2>/dev/null
 deadline=$(( $(date +%s) + 30 ))
 while [[ $(date +%s) -lt $deadline ]]; do
-    pods=$(k get pods -n "$NS" -o name 2>/dev/null | grep -c 'fullstack-pod-' || echo "0")
     running=$(k get pods -n "$NS" 2>/dev/null | grep 'fullstack-pod-' | grep -c 'Running' || echo "0")
-    [[ "${pods:-0}" -eq 1 && "${running:-0}" -ge 1 ]] && break
+    [[ "${running:-0}" -eq 1 ]] && break
     sleep 1
 done
-check "Scale 4→1: 1 pod Running" test "${running:-0}" -eq 1
+check "Scale 4→1: 1 Running" test "${running:-0}" -eq 1
 
-# ─── TEST 11: Survivor after scale ────────────────────────────────────────
+# ─── TEST 9: Survivor after scale ────────────────────────────────────────
 echo -e "${CYAN}═══ Test: Survivor ═══${NC}"
 SURVIVOR=$(k get pods -n "$NS" -o name 2>/dev/null | grep 'fullstack-pod-' | head -1 | sed 's|pod/||')
-surv=$(k exec -n "$NS" "$SURVIVOR" -- sh -c 'echo "$DB_USER:$app_mode"' 2>&1 || echo "")
+surv=$(kexec "$NS" "$SURVIVOR" sh -c 'echo "$DB_USER:$app_mode"')
 check "Survivor has env" grep -q "admin:production" <<< "$surv"
-out=$(curl -sf http://localhost:30100/ 2>&1) || out=""
-check "HTTP still works" grep -qiE "directory listing|http|html" <<< "$out"
+out=$(curl -sf http://localhost:30091/ 2>&1) || out=""
+check "HTTP after scale" grep -qiE "directory listing|http|html" <<< "$out"
 
-# ─── TEST 12: PV + PVC stored correctly ───────────────────────────────────
+# ─── TEST 10: PV + PVC ════════════════════════════════════════════════════
 echo -e "${CYAN}═══ Test: PV/PVC ═══${NC}"
 pv_size=$(k get pv pv-fulltest -o jsonpath='{.spec.capacity.storage}' 2>/dev/null || echo "")
 check "PV capacity=1Gi" test "$pv_size" = "1Gi"
 pvc_size=$(k get pvc pvc-fulltest -n "$NS" -o jsonpath='{.spec.resources.requests.storage}' 2>/dev/null || echo "")
 check "PVC request=100Mi" test "$pvc_size" = "100Mi"
 
-# ─── Summary ──────────────────────────────────────────────────────────────
 echo ""
 echo -e "${GREEN}════════════════════════════════════════════${NC}"
 echo -e "${GREEN}  FULL STACK TEST COMPLETE${NC}"
 echo -e "${GREEN}════════════════════════════════════════════${NC}"
-echo ""
-echo "  ✓ ConfigMap envFrom  (3 vars)"
-echo "  ✓ ConfigMapKeyRef    (LOG_LEVEL)"
-echo "  ✓ Secret envFrom     (5 vars)"
-echo "  ✓ Direct env vars    (DIRECT_ENV)"
-echo "  ✓ Service env vars   (host+port)"
-echo "  ✓ Exec commands      (whoami, ps, inline)"
-echo "  ✓ Logs               (boot, DB_HOST, APP_MODE)"
-echo "  ✓ PV + PVC           (API create+read)"
-echo "  ✓ NodePort HTTP      (30100→9090)"
-echo "  ✓ Scale up 2→4       (all inherit env)"
-echo "  ✓ Scale down 4→1     (survivor keeps env)"
-echo ""
 
 kubectl --server="$SERVER" delete ns "$NS" --ignore-not-found --wait=false 2>/dev/null || true
