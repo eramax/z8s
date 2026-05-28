@@ -178,6 +178,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/v1", get(api_v1_resources))
         .route("/apis", get(api_groups))
         .route("/apis/apps/v1", get(api_apps_v1_resources))
+        .route("/apis/discovery.k8s.io/v1", get(api_discovery_v1_resources))
         .route("/apis/authorization.k8s.io/v1", get(api_authz_v1_resources))
         .route("/apis/authorization.k8s.io/v1/selfsubjectaccessreviews", post(self_subject_access_review))
         .route("/apis/authorization.k8s.io/v1/subjectaccessreviews", post(self_subject_access_review))
