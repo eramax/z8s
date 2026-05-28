@@ -11,4 +11,5 @@ pub mod pv;
 pub mod pvc;
 pub mod secret;
 pub mod service;
+pub mod storage_class;
 pub mod system;

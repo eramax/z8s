@@ -55,7 +55,10 @@ impl Component for PvResource {
         Ok(())
     }
 
-    async fn on_delete(&self, _ctx: &ReconcileContext, _resource: &AnyResource) -> Result<()> {
+    async fn on_delete(&self, ctx: &ReconcileContext, resource: &AnyResource) -> Result<()> {
+        if let AnyResource::PersistentVolume(pv) = resource {
+            ctx.vol.deprovision_pv(pv).await.ok();
+        }
         Ok(())
     }
 }
@@ -92,7 +95,7 @@ fn try_bind_pvc(pv: &k8s_openapi::api::core::v1::PersistentVolume, pvc: &k8s_ope
     let mut updated_pvc = pvc.clone();
     updated_pvc.spec.as_mut().unwrap().volume_name = Some(pv_name.to_string());
     updated_pvc.status = Some(k8s_openapi::api::core::v1::PersistentVolumeClaimStatus {
-        phase: Some("Bound".to_string()),
+        phase: Some("Bound".into()),
         capacity: pv_spec.capacity.clone(),
         access_modes: pv_spec.access_modes.clone(),
         ..Default::default()

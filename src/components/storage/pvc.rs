@@ -30,7 +30,7 @@ impl Component for PvcResource {
         Ok(())
     }
 
-    async fn on_apply(&self, _ctx: &ReconcileContext, resource: &AnyResource) -> Result<()> {
+    async fn on_apply(&self, ctx: &ReconcileContext, resource: &AnyResource) -> Result<()> {
         let pvc = match resource {
             AnyResource::PersistentVolumeClaim(p) => p.clone(),
             _ => return Ok(()),
@@ -38,6 +38,16 @@ impl Component for PvcResource {
         if pvc.spec.as_ref().and_then(|s| s.volume_name.as_ref()).is_some() {
             return Ok(());
         }
+
+        let has_class = pvc.spec.as_ref()
+            .and_then(|s| s.storage_class_name.as_ref())
+            .is_some();
+
+        if has_class {
+            ctx.vol.provision_for_pvc(&pvc).await?;
+            return Ok(());
+        }
+
         let pv_trackers = self.store.get_by_kind("PersistentVolume").await;
         let pv = find_matching_pv(&pvc, &pv_trackers);
         let Some(pv) = pv else { return Ok(()) };

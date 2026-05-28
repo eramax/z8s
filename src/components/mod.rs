@@ -7,6 +7,7 @@ use crate::api::types::{AnyResource, ResourceStore, ResourceTracker};
 use crate::cri::RuntimeProvider;
 use crate::net::NetworkEngine;
 use crate::scheduler::process::ProcessTracker;
+use crate::storage::StorageProvisioner;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResourceCategory {
@@ -31,6 +32,7 @@ pub struct ReconcileContext {
     pub cri: Arc<dyn RuntimeProvider>,
     pub net: Arc<dyn NetworkEngine>,
     pub process_tracker: Arc<ProcessTracker>,
+    pub vol: Arc<dyn StorageProvisioner>,
 }
 
 pub struct ComponentRegistry {

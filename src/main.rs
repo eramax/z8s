@@ -6,6 +6,7 @@ mod init;
 mod manifest;
 mod net;
 mod scheduler;
+mod storage;
 
 use crate::api::types::ResourceStore;
 use crate::components::{ComponentRegistry, PipelineBuilder, ReconcileContext};
@@ -25,6 +26,7 @@ use crate::scheduler::reconciler::Reconciler;
 use crate::cri::cgroup::CgroupManager;
 use crate::cri::runtime::ProcessSupervisor;
 use crate::scheduler::process::ProcessTracker;
+use crate::storage::ProvisionerDispatcher;
 use anyhow::Result;
 use std::sync::Arc;
 use tokio::signal;
@@ -126,12 +128,15 @@ async fn main() -> Result<()> {
         .stage(Box::new(crate::components::network::dns_stage::DnsStage::new()))
         .build());
 
+    let provisioner = Arc::new(ProvisionerDispatcher::new(store.clone()));
+
     let ctx = Arc::new(ReconcileContext {
         store: store.clone(),
         pipeline: pipeline.clone(),
         cri: cri.clone(),
         net: network.clone() as Arc<dyn crate::net::NetworkEngine>,
         process_tracker: process_tracker.clone(),
+        vol: provisioner.clone() as Arc<dyn crate::storage::StorageProvisioner>,
     });
 
     let mut registry = ComponentRegistry::new();

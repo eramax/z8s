@@ -65,6 +65,12 @@ pub async fn api_groups() -> Json<APIGroupList> {
                 preferred_version: Some(gvd("discovery.k8s.io/v1", "v1")),
                 server_address_by_client_cidrs: None,
             },
+            APIGroup {
+                name: "storage.k8s.io".into(),
+                versions: vec![gvd("storage.k8s.io/v1", "v1")],
+                preferred_version: Some(gvd("storage.k8s.io/v1", "v1")),
+                server_address_by_client_cidrs: None,
+            },
         ],
     })
 }
@@ -106,7 +112,14 @@ pub async fn api_discovery_v1_resources() -> Json<APIResourceList> {
     })
 }
 
-
+pub async fn api_storage_v1_resources() -> Json<APIResourceList> {
+    Json(APIResourceList {
+        group_version: "storage.k8s.io/v1".into(),
+        resources: vec![
+            api_resource("storageclasses", "storageclass", false, "StorageClass", &["get", "list"], &["sc"], &[]),
+        ],
+    })
+}
 
 
 
@@ -179,6 +192,7 @@ pub fn routes() -> Router<AppState> {
         .route("/apis", get(api_groups))
         .route("/apis/apps/v1", get(api_apps_v1_resources))
         .route("/apis/discovery.k8s.io/v1", get(api_discovery_v1_resources))
+        .route("/apis/storage.k8s.io/v1", get(api_storage_v1_resources))
         .route("/apis/authorization.k8s.io/v1", get(api_authz_v1_resources))
         .route("/apis/authorization.k8s.io/v1/selfsubjectaccessreviews", post(self_subject_access_review))
         .route("/apis/authorization.k8s.io/v1/subjectaccessreviews", post(self_subject_access_review))
