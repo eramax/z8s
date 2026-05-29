@@ -329,7 +329,7 @@ mod tests {
             cri: container_runtime.clone(),
             store: store.clone(),
         });
-        let network = Arc::new(crate::components::network::service::NetworkManager::new(store.clone(), process_tracker.clone()));
+        let network = Arc::new(crate::components::network::service::NetworkManager::new(store.clone(), process_tracker.clone(), test_netmux.clone()));
         let pipeline = Arc::new(crate::components::ReconciliationPipeline::builder().build());
         let test_netmux = Arc::new(crate::netmux::NetMux::new("10.42.0.0/16").unwrap());
         let ctx = Arc::new(crate::components::ReconcileContext {
@@ -360,7 +360,7 @@ mod tests {
             cri: container_runtime.clone(),
             store: store.clone(),
         });
-        let network = Arc::new(crate::components::network::service::NetworkManager::new(store.clone(), process_tracker.clone()));
+        let network = Arc::new(crate::components::network::service::NetworkManager::new(store.clone(), process_tracker.clone(), test_netmux.clone()));
         let pipeline = Arc::new(crate::components::ReconciliationPipeline::builder().build());
         let test_netmux = Arc::new(crate::netmux::NetMux::new("10.42.0.0/16").unwrap());
         let ctx = Arc::new(crate::components::ReconcileContext {

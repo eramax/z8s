@@ -4,6 +4,7 @@
 
 use std::mem;
 use std::net::Ipv4Addr;
+use std::os::fd::AsRawFd;
 use anyhow::{Context, Result};
 
 pub const RTM_NEWLINK: u16 = 16;
@@ -49,31 +50,21 @@ pub const IFF_RUNNING: i32 = 0x40;
 
 // ── Netlink helpers ─────────────────────────────────────────────────────────
 
-pub fn netlink_socket() -> Result<std::os::fd::RawFd> {
-    // SAFETY: libc socket()/bind() are FFI. Return value checked for errors.
-    // SOCK_CLOEXEC prevents fd leaks to child processes.
-    unsafe {
-        let fd = nix::libc::socket(AF_NETLINK, nix::libc::SOCK_RAW | nix::libc::SOCK_CLOEXEC, NETLINK_ROUTE);
-        if fd < 0 {
-            return Err(std::io::Error::last_os_error()).context("netlink socket");
-        }
-
-        let mut addr: nix::libc::sockaddr_nl = mem::zeroed();
-        addr.nl_family = AF_NETLINK as u16;
-        addr.nl_pid = 0;
-        addr.nl_groups = 0;
-
-        if nix::libc::bind(fd, &addr as *const _ as *const nix::libc::sockaddr, mem::size_of::<nix::libc::sockaddr_nl>() as u32) < 0 {
-            nix::libc::close(fd);
-            return Err(std::io::Error::last_os_error()).context("netlink bind");
-        }
-
-        Ok(fd)
-    }
+/// Open a netlink socket. Uses nix::sys::socket to get proper IO safety
+/// (OwnedFd tracking) required by Rust edition 2024.
+pub fn netlink_socket() -> Result<std::os::fd::OwnedFd> {
+    nix::sys::socket::socket(
+        nix::sys::socket::AddressFamily::Netlink,
+        nix::sys::socket::SockType::Raw,
+        nix::sys::socket::SockFlag::SOCK_CLOEXEC,
+        nix::sys::socket::SockProtocol::NetlinkRoute,
+    )
+    .context("netlink socket")
 }
 
-pub fn send_nlmsg(fd: std::os::fd::RawFd, buf: &[u8]) -> Result<()> {
-    // SAFETY: libc sendmsg FFI. iovec points to valid buffer. Return checked.
+pub fn send_nlmsg(fd: &std::os::fd::OwnedFd, buf: &[u8]) -> Result<()> {
+    let raw = fd.as_raw_fd();
+    // SAFETY: libc sendmsg FFI on valid fd. iovec points to valid buffer. Return checked.
     unsafe {
         let iov = nix::libc::iovec {
             iov_base: buf.as_ptr() as *mut nix::libc::c_void,
@@ -82,7 +73,7 @@ pub fn send_nlmsg(fd: std::os::fd::RawFd, buf: &[u8]) -> Result<()> {
         let mut msg: nix::libc::msghdr = mem::zeroed();
         msg.msg_iov = &iov as *const _ as *mut _;
         msg.msg_iovlen = 1;
-        let sent = nix::libc::sendmsg(fd, &msg, 0);
+        let sent = nix::libc::sendmsg(raw, &msg, 0);
         if sent < 0 {
             return Err(std::io::Error::last_os_error()).context("netlink sendmsg");
         }
@@ -90,7 +81,8 @@ pub fn send_nlmsg(fd: std::os::fd::RawFd, buf: &[u8]) -> Result<()> {
     Ok(())
 }
 
-pub fn recv_nlmsg(fd: std::os::fd::RawFd) -> Result<Vec<u8>> {
+pub fn recv_nlmsg(fd: &std::os::fd::OwnedFd) -> Result<Vec<u8>> {
+    let raw = fd.as_raw_fd();
     let mut buf = vec![0u8; 8192]; // 8KB buffer — sufficient for netlink responses
     // SAFETY: libc recvmsg FFI. iovec points to valid buffer. Return checked.
     unsafe {
@@ -101,7 +93,7 @@ pub fn recv_nlmsg(fd: std::os::fd::RawFd) -> Result<Vec<u8>> {
         let mut msg: nix::libc::msghdr = mem::zeroed();
         msg.msg_iov = &iov as *const _ as *mut _;
         msg.msg_iovlen = 1;
-        let n = nix::libc::recvmsg(fd, &mut msg, 0);
+        let n = nix::libc::recvmsg(raw, &mut msg, 0);
         if n < 0 {
             return Err(std::io::Error::last_os_error()).context("netlink recvmsg");
         }
@@ -140,12 +132,6 @@ pub fn nlattr_nested(nla_type: u16, attrs: &[u8]) -> Vec<u8> {
     buf
 }
 
-/// Safely close a file descriptor.
-fn close_fd(fd: std::os::fd::RawFd) {
-    // SAFETY: fd is a valid socket returned by netlink_socket(). Standard close(2).
-    unsafe { nix::libc::close(fd); }
-}
-
 /// Check netlink response for error. Returns Ok(()) if response is not an error.
 fn check_nl_response(resp: &[u8], context: &str) -> Result<()> {
     if resp.len() >= 16 {
@@ -166,6 +152,15 @@ pub fn create_veth_pair(host_name: &str, peer_name: &str, peer_pid: Option<u32>)
     let fd = netlink_socket()?;
 
     let mut peer_data = Vec::new();
+    // IFLA_VETH_PEER must start with a full ifinfomsg struct
+    let mut peer_infomsg = vec![0u8; 16];
+    peer_infomsg[0] = 0; // family = AF_UNSPEC
+    peer_infomsg[1] = 0; // padding
+    peer_infomsg[2..4].copy_from_slice(&0u16.to_ne_bytes()); // type
+    peer_infomsg[4..8].copy_from_slice(&0i32.to_ne_bytes()); // index
+    peer_infomsg[8..12].copy_from_slice(&(IFF_UP as u32).to_ne_bytes()); // flags
+    peer_infomsg[12..16].copy_from_slice(&0xFFFFFFFFu32.to_ne_bytes()); // change mask
+    peer_data.extend_from_slice(&peer_infomsg);
     peer_data.extend_from_slice(&nlattr_bytes(IFLA_IFNAME, peer_name.as_bytes()));
     if let Some(pid) = peer_pid {
         peer_data.extend_from_slice(&nlattr(IFLA_NET_NS_PID, &pid));
@@ -190,7 +185,8 @@ pub fn create_veth_pair(host_name: &str, peer_name: &str, peer_pid: Option<u32>)
     buf[8..12].copy_from_slice(&1u32.to_ne_bytes());
     buf[12..16].copy_from_slice(&0u32.to_ne_bytes());
 
-    buf[16] = AF_INET as u8;
+    // AF_UNSPEC for veth creation (virtual ethernet device, not L3-specific)
+    buf[16] = 0;
     buf[17] = 0;
     buf[18..20].copy_from_slice(&0u16.to_ne_bytes());
     buf[20..24].copy_from_slice(&0i32.to_ne_bytes());
@@ -203,9 +199,9 @@ pub fn create_veth_pair(host_name: &str, peer_name: &str, peer_pid: Option<u32>)
         offset += attr.len();
     }
 
-    send_nlmsg(fd, &buf)?;
-    let resp = recv_nlmsg(fd)?;
-    close_fd(fd);
+    send_nlmsg(&fd, &buf)?;
+    let resp = recv_nlmsg(&fd)?;
+    // fd auto-closed on drop
     check_nl_response(&resp, "create_veth")?;
 
     let host_idx = get_ifindex(host_name)?;
@@ -237,9 +233,9 @@ pub fn get_ifindex(name: &str) -> Result<u32> {
     let offset = 32;
     buf[offset..offset+name_attr.len()].copy_from_slice(&name_attr);
 
-    send_nlmsg(fd, &buf)?;
-    let resp = recv_nlmsg(fd)?;
-    close_fd(fd);
+    send_nlmsg(&fd, &buf)?;
+    let resp = recv_nlmsg(&fd)?;
+    // fd auto-closed on drop
 
     if resp.len() >= 20 {
         let msg_type = u16::from_ne_bytes([resp[4], resp[5]]);
@@ -272,9 +268,9 @@ pub fn set_link_up(ifindex: u32) -> Result<()> {
     buf[24..28].copy_from_slice(&(IFF_UP as u32).to_ne_bytes());
     buf[28..32].copy_from_slice(&0u32.to_ne_bytes());
 
-    send_nlmsg(fd, &buf)?;
-    let resp = recv_nlmsg(fd)?;
-    close_fd(fd);
+    send_nlmsg(&fd, &buf)?;
+    let resp = recv_nlmsg(&fd)?;
+    // fd auto-closed on drop
     check_nl_response(&resp, "set_link_up")
 }
 
@@ -320,9 +316,9 @@ pub fn add_route(dest: &Ipv4Addr, prefix: u8, gateway: Option<&Ipv4Addr>, oif: O
         offset += attr.len();
     }
 
-    send_nlmsg(fd, &buf)?;
-    let resp = recv_nlmsg(fd)?;
-    close_fd(fd);
+    send_nlmsg(&fd, &buf)?;
+    let resp = recv_nlmsg(&fd)?;
+    // fd auto-closed on drop
     check_nl_response(&resp, "add_route")
 }
 
@@ -368,9 +364,9 @@ pub fn del_route(dest: &Ipv4Addr, prefix: u8, gateway: Option<&Ipv4Addr>, oif: O
         offset += attr.len();
     }
 
-    send_nlmsg(fd, &buf)?;
-    let resp = recv_nlmsg(fd)?;
-    close_fd(fd);
+    send_nlmsg(&fd, &buf)?;
+    let resp = recv_nlmsg(&fd)?;
+    // fd auto-closed on drop
     check_nl_response(&resp, "del_route")
 }
 
@@ -402,9 +398,9 @@ pub fn add_addr(ifindex: u32, ip: &Ipv4Addr, prefix: u8) -> Result<()> {
         offset += attr.len();
     }
 
-    send_nlmsg(fd, &buf)?;
-    let resp = recv_nlmsg(fd)?;
-    close_fd(fd);
+    send_nlmsg(&fd, &buf)?;
+    let resp = recv_nlmsg(&fd)?;
+    // fd auto-closed on drop
     check_nl_response(&resp, "add_addr")
 }
 
@@ -426,9 +422,9 @@ pub fn del_link(ifindex: u32) -> Result<()> {
     buf[24..28].copy_from_slice(&0u32.to_ne_bytes());
     buf[28..32].copy_from_slice(&0u32.to_ne_bytes());
 
-    send_nlmsg(fd, &buf)?;
-    let resp = recv_nlmsg(fd)?;
-    close_fd(fd);
+    send_nlmsg(&fd, &buf)?;
+    let resp = recv_nlmsg(&fd)?;
+    // fd auto-closed on drop
     check_nl_response(&resp, "del_link")
 }
 
@@ -466,8 +462,9 @@ pub fn harden_sysctl() -> Result<()> {
 }
 
 pub fn ensure_loopback_up() -> Result<()> {
-    // SAFETY: All ioctl/libc calls use standard SIOCGIFFLAGS/SIOCSIFFLAGS
-    // which are safe ioctls. fd opened with SOCK_CLOEXEC, closed on all paths.
+    // SAFETY: SIOCGIFFLAGS/SIOCSIFFLAGS are standard safe ioctls on loopback.
+    // Uses raw libc socket because nix::sys::socket returns OwnedFd which may
+    // conflict with Rust 2024 IO safety when the fd is used for ioctl.
     unsafe {
         let fd = nix::libc::socket(nix::libc::AF_INET, nix::libc::SOCK_DGRAM | nix::libc::SOCK_CLOEXEC, 0);
         if fd < 0 {

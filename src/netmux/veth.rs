@@ -118,10 +118,8 @@ pub fn move_peer_to_netns(peer_ifindex: u32, pid: u32) -> Result<()> {
     let offset = 32;
     buf[offset..offset+ns_pid_attr.len()].copy_from_slice(&ns_pid_attr);
 
-    netlink::send_nlmsg(fd, &buf)?;
-    let resp = netlink::recv_nlmsg(fd)?;
-    // SAFETY: fd is a valid socket returned by netlink_socket()
-    unsafe { nix::libc::close(fd); }
+    netlink::send_nlmsg(&fd, &buf)?;
+    let resp = netlink::recv_nlmsg(&fd)?;
 
     if resp.len() >= 16 {
         let msg_type = u16::from_ne_bytes([resp[4], resp[5]]);

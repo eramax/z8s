@@ -137,7 +137,7 @@ async fn main() -> Result<()> {
         store: store.clone(),
     });
 
-    let network = Arc::new(NetworkManager::new(store.clone(), process_tracker.clone()));
+    let network = Arc::new(NetworkManager::new(store.clone(), process_tracker.clone(), netmux.clone()));
 
     if let Some(port) = crate::netmux::dns::run_dns(store.clone()).await {
         crate::config::set_dns_port(port);

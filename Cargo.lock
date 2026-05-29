@@ -1097,6 +1097,7 @@ dependencies = [
  "cfg-if",
  "cfg_aliases",
  "libc",
+ "memoffset",
 ]
 
 [[package]]
@@ -1434,8 +1435,6 @@ dependencies = [
 [[package]]
 name = "rustables"
 version = "0.8.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "19ff8788a90655f715f8236507161558a966c28a2845dc54d0f9985f9bbf389b"
 dependencies = [
  "bindgen",
  "bitflags",
