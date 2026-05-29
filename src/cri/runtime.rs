@@ -108,6 +108,10 @@ pub struct ContainerInstance {
     pub published_ports: std::collections::HashMap<u16, u16>,
     /// Pod has its own network namespace (declared containerPorts).
     pub isolated_net: bool,
+    /// Pod IP allocated from the pool (NetMux).
+    pub pod_ip: Option<std::net::Ipv4Addr>,
+    /// Host veth ifindex for this pod (NetMux).
+    pub host_veth_ifindex: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -126,6 +130,7 @@ pub struct ProcessSupervisor {
     pub image_manager: Arc<ImageManager>,
     pub cgroup_manager: Arc<CgroupManager>,
     pub restart_counts: Arc<Mutex<HashMap<String, u32>>>,
+    pub netmux: Arc<crate::netmux::NetMux>,
 }
 
 
@@ -134,6 +139,7 @@ impl ProcessSupervisor {
     pub fn new(
         image_manager: Arc<ImageManager>,
         cgroup_manager: Arc<CgroupManager>,
+        netmux: Arc<crate::netmux::NetMux>,
     ) -> Self {
         let base = if rootfs::is_root() {
             "/var/lib/z8s".to_string()
@@ -146,6 +152,7 @@ impl ProcessSupervisor {
             image_manager,
             cgroup_manager,
             restart_counts: Arc::new(Mutex::new(HashMap::new())),
+            netmux,
         }
     }
 
@@ -288,6 +295,8 @@ impl ProcessSupervisor {
                             env_vars: Vec::new(),
                             published_ports: std::collections::HashMap::new(),
                             isolated_net: false,
+                            pod_ip: None,
+                            host_veth_ifindex: None,
                         },
                         restart_count: 0,
                         log_buffer: Arc::new(Mutex::new(Vec::new())),
@@ -442,6 +451,8 @@ impl ProcessSupervisor {
         let ContainerSpawnCtx { entrypoint, cmd_args, env_vars, rootfs_path, container_id, pod_uid, image, container_name, volumes, run_as_user, run_as_group, isolate_net, privileged, extra_caps, published_ports, working_dir, probes } = ctx;
         let (stdout_r, stdout_w) = nix::unistd::pipe().context("Failed to create stdout pipe")?;
         let (stderr_r, stderr_w) = nix::unistd::pipe().context("Failed to create stderr pipe")?;
+        let (sync_r, sync_w) = nix::unistd::pipe().context("Failed to create sync pipe")?;
+        let (ack_r, ack_w) = nix::unistd::pipe().context("Failed to create ack pipe")?;
 
         let rootfs_owned = rootfs_path.to_string();
         let entrypoint_owned = entrypoint.to_string();
@@ -473,14 +484,39 @@ impl ProcessSupervisor {
             Ok(nix::unistd::ForkResult::Parent { child }) => {
                 drop(stdout_w);
                 drop(stderr_w);
+                drop(sync_w);
+                drop(ack_r);
 
                 let pid = child.as_raw() as u32;
                 info!("Container {} started with PID {} (root ns)", container_id, pid);
                 self.cgroup_manager.add_pid_to_cgroup(pod_uid, pid)?;
 
+                let mut pod_ip: Option<std::net::Ipv4Addr> = None;
+                let mut host_veth_ifindex: Option<u32> = None;
+
                 if isolate_net {
-                    launch_pasta_for_pid(pid);
+                    // Wait for child to create netns
+                    let mut sync_buf = [0u8; 1];
+                    let n = nix::unistd::read(&sync_r, &mut sync_buf).unwrap_or(0);
+                    if n > 0 && sync_buf[0] == b'S' {
+                        // Allocate IP and create veth
+                        if let Ok((ip, host_idx, peer_idx)) = self.netmux.attach_pod(pod_uid) {
+                            // Configure pod netns
+                            if let Err(e) = self.netmux.configure_pod_netns(pod_uid, &ip, pid, peer_idx) {
+                                warn!("NetMux configure_pod_netns failed: {}", e);
+                            }
+                            pod_ip = Some(ip);
+                            host_veth_ifindex = Some(host_idx);
+                            info!("NetMux: pod {} -> IP {}", pod_uid, ip);
+                        } else {
+                            warn!("NetMux: failed to attach pod {}", pod_uid);
+                        }
+                    }
+                    nix::unistd::write(&ack_w, b"A").ok();
                 }
+
+                drop(sync_r);
+                drop(ack_w);
 
                 let log_buffer = Arc::new(Mutex::new(Vec::<String>::new()));
 
@@ -520,6 +556,8 @@ impl ProcessSupervisor {
                     env_vars: env_owned.clone(),
                     published_ports: std::collections::HashMap::new(),
                     isolated_net: isolate_net,
+                    pod_ip: None,
+                    host_veth_ifindex: None,
                 };
                 let (published_ports_map, port_publish) = attach_port_publish(pid, &published_ports);
                 instance.published_ports = published_ports_map;
@@ -564,6 +602,14 @@ impl ProcessSupervisor {
                         std::process::exit(1);
                     }
                 };
+
+                if isolate_net {
+                    nix::unistd::write(&sync_w, b"S").ok();
+                    let mut ack = [0u8; 1];
+                    let _ = nix::unistd::read(&ack_r, &mut ack);
+                }
+                drop(sync_w);
+                drop(ack_r);
 
                 if let Some(gid) = run_as_group {
                     let _ = nix::unistd::setgid(nix::unistd::Gid::from_raw(gid));
@@ -705,6 +751,23 @@ impl ProcessSupervisor {
 
                 rootfs::write_userns_maps(child_pid, run_as_user, run_as_group)?;
 
+                let mut pod_ip: Option<std::net::Ipv4Addr> = None;
+                let mut host_veth_ifindex: Option<u32> = None;
+
+                if isolate_net {
+                    let pid = child_pid as u32;
+                    if let Ok((ip, host_idx, peer_idx)) = self.netmux.attach_pod(pod_uid) {
+                        if let Err(e) = self.netmux.configure_pod_netns(pod_uid, &ip, pid, peer_idx) {
+                            warn!("NetMux configure_pod_netns failed: {}", e);
+                        }
+                        pod_ip = Some(ip);
+                        host_veth_ifindex = Some(host_idx);
+                        info!("NetMux: pod {} -> IP {}", pod_uid, ip);
+                    } else {
+                        warn!("NetMux: failed to attach pod {}", pod_uid);
+                    }
+                }
+
                 nix::unistd::write(&ack_w, b"A").ok();
                 drop(ack_w);
 
@@ -714,10 +777,6 @@ impl ProcessSupervisor {
                 info!("Container {} started with PID {}", container_id, pid);
 
                 self.cgroup_manager.add_pid_to_cgroup(pod_uid, pid)?;
-
-                if isolate_net {
-                    launch_pasta_for_pid(pid);
-                }
 
                 let log_buffer = Arc::new(Mutex::new(Vec::<String>::new()));
 
@@ -769,6 +828,8 @@ impl ProcessSupervisor {
                     env_vars: env_owned.clone(),
                     published_ports: std::collections::HashMap::new(),
                     isolated_net: isolate_net,
+                    pod_ip: None,
+                    host_veth_ifindex: None,
                 };
                 let (published_ports_map, port_publish) = attach_port_publish(pid, &published_ports);
                 instance.published_ports = published_ports_map;
@@ -909,26 +970,28 @@ impl ProcessSupervisor {
             });
         }
 
-        let mut instance = ContainerInstance {
-            container_id: container_id.to_string(),
-            container_name: container_name.to_string(),
-            image: image.to_string(),
-            pid: Some(pid),
-            rootfs: rootfs_path.to_string(),
-            started_at: Some(chrono::Utc::now()),
-            env_vars: env_vars.to_vec(),
-            published_ports: std::collections::HashMap::new(),
-            isolated_net: isolate_net,
-        };
-        let (published_ports_map, port_publish) = attach_port_publish(pid, published_ports);
-        instance.published_ports = published_ports_map;
+                let mut instance = ContainerInstance {
+                    container_id: container_id.to_string(),
+                    container_name: container_name.to_string(),
+                    image: image.to_string(),
+                    pid: Some(pid),
+                    rootfs: rootfs_path.to_string(),
+                    started_at: Some(chrono::Utc::now()),
+                    env_vars: env_vars.to_vec(),
+                    published_ports: std::collections::HashMap::new(),
+                    isolated_net: isolate_net,
+                    pod_ip: None,
+                    host_veth_ifindex: None,
+                };
+                let (published_ports_map, port_publish) = attach_port_publish(pid, &published_ports);
+                instance.published_ports = published_ports_map;
 
-        let (ready, healthy) = Self::spawn_probes(probes, container_id, &instance.published_ports);
+                let (ready, healthy) = Self::spawn_probes(&probes, container_id, &instance.published_ports);
 
-        Ok(RunningContainer {
-            child: Some(child),
-            instance,
-            restart_count: 0,
+                Ok(RunningContainer {
+                    child: None,
+                    instance,
+                    restart_count: 0,
             log_buffer,
             ready,
             healthy,
@@ -993,6 +1056,17 @@ impl ProcessSupervisor {
 
     pub async fn stop_pod_from_spec(&self, spec: &crate::cri::spec::ContainerSpec) {
         for cfg in &spec.containers {
+            // Detach netmux networking before stopping the container
+            {
+                let running = self.running.lock().await;
+                if let Some(rc) = running.get(&cfg.container_id) {
+                    if let (Some(ip), Some(ifindex)) = (rc.instance.pod_ip, rc.instance.host_veth_ifindex) {
+                        if let Err(e) = self.netmux.detach_pod(&spec.pod_uid, &ip, ifindex) {
+                            warn!("NetMux detach failed for {}: {}", spec.pod_uid, e);
+                        }
+                    }
+                }
+            }
             self.stop_container(&cfg.container_id).await;
             self.restart_counts.lock().await.remove(&cfg.container_id);
         }

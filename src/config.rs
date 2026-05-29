@@ -19,16 +19,14 @@ static CONFIG: OnceLock<Config> = OnceLock::new();
 
 pub struct Config {
     pub api_port: u16,
-    /// Base address of the service CIDR (e.g. [127, 96, 0, 0]).
     pub service_cidr_base: [u8; 4],
-    /// Prefix length of the service CIDR (e.g. 16 for /16).
     pub service_cidr_prefix: u8,
     pub cluster_domain: String,
-    /// Explicit DNS port override; None = auto-detect (try 53 then 5353).
     pub dns_port: Option<u16>,
     pub manifests_dir: String,
-    /// Override data directory (images, rootfs). None = use default per-uid path.
     pub data_dir: Option<String>,
+    /// Pod CIDR for IPAM (e.g. "10.42.0.0/16").
+    pub pod_cidr: String,
 }
 
 impl Config {
@@ -71,6 +69,7 @@ impl Config {
             dns_port: None,
             manifests_dir: "/etc/z8s/manifests".to_string(),
             data_dir: None,
+            pod_cidr: "10.42.0.0/16".to_string(),
         }
     }
 
@@ -132,6 +131,17 @@ impl Config {
                         cfg.data_dir = Some(v.to_string());
                     }
                 }
+                "--pod-cidr" => {
+                    i += 1;
+                    if let Some(v) = args.get(i) {
+                        if parse_cidr(v).is_some() {
+                            cfg.pod_cidr = v.to_string();
+                        } else {
+                            eprintln!("Invalid --pod-cidr (expected e.g. 10.42.0.0/16): {}", v);
+                            std::process::exit(1);
+                        }
+                    }
+                }
                 other => {
                     eprintln!("Unknown argument: {}", other);
                     eprintln!("{}", HELP);
@@ -176,6 +186,7 @@ USAGE:
 OPTIONS:
     --port <PORT>             API server listen port        [default: 6443]
     --service-cidr <CIDR>     ClusterIP allocation CIDR     [default: 10.96.0.0/16]
+    --pod-cidr <CIDR>         Pod IP allocation CIDR        [default: 10.42.0.0/16]
     --cluster-domain <DOMAIN> In-cluster DNS search domain  [default: cluster.local]
     --dns-port <PORT>         Force DNS listen port         [default: auto: try 53, then 5353]
     --manifests-dir <PATH>    Manifests directory to watch  [default: /etc/z8s/manifests]
@@ -187,7 +198,7 @@ EXAMPLES:
     z8s
 
     # Custom port and CIDR
-    z8s --port 8443 --service-cidr 10.96.0.0/12
+    z8s --port 8443 --service-cidr 10.96.0.0/12 --pod-cidr 10.42.0.0/16
 
     # Watch a custom manifests directory
     z8s --manifests-dir /home/user/k8s-manifests

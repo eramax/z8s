@@ -321,7 +321,7 @@ mod tests {
             .unwrap_or_else(|_| crate::cri::cgroup::CgroupManager::new().unwrap()));
         let image = Arc::new(crate::cri::image::ImageManager::new()
             .unwrap_or_else(|_| crate::cri::image::ImageManager::new().unwrap()));
-        let supervisor = Arc::new(crate::cri::runtime::ProcessSupervisor::new(image, cgroup.clone()));
+        let supervisor = Arc::new(crate::cri::runtime::ProcessSupervisor::new(image, cgroup.clone(), Arc::new(crate::netmux::NetMux::new(&crate::config::get().pod_cidr).unwrap())));
         let container_runtime = Arc::new(crate::cri::runtime::ContainerRuntime::new(supervisor.clone(), cgroup));
         let process_tracker = Arc::new(ProcessTracker {
             running: supervisor.running.clone(),
@@ -350,7 +350,7 @@ mod tests {
             .unwrap_or_else(|_| crate::cri::cgroup::CgroupManager::new().unwrap()));
         let image = Arc::new(crate::cri::image::ImageManager::new()
             .unwrap_or_else(|_| crate::cri::image::ImageManager::new().unwrap()));
-        let supervisor = Arc::new(crate::cri::runtime::ProcessSupervisor::new(image, cgroup.clone()));
+        let supervisor = Arc::new(crate::cri::runtime::ProcessSupervisor::new(image, cgroup.clone(), Arc::new(crate::netmux::NetMux::new(&crate::config::get().pod_cidr).unwrap())));
         let container_runtime = Arc::new(crate::cri::runtime::ContainerRuntime::new(supervisor.clone(), cgroup));
         let process_tracker = Arc::new(ProcessTracker {
             running: supervisor.running.clone(),

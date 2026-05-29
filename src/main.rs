@@ -5,6 +5,7 @@ mod cri;
 mod init;
 mod manifest;
 mod net;
+mod netmux;
 mod scheduler;
 mod storage;
 mod types;
@@ -100,9 +101,21 @@ async fn main() -> Result<()> {
         ImageManager::new().expect("Failed to create image manager")
     }));
 
+    let netmux = Arc::new(crate::netmux::NetMux::new(&cfg.pod_cidr).unwrap_or_else(|e| {
+        panic!("Failed to create NetMux with pod CIDR {}: {}", cfg.pod_cidr, e);
+    }));
+
+    if let Err(e) = crate::netmux::NetMux::enable_ip_forward() {
+        warn!("Failed to enable ip_forward: {} — pods may not reach the internet", e);
+    }
+    if let Err(e) = crate::netmux::NetMux::ensure_loopback_up() {
+        warn!("Failed to bring up loopback: {}", e);
+    }
+
     let supervisor = Arc::new(ProcessSupervisor::new(
         image_manager,
         cgroup_manager.clone(),
+        netmux,
     ));
 
     let cri = Arc::new(ContainerRuntime::new(
