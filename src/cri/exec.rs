@@ -424,8 +424,6 @@ fn build_command(
         let ns = try_open_namespace_fds(container_pid);
         let can_enter_mnt = ns.mnt.is_some();
         let fs_isolated = rootfs::container_fs_isolated(container_pid, root);
-        eprintln!("DEBUG_EXEC: cmd={cmd} root={root} fs_isolated={fs_isolated} can_enter_mnt={can_enter_mnt} mnt={} user={}",
-            ns.mnt.is_some(), ns.user.is_some());
         // Use in-container paths only when we can enter the mount namespace.
         // Otherwise use host-rootfs paths so wrap_dynamic_linker can find the binary.
         let (exec_path, prog_args) = if fs_isolated && can_enter_mnt {
@@ -438,7 +436,6 @@ fn build_command(
         // is searched instead (e.g. wget in a scratch/minimal image).
         let binary_in_rootfs = exec_path.contains('/');
         let use_mnt_ns = fs_isolated && binary_in_rootfs && can_enter_mnt;
-        eprintln!("DEBUG_EXEC: exec_path={exec_path} binary_in_rootfs={binary_in_rootfs} use_mnt_ns={use_mnt_ns}");
         let (program, prog_args) = if use_mnt_ns {
             (exec_path, prog_args)
         } else {
@@ -456,7 +453,6 @@ fn build_command(
             let r = root.trim_end_matches('/');
             if program.starts_with(r) {
                 let ld_path = format!("{r}/usr/local/lib:{r}/usr/lib:{r}/lib");
-                eprintln!("DEBUG_EXEC: setting LD_LIBRARY_PATH={ld_path}");
                 c.env("LD_LIBRARY_PATH", ld_path);
             }
         }

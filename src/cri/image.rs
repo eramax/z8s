@@ -4,7 +4,6 @@ use oci_distribution::config::ConfigFile;
 use oci_distribution::secrets::RegistryAuth;
 use oci_distribution::Reference;
 use std::path::Path;
-use std::sync::Mutex;
 use tracing::{debug, info};
 
 use crate::cri::oci::{save_image_config, OCI_CONFIG_FILE};
@@ -32,7 +31,6 @@ pub struct ImageManager {
     client: Client,
     cache_dir: String,
     rootfs_dir: String,
-    pull_locks: Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl ImageManager {
@@ -52,7 +50,6 @@ impl ImageManager {
             client,
             cache_dir,
             rootfs_dir,
-            pull_locks: Mutex::new(std::collections::HashMap::new()),
         })
     }
 
@@ -74,26 +71,19 @@ impl ImageManager {
     /// Recursively copy a directory tree without spawning an external process.
     /// Preserves permissions and symlinks; skips special files (devices/fifos)
     /// which require root to create and are not needed for container rootfs copies.
-    fn copy_dir(src: &Path, dst: &Path) -> anyhow::Result<()> {
-        std::fs::create_dir_all(dst)
-            .with_context(|| format!("create_dir_all({:?})", dst))?;
+    fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(dst)?;
         if let Ok(m) = std::fs::symlink_metadata(src) {
             std::fs::set_permissions(dst, m.permissions()).ok();
         }
-        for entry in std::fs::read_dir(src)
-            .with_context(|| format!("read_dir({:?})", src))?
-        {
-            let entry = entry
-                .with_context(|| format!("read_dir entry in {:?}", src))?;
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
             let src_child = entry.path();
             let dst_child = dst.join(entry.file_name());
-            let meta = std::fs::symlink_metadata(&src_child)
-                .with_context(|| format!("metadata({:?})", src_child))?;
+            let meta = std::fs::symlink_metadata(&src_child)?;
             let ft = meta.file_type();
             if ft.is_symlink() {
-                let target = std::fs::read_link(&src_child)
-                    .with_context(|| format!("read_link({:?})", src_child))?;
-                // Remove stale entry at dst so symlink creation succeeds
+                let target = std::fs::read_link(&src_child)?;
                 if dst_child.exists() || std::fs::symlink_metadata(&dst_child).is_ok() {
                     if dst_child.is_dir() {
                         std::fs::remove_dir_all(&dst_child).ok();
@@ -101,31 +91,18 @@ impl ImageManager {
                         std::fs::remove_file(&dst_child).ok();
                     }
                 }
-                std::os::unix::fs::symlink(&target, &dst_child)
-                    .with_context(|| format!("symlink({:?} -> {:?})", dst_child, target))?;
+                std::os::unix::fs::symlink(&target, &dst_child)?;
             } else if ft.is_dir() {
-                Self::copy_dir(&src_child, &dst_child)
-                    .with_context(|| format!("copy_dir({:?} -> {:?})", src_child, dst_child))?;
+                Self::copy_dir(&src_child, &dst_child)?;
             } else if ft.is_file() {
-                std::fs::copy(&src_child, &dst_child)
-                    .with_context(|| format!("copy({:?} -> {:?})", src_child, dst_child))?;
+                std::fs::copy(&src_child, &dst_child)?;
                 std::fs::set_permissions(&dst_child, meta.permissions()).ok();
             }
-            // Skip block/char/fifo — not needed for rootfs clones and require root
         }
         Ok(())
     }
 
     pub async fn unpack_image(&self, image_ref: &str, container_id: &str) -> Result<String> {
-        // Per-image lock to prevent concurrent pulls of the same image
-        let image_lock = {
-            let mut locks = self.pull_locks.lock().unwrap();
-            locks.entry(image_ref.to_string())
-                .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
-                .clone()
-        };
-        let _guard = image_lock.lock().await;
-
         let container_rootfs = format!("{}/{}", self.rootfs_dir, container_id);
 
         if container_rootfs.as_str() == "/" {
@@ -256,32 +233,13 @@ impl ImageManager {
 
     fn copy_cache_to_container(cache_path: &str, container_rootfs: &str, meta_path: &str, image_ref: &str) -> Result<String> {
         if Path::new(container_rootfs).exists() {
-            Self::unmount_stale_rootfs(container_rootfs);
-            std::fs::remove_dir_all(container_rootfs)
-                .with_context(|| format!("remove_dir_all({:?})", container_rootfs))?;
+            std::fs::remove_dir_all(container_rootfs)?;
         }
-        Self::copy_dir(Path::new(cache_path), Path::new(container_rootfs))
-            .with_context(|| format!("copy_dir({:?} -> {:?})", cache_path, container_rootfs))?;
+        Self::copy_dir(Path::new(cache_path), Path::new(container_rootfs))?;
         Self::copy_oci_config(cache_path, container_rootfs);
         Self::backfill_oci_config(cache_path, container_rootfs);
         std::fs::write(meta_path, image_ref)?;
         Ok(container_rootfs.to_string())
-    }
-
-    fn unmount_stale_rootfs(path: &str) {
-        if let Ok(entries) = std::fs::read_dir(path) {
-            for entry in entries.flatten() {
-                let child = entry.path();
-                if child.is_dir() {
-                    // Try regular umount first, then lazy detach for busy mounts
-                    if nix::mount::umount(&child).is_err() {
-                        let _ = nix::mount::umount2(&child, nix::mount::MntFlags::MNT_DETACH);
-                    }
-                    // Recurse into subdirectories for nested mounts
-                    Self::unmount_stale_rootfs(child.to_str().unwrap_or(""));
-                }
-            }
-        }
     }
 
     fn backfill_oci_config(cache_path: &str, container_rootfs: &str) {
