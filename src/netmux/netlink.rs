@@ -295,7 +295,8 @@ pub fn add_route(dest: &Ipv4Addr, prefix: u8, gateway: Option<&Ipv4Addr>, oif: O
 
     buf[0..4].copy_from_slice(&(total_len as u32).to_ne_bytes());
     buf[4..6].copy_from_slice(&RTM_NEWROUTE.to_ne_bytes());
-    buf[6..8].copy_from_slice(&(NLM_F_REQUEST | NLM_F_CREATE | NLM_F_EXCL | NLM_F_ACK).to_ne_bytes());
+    // Use CREATE without EXCL so existing routes are replaced (avoids EEXIST on re-run)
+    buf[6..8].copy_from_slice(&(NLM_F_REQUEST | NLM_F_CREATE | NLM_F_ACK).to_ne_bytes());
     buf[8..12].copy_from_slice(&1u32.to_ne_bytes());
     buf[12..16].copy_from_slice(&0u32.to_ne_bytes());
 

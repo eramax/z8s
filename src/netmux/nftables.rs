@@ -107,6 +107,13 @@ impl NftEngine {
         batch.add(&inter_pod_rule, rustables::MsgType::Add);
 
         batch.send().context("Failed to send nftables init batch")?;
+
+        // Flush stale DNAT rules from previous runs (nftables rules persist across restarts)
+        let _ = std::process::Command::new("nft")
+            .args(["flush", "chain", "ip", NAT_TABLE, "prerouting"]).status();
+        let _ = std::process::Command::new("nft")
+            .args(["flush", "chain", "ip", NAT_TABLE, "output"]).status();
+
         info!("nftables: initialized tables ({}, {}) and baseline chains", NAT_TABLE, FILTER_TABLE);
         Ok(())
     }
