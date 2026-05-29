@@ -160,17 +160,6 @@ impl NftEngine {
             return Ok(());
         }
         let _lock = self.writer.lock().expect("lock poisoned");
-
-        // Delete old rules for this ClusterIP:port before adding new ones
-        let proto = if port <= 65535 { "tcp" } else { "udp" };
-        for chain in &["prerouting", "output"] {
-            let _ = std::process::Command::new("nft")
-                .args(["delete", "rule", "ip", NAT_TABLE, chain,
-                       "ip", "daddr", &cluster_ip.to_string(),
-                       proto, "dport", &port.to_string()])
-                .status();
-        }
-
         let mut batch = Batch::new();
 
         let nat_table = Table::new(ProtocolFamily::Ipv4).with_name(NAT_TABLE);
