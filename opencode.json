@@ -13,5 +13,11 @@
       ],
       "enabled": false
     }
+  },
+  "agent": {
+    "z8s-tester": {
+      "description": "Runs and creates integration tests for all z8s resources. Produces detailed pass/fail reports.",
+      "mode": "subagent"
+    }
   }
 }

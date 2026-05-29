@@ -26,6 +26,7 @@ pub struct NetworkPolicyController {
 }
 
 impl NetworkPolicyController {
+    /// Create a new NetworkPolicy controller.
     pub fn new(netmux: Arc<NetMux>) -> Self {
         Self {
             netmux,

@@ -9,11 +9,16 @@ use k8s_openapi::api::networking::v1::Ingress;
 
 use crate::types::{AnyResource, ResourceStore};
 
+/// L7 ingress state — shared between the CRD watcher (apply_ingress)
+/// and the HTTP listener (start_http). Routes are populated by
+/// CrdWatcher and consumed by handle_connection.
 pub struct IngressState {
-    routes: std::sync::RwLock<HashMap<String, (String, u16)>>,
+    /// Host -> (service_name, port) routing table
+    pub routes: std::sync::RwLock<HashMap<String, (String, u16)>>,
 }
 
 impl IngressState {
+    /// Create empty ingress state with no routes.
     pub fn new() -> Self {
         Self { routes: std::sync::RwLock::new(HashMap::new()) }
     }

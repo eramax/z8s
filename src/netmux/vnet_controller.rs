@@ -12,6 +12,7 @@ pub struct VNetController {
 }
 
 impl VNetController {
+    /// Create a new VNet controller.
     pub fn new(netmux: Arc<NetMux>) -> Self {
         Self { netmux }
     }
