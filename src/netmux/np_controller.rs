@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use tracing::{info, warn};
-use k8s_openapi::api::networking::v1::{NetworkPolicy, NetworkPolicyPeer};
+use k8s_openapi::api::networking::v1::NetworkPolicy;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;
 
 use super::NetMux;

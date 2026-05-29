@@ -70,6 +70,10 @@ impl Rule {
         self
     }
 
+    pub fn handle(&self) -> Option<u64> {
+        self.handle
+    }
+
     /// Appends this rule to `batch`
     pub fn add_to_batch(self, batch: &mut Batch) -> Self {
         batch.add(&self, crate::MsgType::Add);

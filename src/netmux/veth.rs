@@ -85,13 +85,6 @@ pub fn delete_veth(host_name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Delete veth pair by host ifindex.
-pub fn delete_veth_by_index(ifindex: u32) -> Result<()> {
-    netlink::del_link(ifindex).context("del_link")?;
-    info!("Deleted veth ifindex {}", ifindex);
-    Ok(())
-}
-
 /// Bring up loopback inside a network namespace.
 pub fn setup_loopback() -> Result<()> {
     netlink::ensure_loopback_up().context("ensure_loopback_up")?;

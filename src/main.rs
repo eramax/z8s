@@ -119,6 +119,11 @@ async fn main() -> Result<()> {
         warn!("Failed to add SNAT: {} — pods may not reach internet", e);
     }
 
+    // Clean orphan veths from previous runs
+    if let Err(e) = netmux.clean_orphan_veths(&[]) {
+        warn!("Failed to clean orphan veths: {}", e);
+    }
+
     let supervisor = Arc::new(ProcessSupervisor::new(
         image_manager,
         cgroup_manager.clone(),
@@ -213,6 +218,18 @@ async fn main() -> Result<()> {
     tokio::spawn(async move {
         api::server::run_server(store_clone, pt2, reg2, ctx2).await;
     });
+
+    // L7 ingress HTTP listener
+    {
+        let netmux = netmux.clone();
+        let store = store.clone();
+        tokio::spawn(async move {
+            let ctrl = crate::netmux::ingress::IngressController::new(store, netmux.ingress_state.clone());
+            if let Err(e) = ctrl.start_http().await {
+                error!("Ingress HTTP listener failed: {}", e);
+            }
+        });
+    }
 
     // Initial reconcile
     let pt = process_tracker.clone();

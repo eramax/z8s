@@ -1,10 +1,9 @@
-use std::net::Ipv4Addr;
 use std::sync::Arc;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use tracing::{info, warn};
 
 use super::NetMux;
-use super::crds::{Nsg, NsgRule, VNet, Subnet, Hub, Spoke};
+use super::crds::{Nsg, VNet};
 
 /// VNet controller — watches VNet/Subnet/NSG CRDs and compiles to nftables.
 pub struct VNetController {
@@ -64,23 +63,4 @@ impl VNetController {
         Ok(())
     }
 
-    /// Apply Hub-and-Spoke: deny spoke-to-spoke, allow hub-to-spoke.
-    pub fn apply_hub_spoke(&self, hub: &Hub, hub_cidr: &str, spoke_cidrs: &[(&str, &str)]) -> Result<()> {
-        for (spoke_name, spoke_cidr) in spoke_cidrs {
-            self.netmux.add_forward_allow(hub_cidr, spoke_cidr)?;
-            self.netmux.add_forward_allow(spoke_cidr, hub_cidr)?;
-            self.netmux.add_forward_deny(spoke_cidr, "0.0.0.0/0")?;
-            info!("Hub-and-Spoke: hub <-> spoke '{}'", spoke_name);
-        }
-
-        for (i, (a_name, a_cidr)) in spoke_cidrs.iter().enumerate() {
-            for (b_name, b_cidr) in spoke_cidrs.iter().skip(i + 1) {
-                self.netmux.add_forward_deny(a_cidr, b_cidr)?;
-                self.netmux.add_forward_deny(b_cidr, a_cidr)?;
-                info!("Hub-and-Spoke: denied spoke '{}' <-> spoke '{}'", a_name, b_name);
-            }
-        }
-
-        Ok(())
-    }
 }

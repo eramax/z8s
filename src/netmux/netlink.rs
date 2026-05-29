@@ -486,26 +486,4 @@ pub fn ensure_loopback_up() -> Result<()> {
     Ok(())
 }
 
-/// List IPv4 addresses on a given interface by ifindex.
-pub fn list_iface_addrs(ifindex: u32) -> Result<Vec<Ipv4Addr>> {
-    use std::collections::HashSet;
-    let mut addrs = HashSet::new();
 
-    let path = format!("/proc/self/net/fib_trie");
-    if let Ok(content) = std::fs::read_to_string(&path) {
-        let mut current_dev = String::new();
-        for line in content.lines() {
-            if let Some(rest) = line.trim_start().strip_prefix("Local:") {
-                if let Some(ip_str) = rest.split('/').next() {
-                    if let Ok(ip) = ip_str.trim().parse::<Ipv4Addr>() {
-                        if !ip.is_loopback() && !ip.is_link_local() && !ip.is_multicast() {
-                            addrs.insert(ip);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(addrs.into_iter().collect())
-}

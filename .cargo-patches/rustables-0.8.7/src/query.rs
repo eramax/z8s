@@ -1,4 +1,5 @@
-use std::os::{fd::AsRawFd, unix::prelude::RawFd};
+use std::os::fd::IntoRawFd;
+use std::os::unix::prelude::RawFd;
 
 use nix::sys::socket::{self, AddressFamily, MsgFlags, SockFlag, SockProtocol, SockType};
 
@@ -149,14 +150,15 @@ where
         SockProtocol::NetlinkNetFilter,
     )
     .map_err(QueryError::NetlinkOpenError)?;
+    let sock = sock.into_raw_fd();
 
     let seq = 0;
 
     let chains_buf = get_list_of_objects(data_type, seq, filter)?;
-    socket::send(sock.as_raw_fd(), &chains_buf, MsgFlags::empty())
+    socket::send(sock, &chains_buf, MsgFlags::empty())
         .map_err(QueryError::NetlinkSendError)?;
 
-    socket_close_wrapper(sock.as_raw_fd(), move |sock| {
+    socket_close_wrapper(sock, move |sock| {
         // the kernel should return NLM_F_MULTI objects
         recv_and_process(
             sock,

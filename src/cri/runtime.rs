@@ -13,7 +13,7 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 use async_trait::async_trait;
 use crate::cri::spec::ContainerSpec;
 use crate::cri::RuntimeProvider;
@@ -94,8 +94,6 @@ pub struct ProcessSupervisor {
     pub restart_counts: Arc<Mutex<HashMap<String, u32>>>,
     pub netmux: Arc<crate::netmux::NetMux>,
     pub store: Arc<crate::types::ResourceStore>,
-    /// Optional network engine for triggering service sync on pod IP assignment.
-    pub network_engine: Option<Arc<dyn crate::netmux::network::NetworkEngine + Send + Sync>>,
 }
 
 
@@ -120,7 +118,6 @@ impl ProcessSupervisor {
             restart_counts: Arc::new(Mutex::new(HashMap::new())),
             netmux,
             store,
-            network_engine: None,
         }
     }
 
@@ -566,7 +563,7 @@ impl ProcessSupervisor {
                 {
                     Ok(i) => i,
                     Err(e) => {
-                        eprintln!("z8s: root namespace setup failed: {}", e);
+                        error!("z8s: root namespace setup failed: {}", e);
                         std::process::exit(1);
                     }
                 };
@@ -660,7 +657,7 @@ impl ProcessSupervisor {
         }
 
         let e = nix::unistd::execvpe(&argv[0], &argv, &envp).expect_err("execvpe returned unexpectedly");
-        eprintln!("z8s: execvpe({}) failed: {}", argv[0].to_str().unwrap_or("?"), e);
+        error!("z8s: execvpe({}) failed: {}", argv[0].to_str().unwrap_or("?"), e);
         std::process::exit(1);
     }
 
@@ -836,7 +833,7 @@ impl ProcessSupervisor {
                 ) {
                     Ok(i) => i,
                     Err(e) => {
-                        eprintln!("z8s: namespace setup failed: {:#}", e);
+                        error!("z8s: namespace setup failed: {:#}", e);
                         std::process::exit(1);
                     }
                 };

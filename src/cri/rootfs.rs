@@ -514,7 +514,7 @@ pub fn child_enter_ns_fork(
     }
 
     // Fallback: degraded with a loud warning
-    eprintln!("z8s: WARNING: FILESYSTEM ISOLATION UNAVAILABLE IN THIS ENVIRONMENT! RUNNING DEGRADED!");
+    tracing::error!("z8s: WARNING: FILESYSTEM ISOLATION UNAVAILABLE IN THIS ENVIRONMENT! RUNNING DEGRADED!");
     if !volumes.is_empty() {
         crate::cri::volumes::bind_mount_volumes_degraded(volumes);
     }

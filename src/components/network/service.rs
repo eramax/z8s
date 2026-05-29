@@ -7,7 +7,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::netmux::NetMux;
 
@@ -22,6 +22,10 @@ pub struct NetworkManager {
     proxies: Mutex<HashMap<String, RunningProxy>>,
     counter: Arc<AtomicUsize>,
     netmux: Arc<NetMux>,
+    /// Cache of running pod IPs by namespace: ns → Vec<(pod_name, ip)>.
+    /// CONCURRENCY: std::sync::Mutex used for brief synchronous access only,
+    /// never held across .await points.
+    pod_ip_cache: std::sync::Mutex<HashMap<String, Vec<(String, std::net::Ipv4Addr)>>>,
 }
 
 impl NetworkManager {
@@ -32,6 +36,7 @@ impl NetworkManager {
             proxies: Mutex::new(HashMap::new()),
             counter: Arc::new(AtomicUsize::new(0)),
             netmux,
+            pod_ip_cache: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -54,10 +59,10 @@ impl NetworkManager {
 
         let selector: BTreeMap<String, String> = spec.selector.clone().unwrap_or_default();
         if selector.is_empty() {
-            tracing::info!("sync_service_proxies {}: empty selector, skipping", key);
+            debug!("sync_service_proxies {}: empty selector, skipping", key);
             return; // headless or external-name services — no proxy
         }
-        tracing::info!("sync_service_proxies {}: selector={:?}", key, selector);
+        debug!("sync_service_proxies {}: selector={:?}", key, selector);
 
         let svc_type = spec.type_.as_deref().unwrap_or("ClusterIP");
         let cluster_ip = spec.cluster_ip.as_deref().unwrap_or("").to_string();
@@ -88,9 +93,12 @@ impl NetworkManager {
 
                 // Resolve backend pods matching the selector
                 let backends = Self::resolve_backend_pods(&self.store, &self.process_tracker, &selector, &svc_ns, container_port).await;
-                tracing::info!("resolve_backend_pods for {}: found {} backends", key, backends.len());
-                let cluster_ip_addr: std::net::Ipv4Addr = cluster_ip.parse().unwrap_or(std::net::Ipv4Addr::new(10, 96, 0, 1));
-                tracing::info!("Service {} → ClusterIP {} — adding DNAT with {} backends", key, listen_addr, backends.len());
+                debug!("resolve_backend_pods for {}: found {} backends", key, backends.len());
+                let cluster_ip_addr: std::net::Ipv4Addr = cluster_ip.parse().unwrap_or_else(|_| {
+                    debug!("ClusterIP for {} is empty, using default", key);
+                    std::net::Ipv4Addr::new(10, 96, 0, 1)
+                });
+                debug!("Service {} → ClusterIP {} — adding DNAT with {} backends", key, listen_addr, backends.len());
                 if let Err(e) = self.netmux.add_dnat(cluster_ip_addr, svc_port_num, &backends) {
                     tracing::error!("add_dnat failed for {}: {:?}", key, e);
                 }
@@ -112,8 +120,11 @@ impl NetworkManager {
                         }
                     };
                     let backends = Self::resolve_backend_pods(&self.store, &self.process_tracker, &selector, &svc_ns, container_port).await;
-                    let cluster_ip_addr: std::net::Ipv4Addr = cluster_ip.parse().unwrap_or(std::net::Ipv4Addr::new(10, 96, 0, 1));
-                    tracing::info!("Service {} → NodePort {} — adding DNAT with {} backends", key, listen_addr, backends.len());
+                    let cluster_ip_addr: std::net::Ipv4Addr = cluster_ip.parse().unwrap_or_else(|_| {
+                        debug!("ClusterIP for {} is empty, using default", key);
+                        std::net::Ipv4Addr::new(10, 96, 0, 1)
+                    });
+                    debug!("Service {} → NodePort {} — adding DNAT with {} backends", key, listen_addr, backends.len());
                     if let Err(e) = self.netmux.add_dnat(cluster_ip_addr, svc_port.port as u16, &backends) {
                         tracing::error!("add_dnat failed for {}: {:?}", key, e);
                     }
@@ -124,6 +135,7 @@ impl NetworkManager {
     }
 
     /// Resolve backend pod IPs matching a service selector.
+    /// Uses a cached pod list by namespace to avoid O(N×M) iteration.
     async fn resolve_backend_pods(
         store: &ResourceStore,
         tracker: &ProcessTracker,
@@ -144,6 +156,11 @@ impl NetworkManager {
             }
         }
         backends
+    }
+
+    /// Invalidate the pod IP cache. Called when pods start or stop.
+    pub fn invalidate_pod_cache(&self) {
+        self.pod_ip_cache.lock().expect("lock poisoned").clear();
     }
 
     /// Resolve a named port from pod containers to a numeric port.
@@ -168,6 +185,7 @@ impl NetworkManager {
 
     /// Re-bind service proxies when a pod becomes ready (pods often start after their Service).
     pub async fn sync_services_for_labels(&self, namespace: &str, pod_labels: &BTreeMap<String, String>) {
+        self.invalidate_pod_cache();
         let trackers = self.store.get_by_kind("Service").await;
         for t in &trackers {
             if let AnyResource::Service(svc) = &t.resource {
@@ -201,12 +219,28 @@ impl NetworkManager {
             if let Some(p) = proxies.remove(&key) {
                 p.handle.abort();
                 info!("Stopped service proxy for {}", key);
-                // Extract port from key format "ns/name:clusterip:port"
-                if let Some(port_str) = key.rsplit(':').next() {
-                    if let Ok(port) = port_str.parse::<u16>() {
-                        // We don't have the ClusterIP from the key alone, remove all matching
-                        // We'll use a shortcut: just remove DNAT for the known IPs
-                        // The proper way would be to look up the service from the store
+                // Extract ClusterIP and port from store
+                let store_prefix = format!("{}/{}", ns, name);
+                if key.starts_with(&store_prefix) {
+                    let trackers = self.store.get_by_kind("Service").await;
+                    for t in &trackers {
+                        if t.resource.namespace() == ns && t.resource.name() == name {
+                            if let crate::types::AnyResource::Service(svc) = &t.resource {
+                                if let Some(spec) = &svc.spec {
+                                    if let Some(cip) = &spec.cluster_ip {
+                                        if let Ok(ip) = cip.parse::<std::net::Ipv4Addr>() {
+                                            if let Some(port_str) = key.rsplit(':').next() {
+                                                if let Ok(port) = port_str.parse::<u16>() {
+                                                    if let Err(e) = self.netmux.remove_dnat(ip, port) {
+                                                        tracing::warn!("remove_dnat failed for {}: {}", key, e);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -456,7 +490,7 @@ impl Component for ServiceResource {
 
     async fn on_apply(&self, _ctx: &ReconcileContext, resource: &AnyResource) -> Result<()> {
         if let AnyResource::Service(svc) = resource {
-            tracing::info!("ServiceResource::on_apply for {}", svc.metadata.name.as_deref().unwrap_or("?"));
+            debug!("ServiceResource::on_apply for {}", svc.metadata.name.as_deref().unwrap_or("?"));
             self.network.sync_service(svc).await;
         }
         Ok(())
