@@ -81,12 +81,10 @@ impl NetworkManager {
                 // Resolve backend pods matching the selector
                 let backends = Self::resolve_backend_pods(&self.store, &self.process_tracker, &selector, &svc_ns, port).await;
                 tracing::info!("resolve_backend_pods for {}: found {} backends", key, backends.len());
-                if !backends.is_empty() {
-                    let cluster_ip_addr: std::net::Ipv4Addr = cluster_ip.parse().unwrap_or(std::net::Ipv4Addr::new(10, 96, 0, 1));
-                    tracing::info!("Service {} → ClusterIP {} — adding DNAT with {} backends", key, listen_addr, backends.len());
-                    if let Err(e) = self.netmux.add_dnat(cluster_ip_addr, port, &backends) {
-                        tracing::error!("add_dnat failed for {}: {:?}", key, e);
-                    }
+                let cluster_ip_addr: std::net::Ipv4Addr = cluster_ip.parse().unwrap_or(std::net::Ipv4Addr::new(10, 96, 0, 1));
+                tracing::info!("Service {} → ClusterIP {} — adding DNAT with {} backends", key, listen_addr, backends.len());
+                if let Err(e) = self.netmux.add_dnat(cluster_ip_addr, port, &backends) {
+                    tracing::error!("add_dnat failed for {}: {:?}", key, e);
                 }
                 proxies.insert(port_key, RunningProxy { handle: tokio::spawn(async { /* DNAT via nftables */ }) });
             }
@@ -100,13 +98,11 @@ impl NetworkManager {
                     }
                     let listen_addr = format!("0.0.0.0:{}", node_port);
                     let port = svc_port.port as u16;
-                let backends = Self::resolve_backend_pods(&self.store, &self.process_tracker, &selector, &svc_ns, port).await;
-                    if !backends.is_empty() {
-                        let cluster_ip_addr: std::net::Ipv4Addr = cluster_ip.parse().unwrap_or(std::net::Ipv4Addr::new(10, 96, 0, 1));
-                        info!("Service {} → NodePort {} — adding DNAT with {} backends", key, listen_addr, backends.len());
+                    let backends = Self::resolve_backend_pods(&self.store, &self.process_tracker, &selector, &svc_ns, port).await;
+                    let cluster_ip_addr: std::net::Ipv4Addr = cluster_ip.parse().unwrap_or(std::net::Ipv4Addr::new(10, 96, 0, 1));
+                    tracing::info!("Service {} → NodePort {} — adding DNAT with {} backends", key, listen_addr, backends.len());
                     if let Err(e) = self.netmux.add_dnat(cluster_ip_addr, port, &backends) {
                         tracing::error!("add_dnat failed for {}: {:?}", key, e);
-                    }
                     }
                     proxies.insert(port_key, RunningProxy { handle: tokio::spawn(async { /* DNAT via nftables */ }) });
                 }

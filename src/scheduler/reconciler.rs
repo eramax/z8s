@@ -20,7 +20,7 @@ impl Reconciler {
     }
 
     pub async fn run(&self) {
-        let mut ticker = tokio::time::interval(Duration::from_secs(10));
+        let mut ticker = tokio::time::interval(Duration::from_secs(2));
         loop {
             ticker.tick().await;
             let reaped = self.process_tracker.reap_zombies();

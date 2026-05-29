@@ -93,6 +93,9 @@ pub struct ProcessSupervisor {
     pub cgroup_manager: Arc<CgroupManager>,
     pub restart_counts: Arc<Mutex<HashMap<String, u32>>>,
     pub netmux: Arc<crate::netmux::NetMux>,
+    pub store: Arc<crate::types::ResourceStore>,
+    /// Optional network engine for triggering service sync on pod IP assignment.
+    pub network_engine: Option<Arc<dyn crate::netmux::network::NetworkEngine + Send + Sync>>,
 }
 
 
@@ -102,6 +105,7 @@ impl ProcessSupervisor {
         image_manager: Arc<ImageManager>,
         cgroup_manager: Arc<CgroupManager>,
         netmux: Arc<crate::netmux::NetMux>,
+        store: Arc<crate::types::ResourceStore>,
     ) -> Self {
         let base = if rootfs::is_root() {
             "/var/lib/z8s".to_string()
@@ -115,6 +119,8 @@ impl ProcessSupervisor {
             cgroup_manager,
             restart_counts: Arc::new(Mutex::new(HashMap::new())),
             netmux,
+            store,
+            network_engine: None,
         }
     }
 

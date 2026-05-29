@@ -94,7 +94,8 @@ impl NftEngine {
         batch.add(&output, rustables::MsgType::Add);
 
         let ct_rule = Rule::new(&forward)?
-            .established()?;
+            .established()?
+            .accept();
         batch.add(&ct_rule, rustables::MsgType::Add);
 
         // Allow pod-to-pod forwarding within the pod CIDR (needed for ClusterIP DNAT)
@@ -199,6 +200,7 @@ impl NftEngine {
         }
 
         batch.send().context("Failed to send DNAT batch")?;
+
         info!("nftables: DNAT {}:{} -> {} backends (prerouting+output)", cluster_ip, port, backends.len());
         Ok(())
     }
