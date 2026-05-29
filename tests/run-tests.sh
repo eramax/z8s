@@ -71,32 +71,6 @@ wait_pod_phase() {
 }
 
 cleanup() {
-    local ret=$?
-    if [[ $ret -ne 0 && $NO_RM_ON_FAIL -eq 1 ]]; then
-        return
-    fi
-    sub "Deleting all test resources..."
-    k delete pod alpine-pod ubuntu-pod python-pod postgres-pod logger-pod \
-        alpine-pod-2 hostpath-vol-pod emptydir-vol-pod security-pod \
-        log-pod vol-test-pod pvc-pod --ignore-not-found 2>/dev/null || true
-    k delete deployment alpine-deploy ubuntu-deploy python-deploy \
-        postgres-deploy nginx-deploy nginx-hello whoami http-echo hostinfo \
-        logger-deploy cluster-dashboard --ignore-not-found 2>/dev/null || true
-    k delete service alpine-svc ubuntu-svc python-svc python-nodeport \
-        postgres-svc nginx-svc nginx-nodeport nginx-exposed \
-        nginx-hello-svc whoami-svc http-echo-svc hostinfo-svc \
-        cluster-dashboard-svc --ignore-not-found 2>/dev/null || true
-    k delete configmap app-config nginx-config imp-cm vol-cm delete-test-cm \
-        --ignore-not-found 2>/dev/null || true
-    k delete secret app-secret imp-sec vol-sec \
-        --ignore-not-found 2>/dev/null || true
-    k delete pv pv-test pv-test-2 --ignore-not-found 2>/dev/null || true
-    k delete pvc pvc-test -n default --ignore-not-found 2>/dev/null || true
-    k delete pvc pvc-test -n z8s-test --ignore-not-found 2>/dev/null || true
-    k delete ns z8s-test z8s-prod --ignore-not-found 2>/dev/null || true
-}
-
-cleanup2() {
     echo ""
     section "Cleanup"
     sub "Deleting all test resources..."
@@ -132,7 +106,7 @@ cleanup2() {
     tail -40 "$LOG"
     [[ $FAIL -eq 0 ]] && exit 0 || exit 1
 }
-#trap cleanup EXIT
+trap cleanup EXIT
 
 # ── 0. Server startup ──────────────────────────────────────────────────────────
 section "0. Server startup"
