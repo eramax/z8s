@@ -85,7 +85,7 @@ impl NetworkManager {
                     let cluster_ip_addr: std::net::Ipv4Addr = cluster_ip.parse().unwrap_or(std::net::Ipv4Addr::new(10, 96, 0, 1));
                     tracing::info!("Service {} → ClusterIP {} — adding DNAT with {} backends", key, listen_addr, backends.len());
                     if let Err(e) = self.netmux.add_dnat(cluster_ip_addr, port, &backends) {
-                        tracing::error!("add_dnat failed for {}: {}", key, e);
+                        tracing::error!("add_dnat failed for {}: {:?}", key, e);
                     }
                 }
                 proxies.insert(port_key, RunningProxy { handle: tokio::spawn(async { /* DNAT via nftables */ }) });
@@ -105,7 +105,7 @@ impl NetworkManager {
                         let cluster_ip_addr: std::net::Ipv4Addr = cluster_ip.parse().unwrap_or(std::net::Ipv4Addr::new(10, 96, 0, 1));
                         info!("Service {} → NodePort {} — adding DNAT with {} backends", key, listen_addr, backends.len());
                     if let Err(e) = self.netmux.add_dnat(cluster_ip_addr, port, &backends) {
-                        tracing::error!("add_dnat failed for {}: {}", key, e);
+                        tracing::error!("add_dnat failed for {}: {:?}", key, e);
                     }
                     }
                     proxies.insert(port_key, RunningProxy { handle: tokio::spawn(async { /* DNAT via nftables */ }) });

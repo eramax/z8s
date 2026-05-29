@@ -85,7 +85,7 @@ test_svc() {
 test_svc "python-svc" "18080" "directory listing|http|html" "python HTTP server"
 test_svc "nginx-svc" "80" "nginx|html|welcome" "nginx default page"
 test_svc "whoami-svc" "80" "whoami|hostname|I.m" "whoami info page"
-test_svc "http-echo-svc" "5678" "echo|http|request" "http-echo text"
+test_svc "http-echo-svc" "5678" "hello|echo|request" "http-echo text"
 test_svc "hostinfo-svc" "18081" "hostname|host|info" "hostinfo page"
 test_svc "nginx-hello-svc" "80" "hello|nginx|html" "nginx-hello page"
 
