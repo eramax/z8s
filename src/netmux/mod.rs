@@ -5,6 +5,7 @@ pub mod netlink;
 pub mod nftables;
 pub mod crds;
 pub mod vnet_controller;
+pub mod np_controller;
 
 use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex};
@@ -180,6 +181,11 @@ impl NetMux {
     /// Add forward allow rule between two CIDRs.
     pub fn add_forward_allow(&self, src_cidr: &str, dst_cidr: &str) -> Result<()> {
         self.nft.add_forward_allow(src_cidr, dst_cidr)
+    }
+
+    /// Add forward allow rule matching src IP from a named set.
+    pub fn add_forward_allow_set_src(&self, set_name: &str, dst_cidr: &str) -> Result<()> {
+        self.nft.add_forward_allow_set_src(set_name, dst_cidr)
     }
 
     /// Add forward deny rule between two CIDRs.

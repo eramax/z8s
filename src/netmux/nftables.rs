@@ -7,15 +7,16 @@ use nix::libc;
 use rustables::{
     Batch, Table, Chain, Rule, ProtocolFamily, ChainType, ChainPolicy, Hook, HookClass,
 };
+use rustables::set::{Set, SetBuilder};
 use rustables::expr::{
     Conntrack, ConntrackKey, Immediate, Masquerade, Nat, NatType,
-    Meta, MetaType, Register, Cmp, CmpOp, VerdictKind,
+    Meta, MetaType, Register, Cmp, CmpOp, VerdictKind, Lookup,
     Payload, HighLevelPayload, NetworkHeaderField, IPv4HeaderField,
     TCPHeaderField, TransportHeaderField,
 };
 
-const NAT_TABLE: &str = "z8s_nat";
-const FILTER_TABLE: &str = "z8s_filter";
+pub const NAT_TABLE: &str = "z8s_nat";
+pub const FILTER_TABLE: &str = "z8s_filter";
 
 pub struct NftEngine {
     writer: Mutex<()>,
@@ -177,6 +178,81 @@ impl NftEngine {
 
         batch.send().context("Failed to send forward deny batch")?;
         info!("nftables: forward deny {} -> {}", src_cidr, dst_cidr);
+        Ok(())
+    }
+
+    /// Create an nftables set for pod IPs (for NetworkPolicy).
+    /// If `initial_ips` is provided, the set is created with those IPs.
+    pub fn create_set(&self, name: &str, initial_ips: &[Ipv4Addr]) -> Result<()> {
+        let _lock = self.writer.lock().unwrap();
+        let mut batch = Batch::new();
+
+        let table = Table::new(ProtocolFamily::Ipv4).with_name(FILTER_TABLE);
+        let mut builder = SetBuilder::<Ipv4Addr>::new(name, &table)
+            .map_err(|e| anyhow::anyhow!("SetBuilder error: {}", e))?;
+        for ip in initial_ips {
+            builder.add(ip);
+        }
+        let (set, elem_list) = builder.finish();
+        batch.add(&set, rustables::MsgType::Add);
+        batch.add(&elem_list, rustables::MsgType::Add);
+
+        batch.send().context("Failed to create nftables set")?;
+        info!("nftables: created set '{}' with {} IPs", name, initial_ips.len());
+        Ok(())
+    }
+
+    /// Replace a set's elements (delete and recreate).
+    pub fn replace_set(&self, name: &str, ips: &[Ipv4Addr]) -> Result<()> {
+        let _lock = self.writer.lock().unwrap();
+        let mut batch = Batch::new();
+
+        let table = Table::new(ProtocolFamily::Ipv4).with_name(FILTER_TABLE);
+
+        // Delete old set (may fail if not exists, that's OK)
+        let mut del_set = Set::default();
+        del_set.family = ProtocolFamily::Ipv4;
+        del_set = del_set.with_table(FILTER_TABLE.to_string()).with_name(name);
+        batch.add(&del_set, rustables::MsgType::Del);
+
+        // Create new set with elements
+        let mut builder = SetBuilder::<Ipv4Addr>::new(name, &table)
+            .map_err(|e| anyhow::anyhow!("SetBuilder error: {}", e))?;
+        for ip in ips {
+            builder.add(ip);
+        }
+        let (set, elem_list) = builder.finish();
+        batch.add(&set, rustables::MsgType::Add);
+        batch.add(&elem_list, rustables::MsgType::Add);
+
+        batch.send().context("Failed to replace nftables set")?;
+        info!("nftables: replaced set '{}' with {} IPs", name, ips.len());
+        Ok(())
+    }
+
+    /// Add a forward rule that matches packets with src IP in a named set.
+    pub fn add_forward_allow_set_src(&self, set_name: &str, dst_cidr: &str) -> Result<()> {
+        let _lock = self.writer.lock().unwrap();
+        let mut batch = Batch::new();
+
+        let filter_table = Table::new(ProtocolFamily::Ipv4).with_name(FILTER_TABLE);
+        let forward = Chain::new(&filter_table).with_name("forward");
+
+        let mut set_for_lookup = Set::default();
+        set_for_lookup.family = ProtocolFamily::Ipv4;
+        set_for_lookup = set_for_lookup
+            .with_table(FILTER_TABLE.to_string())
+            .with_name(set_name);
+
+        let mut rule = Rule::new(&forward)?;
+        rule.add_expr(Lookup::new(&set_for_lookup)
+            .map_err(|e| anyhow::anyhow!("Lookup error: {}", e))?);
+        let dst_net: IpNetwork = dst_cidr.parse().context("Invalid dst CIDR")?;
+        let rule = rule.dnetwork(dst_net)?.accept();
+        batch.add(&rule, rustables::MsgType::Add);
+
+        batch.send()?;
+        info!("nftables: forward allow @{} -> {}", set_name, dst_cidr);
         Ok(())
     }
 }
