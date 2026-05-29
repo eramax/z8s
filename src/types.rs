@@ -105,6 +105,12 @@ pub enum AnyResource {
     Secret(Secret),
     PersistentVolume(PersistentVolume),
     PersistentVolumeClaim(PersistentVolumeClaim),
+    VNet(crate::netmux::crds::VNet),
+    Subnet(crate::netmux::crds::Subnet),
+    Nsg(crate::netmux::crds::Nsg),
+    Hub(crate::netmux::crds::Hub),
+    Spoke(crate::netmux::crds::Spoke),
+    RouteTable(crate::netmux::crds::RouteTable),
 }
 
 impl AnyResource {
@@ -117,6 +123,12 @@ impl AnyResource {
             AnyResource::Secret(r) => &r.metadata,
             AnyResource::PersistentVolume(r) => &r.metadata,
             AnyResource::PersistentVolumeClaim(r) => &r.metadata,
+            AnyResource::VNet(r) => &r.metadata,
+            AnyResource::Subnet(r) => &r.metadata,
+            AnyResource::Nsg(r) => &r.metadata,
+            AnyResource::Hub(r) => &r.metadata,
+            AnyResource::Spoke(r) => &r.metadata,
+            AnyResource::RouteTable(r) => &r.metadata,
         }
     }
 
@@ -129,6 +141,12 @@ impl AnyResource {
             AnyResource::Secret(r) => &mut r.metadata,
             AnyResource::PersistentVolume(r) => &mut r.metadata,
             AnyResource::PersistentVolumeClaim(r) => &mut r.metadata,
+            AnyResource::VNet(r) => &mut r.metadata,
+            AnyResource::Subnet(r) => &mut r.metadata,
+            AnyResource::Nsg(r) => &mut r.metadata,
+            AnyResource::Hub(r) => &mut r.metadata,
+            AnyResource::Spoke(r) => &mut r.metadata,
+            AnyResource::RouteTable(r) => &mut r.metadata,
         }
     }
 
@@ -141,6 +159,12 @@ impl AnyResource {
             AnyResource::Secret(_) => "Secret",
             AnyResource::PersistentVolume(_) => "PersistentVolume",
             AnyResource::PersistentVolumeClaim(_) => "PersistentVolumeClaim",
+            AnyResource::VNet(_) => "VNet",
+            AnyResource::Subnet(_) => "Subnet",
+            AnyResource::Nsg(_) => "NSG",
+            AnyResource::Hub(_) => "Hub",
+            AnyResource::Spoke(_) => "Spoke",
+            AnyResource::RouteTable(_) => "RouteTable",
         }
     }
 
@@ -195,6 +219,24 @@ pub fn parse_manifest_yaml(yaml: &str) -> Result<Vec<AnyResource>> {
             ),
             "PersistentVolumeClaim" => AnyResource::PersistentVolumeClaim(
                 serde_yaml::from_value(value).context("Failed to parse PersistentVolumeClaim")?,
+            ),
+            "VNet" => AnyResource::VNet(
+                serde_yaml::from_value(value).context("Failed to parse VNet")?,
+            ),
+            "Subnet" => AnyResource::Subnet(
+                serde_yaml::from_value(value).context("Failed to parse Subnet")?,
+            ),
+            "NSG" => AnyResource::Nsg(
+                serde_yaml::from_value(value).context("Failed to parse NSG")?,
+            ),
+            "Hub" => AnyResource::Hub(
+                serde_yaml::from_value(value).context("Failed to parse Hub")?,
+            ),
+            "Spoke" => AnyResource::Spoke(
+                serde_yaml::from_value(value).context("Failed to parse Spoke")?,
+            ),
+            "RouteTable" => AnyResource::RouteTable(
+                serde_yaml::from_value(value).context("Failed to parse RouteTable")?,
             ),
             _ => anyhow::bail!("Unsupported resource kind: {}", kind),
         };

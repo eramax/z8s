@@ -3,6 +3,8 @@ pub mod veth;
 pub mod routing;
 pub mod netlink;
 pub mod nftables;
+pub mod crds;
+pub mod vnet_controller;
 
 use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex};
