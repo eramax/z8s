@@ -297,7 +297,7 @@ impl ProcessSupervisor {
             }
         }
 
-        let mut prepared = Vec::new();
+        let mut prepared: Vec<(String, RunningContainer)> = Vec::new();
         for cfg in &spec.containers {
             let image_ref = &cfg.image;
             let rootfs_path = if cfg.is_native {
@@ -309,7 +309,22 @@ impl ProcessSupervisor {
             };
 
             info!("Starting container {}/{}", pod_name, cfg.container_name);
-            let rc = self.spawn_container_from_config(cfg, &rootfs_path, pod_uid).await?;
+            let rc = match self.spawn_container_from_config(cfg, &rootfs_path, pod_uid).await {
+                Ok(rc) => rc,
+                Err(e) => {
+                    // Stop any containers we already started (orphan prevention)
+                    for (cid, cid_rc) in &prepared {
+                        if let Some(pid) = cid_rc.instance.pid {
+                            info!("Cleaning up orphan container {} (PID {})", cid, pid);
+                            let _ = nix::sys::signal::kill(
+                                nix::unistd::Pid::from_raw(pid as i32),
+                                nix::sys::signal::Signal::SIGTERM,
+                            );
+                        }
+                    }
+                    return Err(e.context(format!("Failed to spawn container {}/{}", pod_name, cfg.container_name)));
+                }
+            };
             prepared.push((cfg.container_id.clone(), rc));
         }
 
