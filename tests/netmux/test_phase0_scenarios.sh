@@ -12,7 +12,7 @@ fail() { local m="$1" d="${2:-}"; echo -e "${RED}FAIL${NC} $m${d:+: $d}"; ERRORS
 skip() { echo -e "${YELLOW}SKIP${NC} $1"; }
 
 k() { "$KUBECTL" --server="$SERVER" "$@" 2>&1 || true; }
-kapply() { "$KUBECTL" --server="$SERVER" apply -f - 2>&1; }
+kapply() { "$KUBECTL" --validate=false --server="$SERVER" apply -f - 2>&1; }
 kdelete() { "$KUBECTL" --server="$SERVER" delete -f - 2>&1; }
 
 wait_pod_ready() {

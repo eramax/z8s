@@ -1,0 +1,197 @@
+[0;36mA1: Pod starts with eth0 from its VNet CIDR[0m
+pod/test-a1 created
+[0;31mFAIL[0m A1: Pod has no IP on eth0: 1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN qlen 1000
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+    inet 127.0.0.1/8 scope host lo
+       valid_lft forever preferred_lft forever
+    inet6 ::1/128 scope host 
+       valid_lft forever preferred_lft forever
+131: veth-ddefaea1-e@if132: <BROADCAST,UP,LOWER_UP,M-DOWN> mtu 1500 qdisc noqueue state UP qlen 1000
+    link/ether 7a:70:ed:45:17:44 brd ff:ff:ff:ff:ff:ff
+    inet 10.42.0.2/16 scope global veth-ddefaea1-e
+       valid_lft forever preferred_lft forever
+    inet6 fe80::7870:edff:fe45:1744/64 scope link tentative 
+       valid_lft forever preferred_lft forever
+error: unable to decode "STDIN": json: cannot unmarshal string into Go value of type unstructured.detector
+[0;36mA2: Pod pings same-VNet peer (same node)[0m
+pod/test-a2a created
+pod/test-a2b created
+[0;32mPASS[0m A2: Pod A can ping Pod B (10.42.0.4)
+error: unable to decode "STDIN": json: cannot unmarshal string into Go value of type unstructured.detector
+[0;36mA3: Pod pings same-VNet peer (cross-node)[0m
+[1;33mSKIP[0m A3: Cross-node test requires multi-node cluster (Phase 6)
+[0;36mA4: Pod cannot ping different-VNet pod (default deny)[0m
+[1;33mSKIP[0m A4: Requires VNet CRDs (Phase 3)
+[0;36mA5: Pod gets new IP after delete/recreate[0m
+pod/test-a5 created
+error: unable to decode "STDIN": json: cannot unmarshal string into Go value of type unstructured.detector
+pod/test-a5 unchanged
+[0;31mFAIL[0m A5: IPs: 10.42.0.5 -> 10.42.0.5 (expected different)
+error: unable to decode "STDIN": json: cannot unmarshal string into Go value of type unstructured.detector
+[0;36mA6: Host has /32 route for each pod via veth[0m
+pod/test-a6 created
+[0;31mFAIL[0m A6: No /32 route for 10.42.0.6: /home/abb/dev/z8s/tests/netmux/test_phase0_scenarios.sh: line 220: ip: command not found
+error: unable to decode "STDIN": json: cannot unmarshal string into Go value of type unstructured.detector
+[0;36mA7: No bridge interfaces[0m
+[0;32mPASS[0m A7: No bridge interfaces found
+[0;36mA8: Job gets IP + route, no DNAT, no DNS[0m
+[1;33mSKIP[0m A8: Job resource type not yet implemented
+[0;36mB1: Pod reaches ClusterIP:port, hits backend[0m
+pod/test-b1-srv created
+service/test-b1-svc created
+pod/test-b1-client created
+[0;32mPASS[0m B1: ClusterIP 10.96.0.1:80 reaches backend
+error: unable to decode "STDIN": json: cannot unmarshal string into Go value of type unstructured.detector
+[0;36mB2: Round-robin across multiple backends[0m
+pod/test-b2a created
+pod/test-b2b created
+service/test-b2-svc created
+pod/test-b2-client created
+[0;31mFAIL[0m B2: Only saw a=0 b=1: one backend may be missing
+error: unable to decode "STDIN": json: cannot unmarshal string into Go value of type unstructured.detector
+[0;36mB3: DNAT updates on backend crash+replace[0m
+pod/test-b3a created
+service/test-b3-svc created
+pod/test-b3-client created
+error: unable to decode "STDIN": json: cannot unmarshal string into Go value of type unstructured.detector
+pod/test-b3b created
+[0;31mFAIL[0m B3: DNAT broken after backend replacement: before='' after=''
+error: unable to decode "STDIN": json: cannot unmarshal string into Go value of type unstructured.detector
+[0;36mB4: Empty ClusterIP drops traffic (connection refused)[0m
+service/test-b4-svc created
+pod/test-b4-client created
+[0;31mFAIL[0m B4: Empty ClusterIP did not drop traffic: response=exit=0
+error: unable to decode "STDIN": json: cannot unmarshal string into Go value of type unstructured.detector
+[0;36mB5: NodePort works[0m
+pod/test-b5-srv created
+service/test-b5-svc created
+[0;31mFAIL[0m B5: NodePort 30080 not reachable: response=sh: 1: nc: not found
+error: unable to decode "STDIN": json: cannot unmarshal string into Go value of type unstructured.detector
+[0;36mB6: No ClusterIP on any interface[0m
+[0;32mPASS[0m B6: No ClusterIP found on any interface
+[0;36mB7: No userspace proxy for ClusterIP[0m
+[0;32mPASS[0m B7: No userspace proxy listening
+[0;36mC1: Pod (hub VNet) reaches internet[0m
+pod/test-c1 created
+[0;32mPASS[0m C1: Pod reaches internet
+error: unable to decode "STDIN": json: cannot unmarshal string into Go value of type unstructured.detector
+[0;36mC2: Pod (spoke VNet) cannot reach internet[0m
+[1;33mSKIP[0m C2: Requires VNet CRDs (Phase 3)
+[0;36mC3: Pod-to-pod traffic not SNATted[0m
+pod/test-c3a created
+pod/test-c3b created
+[0;31mFAIL[0m C3: Pod-to-pod traffic SNATted: expected 10.42.0.19 got error: command exited with code 1
+error: unable to decode "STDIN": json: cannot unmarshal string into Go value of type unstructured.detector
+[0;36mD1: Default VNet per namespace[0m
+[1;33mSKIP[0m D1: Requires VNet CRDs (Phase 3)
+[0;36mD2: Different VNets cannot communicate[0m
+[1;33mSKIP[0m D2: Requires VNet CRDs (Phase 3)
+[0;36mD3: NSG allow subnet A->B port 5432[0m
+[1;33mSKIP[0m D3: Requires NSG CRDs (Phase 3)
+[0;36mD4: NSG deny between subnets[0m
+[1;33mSKIP[0m D4: Requires NSG CRDs (Phase 3)
+[0;36mD5: NSG + NetworkPolicy override[0m
+[1;33mSKIP[0m D5: Requires Phase 3 + Phase 4
+[0;36mD6: Hub reaches spoke[0m
+[1;33mSKIP[0m D6: Requires Hub-and-Spoke (Phase 3)
+[0;36mD7: Spoke cannot reach spoke (direct)[0m
+[1;33mSKIP[0m D7: Requires Hub-and-Spoke (Phase 3)
+[0;36mD8: Spoke reaches spoke via hub transit[0m
+[1;33mSKIP[0m D8: Requires Hub-and-Spoke (Phase 3)
+[0;36mE1: podSelector allow[0m
+[1;33mSKIP[0m E1: Requires NetworkPolicy (Phase 4)
+[0;36mE2: namespaceSelector allow[0m
+[1;33mSKIP[0m E2: Requires NetworkPolicy (Phase 4)
+[0;36mE3: ipBlock allow/deny[0m
+[1;33mSKIP[0m E3: Requires NetworkPolicy (Phase 4)
+[0;36mE4: Dynamic set update on pod start/stop[0m
+[1;33mSKIP[0m E4: Requires NetworkPolicy (Phase 4)
+[0;36mF1: <svc>.<ns>.svc.cluster.local -> ClusterIP[0m
+pod/test-f1-srv created
+service/test-f1-svc created
+pod/test-f1-client created
+[0;32mPASS[0m F1: DNS resolves test-f1-svc.default.svc.cluster.local -> 10.96.0.6
+error: unable to decode "STDIN": json: cannot unmarshal string into Go value of type unstructured.detector
+[0;36mF2: External domains from pods[0m
+pod/test-f2 created
+[0;31mFAIL[0m F2: External DNS failed: ;; connection timed out; no servers could be reached
+
+nslookup: write to '127.0.0.1': Connection refused
+error: command exited with code 1
+error: unable to decode "STDIN": json: cannot unmarshal string into Go value of type unstructured.detector
+[0;36mF3: Private VNet names resolve globally[0m
+[1;33mSKIP[0m F3: Requires VNet CRDs (Phase 3)
+[0;36mF4: NSG enforces access (not DNS)[0m
+[1;33mSKIP[0m F4: Requires NSG CRDs (Phase 3)
+[0;36mG1: HTTP by Host header[0m
+pod/test-g1-srv created
+service/test-g1-svc created
+pod/test-g1-client created
+error: resource mapping not found for name: "test-g1-ing" namespace: "default" from "STDIN": no matches for kind "Ingress" in version "v1"
+ensure CRDs are installed first
+[0;31mFAIL[0m G1: Ingress by Host header failed: response=wget: error getting response: Connection reset by peer
+error: command exited with code 1
+error: unable to decode "STDIN": json: cannot unmarshal string into Go value of type unstructured.detector
+[0;36mG2: TLS by SNI[0m
+[1;33mSKIP[0m G2: TLS not yet implemented
+[0;36mG3: TCP by port[0m
+pod/test-g3-srv created
+service/test-g3-svc created
+pod/test-g3-client created
+[0;32mPASS[0m G3: ClusterIP TCP access works
+error: unable to decode "STDIN": json: cannot unmarshal string into Go value of type unstructured.detector
+[0;36mG4: TLS termination + re-encryption[0m
+[1;33mSKIP[0m G4: TLS not yet implemented
+[0;36mG5: Auto-TLS cert provisioning[0m
+[1;33mSKIP[0m G5: TLS not yet implemented
+[0;36mG6: L7 NSG - block method/header[0m
+[1;33mSKIP[0m G6: L7 NSG not yet implemented
+[0;36mG7: Ingress -> spoke backend (hub-and-spoke)[0m
+[1;33mSKIP[0m G7: Requires VNet CRDs (Phase 3)
+[0;36mH1: Node joins cluster[0m
+[1;33mSKIP[0m H1: Requires multi-node cluster (Phase 6)
+[0;36mH2: Node fails[0m
+[1;33mSKIP[0m H2: Requires multi-node cluster (Phase 6)
+[0;36mH3: Cross-node pod-to-pod[0m
+[1;33mSKIP[0m H3: Requires multi-node cluster (Phase 6)
+[0;36mH4: Cross-node ClusterIP[0m
+[1;33mSKIP[0m H4: Requires multi-node cluster (Phase 6)
+[0;36mH5: Cross-node ingress[0m
+[1;33mSKIP[0m H5: Requires multi-node cluster (Phase 6)
+[0;36mI1: VNet CIDR full[0m
+[1;33mSKIP[0m I1: Requires VNet CRDs (Phase 3)
+[0;36mI2: nftables init fails gracefully[0m
+[1;33mSKIP[0m I2: Manual failure injection test
+[0;36mI3: SNAT fails gracefully[0m
+[1;33mSKIP[0m I3: Manual failure injection test
+[0;36mI4: 1000 concurrent connections through DNAT[0m
+[1;33mSKIP[0m I4: Performance test — run manually
+[0;36mI5: 10 pods/sec start/stop for 60s[0m
+[1;33mSKIP[0m I5: Performance test — run manually
+
+=== Results: 8 passed, 10 failed ===
+  - A1: Pod has no IP on eth0: 1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN qlen 1000
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+    inet 127.0.0.1/8 scope host lo
+       valid_lft forever preferred_lft forever
+    inet6 ::1/128 scope host 
+       valid_lft forever preferred_lft forever
+131: veth-ddefaea1-e@if132: <BROADCAST,UP,LOWER_UP,M-DOWN> mtu 1500 qdisc noqueue state UP qlen 1000
+    link/ether 7a:70:ed:45:17:44 brd ff:ff:ff:ff:ff:ff
+    inet 10.42.0.2/16 scope global veth-ddefaea1-e
+       valid_lft forever preferred_lft forever
+    inet6 fe80::7870:edff:fe45:1744/64 scope link tentative 
+       valid_lft forever preferred_lft forever
+  - A5: IPs: 10.42.0.5 -> 10.42.0.5 (expected different)
+  - A6: No /32 route for 10.42.0.6: /home/abb/dev/z8s/tests/netmux/test_phase0_scenarios.sh: line 220: ip: command not found
+  - B2: Only saw a=0 b=1: one backend may be missing
+  - B3: DNAT broken after backend replacement: before='' after=''
+  - B4: Empty ClusterIP did not drop traffic: response=exit=0
+  - B5: NodePort 30080 not reachable: response=sh: 1: nc: not found
+  - C3: Pod-to-pod traffic SNATted: expected 10.42.0.19 got error: command exited with code 1
+  - F2: External DNS failed: ;; connection timed out; no servers could be reached
+
+nslookup: write to '127.0.0.1': Connection refused
+error: command exited with code 1
+  - G1: Ingress by Host header failed: response=wget: error getting response: Connection reset by peer
+error: command exited with code 1
