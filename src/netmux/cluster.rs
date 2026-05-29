@@ -198,3 +198,52 @@ impl Cluster {
     pub fn join_token(&self) -> &str { &self.join_token }
     pub fn peers(&self) -> HashMap<String, NodeInfo> { self.peers.lock().expect("lock poisoned").clone() }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cluster_new() {
+        let c = Cluster::new(
+            "node-a".into(),
+            Ipv4Addr::new(10, 0, 0, 1),
+            "10.42.0.0/16",
+            6443,
+            &[("node-b".into(), "10.0.0.2".into())],
+        ).unwrap();
+        assert_eq!(c.name(), "node-a");
+        assert_eq!(c.peers().len(), 1);
+        assert!(c.assigned_cidr().starts_with("10.42."));
+    }
+
+    #[test]
+    fn test_cluster_join() {
+        let c = Cluster::new(
+            "node-a".into(),
+            Ipv4Addr::new(10, 0, 0, 1),
+            "10.42.0.0/16", // 256 /24 blocks
+            6443,
+            &[],
+        ).unwrap();
+        let assigned = c.handle_join("node-b", Ipv4Addr::new(10, 0, 0, 2), "z8s-cluster-token", "default").unwrap();
+        assert!(assigned.starts_with("10.42."));
+        assert_eq!(c.peers().len(), 1);
+        // Second join should work too
+        let assigned2 = c.handle_join("node-c", Ipv4Addr::new(10, 0, 0, 3), "z8s-cluster-token", "default").unwrap();
+        assert_ne!(assigned, assigned2);
+    }
+
+    #[test]
+    fn test_cluster_join_wrong_token() {
+        let c = Cluster::new(
+            "node-a".into(),
+            Ipv4Addr::new(10, 0, 0, 1),
+            "10.42.0.0/16",
+            6443,
+            &[],
+        ).unwrap();
+        let result = c.handle_join("node-b", Ipv4Addr::new(10, 0, 0, 2), "wrong-token", "default");
+        assert!(result.is_err());
+    }
+}

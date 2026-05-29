@@ -176,3 +176,22 @@ pub fn clean_orphan_veths(active_uids: &[String]) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_veth_name_from_uid_15chars() {
+        let name = veth_name_from_uid("a1b2c3d4-e5f6-7890-abcd-ef1234567890");
+        assert_eq!(name, "veth-a1b2c3d4");
+        assert!(name.len() <= 15, "name {} exceeds 15 chars", name);
+    }
+
+    #[test]
+    fn test_veth_peer_name_15chars() {
+        let host = veth_name_from_uid("a1b2c3d4-e5f6-7890-abcd-ef1234567890");
+        let peer = veth_peer_name(&host);
+        assert!(peer.len() <= 15, "peer name {} exceeds 15 chars", peer);
+    }
+}

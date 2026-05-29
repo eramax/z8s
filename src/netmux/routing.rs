@@ -47,3 +47,16 @@ pub fn add_pod_default_route(peer_ifindex: u32, gateway: &Ipv4Addr) -> Result<()
     info!("Pod default route: via {} (ifindex {})", gateway, peer_ifindex);
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_add_host_route_does_not_panic() {
+        // Just test the function is reachable; actual routing requires root
+        let result = add_host_route(&Ipv4Addr::new(10, 42, 0, 2), 1);
+        // Will likely fail without root, but shouldn't panic
+        let _ = result;
+    }
+}
