@@ -1,39 +1,40 @@
+abb@build-684d948d4d-4528g:~/dev/z8s$ sudo ./tests/run-tests.sh
 
-[1;33m══ 0. Server startup ══[0m
-Stopping z8s (PID 42739)...
+══ 0. Server startup ══
+Stopping z8s (PID 162445)...
 Force killing...
 z8s stopped
-z8s started (PID 55083, log=/tmp/z8s.log)
-[0;32mPASS[0m server started (1s)
+z8s started (PID 173385, log=/tmp/z8s.log)
+PASS server started (1s)
 
-[1;33m══ 1. Apply all manifest YAMLs ══[0m
-[0;36m  ▸ Applying 00-namespace.yaml ...[0m
+══ 1. Apply all manifest YAMLs ══
+  ▸ Applying 00-namespace.yaml ...
 namespace/z8s-test created
 namespace/z8s-prod created
-[0;36m  ▸ Applying 01-configmap.yaml ...[0m
+  ▸ Applying 01-configmap.yaml ...
 configmap/app-config created
 configmap/app-config created
 configmap/nginx-config created
-[0;36m  ▸ Applying 02-secret.yaml ...[0m
+  ▸ Applying 02-secret.yaml ...
 secret/app-secret created
 secret/app-secret created
-[0;36m  ▸ Applying 03-pod-alpine.yaml ...[0m
+  ▸ Applying 03-pod-alpine.yaml ...
 pod/alpine-pod created
-[0;36m  ▸ Applying 04-pod-ubuntu.yaml ...[0m
+  ▸ Applying 04-pod-ubuntu.yaml ...
 pod/ubuntu-pod created
-[0;36m  ▸ Applying 05-pod-python.yaml ...[0m
+  ▸ Applying 05-pod-python.yaml ...
 pod/python-pod created
-[0;36m  ▸ Applying 06-pod-postgres.yaml ...[0m
+  ▸ Applying 06-pod-postgres.yaml ...
 pod/postgres-pod created
-[0;36m  ▸ Applying 07-deployment-alpine.yaml ...[0m
+  ▸ Applying 07-deployment-alpine.yaml ...
 deployment.apps/alpine-deploy created
-[0;36m  ▸ Applying 08-deployment-ubuntu.yaml ...[0m
+  ▸ Applying 08-deployment-ubuntu.yaml ...
 deployment.apps/ubuntu-deploy created
-[0;36m  ▸ Applying 09-deployment-python.yaml ...[0m
+  ▸ Applying 09-deployment-python.yaml ...
 deployment.apps/python-deploy created
-[0;36m  ▸ Applying 10-deployment-postgres.yaml ...[0m
+  ▸ Applying 10-deployment-postgres.yaml ...
 deployment.apps/postgres-deploy created
-[0;36m  ▸ Applying 11-service.yaml ...[0m
+  ▸ Applying 11-service.yaml ...
 service/alpine-svc created
 service/ubuntu-svc created
 service/python-svc created
@@ -42,9 +43,9 @@ service/postgres-svc created
 service/nginx-svc created
 service/nginx-nodeport created
 service/alpine-svc created
-[0;36m  ▸ Applying 12-deployment-nginx.yaml ...[0m
+  ▸ Applying 12-deployment-nginx.yaml ...
 deployment.apps/nginx-deploy created
-[0;36m  ▸ Applying 13-deployment-info.yaml ...[0m
+  ▸ Applying 13-deployment-info.yaml ...
 deployment.apps/nginx-hello created
 deployment.apps/whoami created
 deployment.apps/http-echo created
@@ -55,82 +56,82 @@ service/http-echo-svc created
 service/hostinfo-svc created
 deployment.apps/cluster-dashboard created
 service/cluster-dashboard-svc created
-[0;36m  ▸ Applying 14-pod-logger.yaml ...[0m
+  ▸ Applying 14-pod-logger.yaml ...
 pod/logger-pod created
 deployment.apps/logger-deploy created
-[0;36m  ▸ Applying 15-pv-pvc.yaml ...[0m
+  ▸ Applying 15-pv-pvc.yaml ...
 persistentvolume/pv-test created
 persistentvolume/pv-test-2 created
 persistentvolumeclaim/pvc-test created
 persistentvolumeclaim/pvc-test created
 pod/pvc-pod created
 
-[1;33m══ 2. Wait for readiness ══[0m
-[0;36m  ▸ Waiting for pod alpine-pod (ns=default, timeout=60s)...[0m
-[0;32mPASS[0m pod alpine-pod is Ready
-[0;36m  ▸ Waiting for pod postgres-pod (ns=default, timeout=120s)...[0m
-[0;32mPASS[0m pod postgres-pod is Ready
-[0;36m  ▸ Waiting for pod python-pod (ns=default, timeout=60s)...[0m
-[0;32mPASS[0m pod python-pod is Ready
-[0;36m  ▸ Waiting for pod logger-pod (ns=default, timeout=60s)...[0m
-[0;32mPASS[0m pod logger-pod is Ready
-[0;36m  ▸ Waiting for pod ubuntu-pod (ns=z8s-test, timeout=120s)...[0m
-[0;32mPASS[0m pod ubuntu-pod (z8s-test) is Ready
-[0;36m  ▸ Waiting for deployment http-echo (ns=default, replicas=1, timeout=90s)...[0m
-[0;32mPASS[0m deployment http-echo is Ready (1 replicas)
-[0;36m  ▸ Waiting for deployment python-deploy (ns=default, replicas=2, timeout=90s)...[0m
-[0;32mPASS[0m deployment python-deploy is Ready (2 replicas)
-[0;36m  ▸ Waiting for deployment alpine-deploy (ns=default, replicas=2, timeout=90s)...[0m
-[0;32mPASS[0m deployment alpine-deploy is Ready (2 replicas)
-[0;36m  ▸ Waiting for deployment whoami (ns=default, replicas=1, timeout=90s)...[0m
-[0;32mPASS[0m deployment whoami is Ready (1 replicas)
-[0;36m  ▸ Waiting for deployment logger-deploy (ns=default, replicas=2, timeout=90s)...[0m
-[0;32mPASS[0m deployment logger-deploy is Ready (2 replicas)
-[0;36m  ▸ Waiting for deployment cluster-dashboard (ns=default, replicas=1, timeout=120s)...[0m
-[0;32mPASS[0m deployment cluster-dashboard is Ready (1 replicas)
-[0;36m  ▸ Waiting for deployment nginx-hello (ns=default, replicas=1, timeout=90s)...[0m
-[0;32mPASS[0m deployment nginx-hello is Ready (1 replicas)
-[0;36m  ▸ Waiting for deployment hostinfo (ns=default, replicas=1, timeout=120s)...[0m
-[0;32mPASS[0m deployment hostinfo is Ready (1 replicas)
-[0;36m  ▸ Waiting for deployment nginx-deploy (ns=default, replicas=2, timeout=90s)...[0m
-[0;32mPASS[0m deployment nginx-deploy is Ready (2 replicas)
-[0;36m  ▸ Waiting for deployment postgres-deploy (ns=default, replicas=1, timeout=120s)...[0m
-[0;32mPASS[0m deployment postgres-deploy is Ready (1 replicas)
-[0;36m  ▸ Waiting for deployment ubuntu-deploy (ns=z8s-test, replicas=1, timeout=90s)...[0m
-[0;32mPASS[0m deployment ubuntu-deploy (z8s-test) is Ready (1 replicas)
+══ 2. Wait for readiness ══
+  ▸ Waiting for pod alpine-pod (ns=default, timeout=60s)...
+PASS pod alpine-pod is Ready
+  ▸ Waiting for pod postgres-pod (ns=default, timeout=120s)...
+PASS pod postgres-pod is Ready
+  ▸ Waiting for pod python-pod (ns=default, timeout=60s)...
+PASS pod python-pod is Ready
+  ▸ Waiting for pod logger-pod (ns=default, timeout=60s)...
+PASS pod logger-pod is Ready
+  ▸ Waiting for pod ubuntu-pod (ns=z8s-test, timeout=120s)...
+PASS pod ubuntu-pod (z8s-test) is Ready
+  ▸ Waiting for deployment http-echo (ns=default, replicas=1, timeout=90s)...
+PASS deployment http-echo is Ready (1 replicas)
+  ▸ Waiting for deployment python-deploy (ns=default, replicas=2, timeout=90s)...
+PASS deployment python-deploy is Ready (2 replicas)
+  ▸ Waiting for deployment alpine-deploy (ns=default, replicas=2, timeout=90s)...
+PASS deployment alpine-deploy is Ready (2 replicas)
+  ▸ Waiting for deployment whoami (ns=default, replicas=1, timeout=90s)...
+PASS deployment whoami is Ready (1 replicas)
+  ▸ Waiting for deployment logger-deploy (ns=default, replicas=2, timeout=90s)...
+PASS deployment logger-deploy is Ready (2 replicas)
+  ▸ Waiting for deployment cluster-dashboard (ns=default, replicas=1, timeout=120s)...
+PASS deployment cluster-dashboard is Ready (1 replicas)
+  ▸ Waiting for deployment nginx-hello (ns=default, replicas=1, timeout=90s)...
+PASS deployment nginx-hello is Ready (1 replicas)
+  ▸ Waiting for deployment hostinfo (ns=default, replicas=1, timeout=120s)...
+PASS deployment hostinfo is Ready (1 replicas)
+  ▸ Waiting for deployment nginx-deploy (ns=default, replicas=2, timeout=90s)...
+PASS deployment nginx-deploy is Ready (2 replicas)
+  ▸ Waiting for deployment postgres-deploy (ns=default, replicas=1, timeout=120s)...
+PASS deployment postgres-deploy is Ready (1 replicas)
+  ▸ Waiting for deployment ubuntu-deploy (ns=z8s-test, replicas=1, timeout=90s)...
+PASS deployment ubuntu-deploy (z8s-test) is Ready (1 replicas)
 
-[1;33m══ 3. Namespace isolation ══[0m
-[0;32mPASS[0m namespace z8s-test exists
-[0;32mPASS[0m namespace z8s-prod exists
-[0;32mPASS[0m namespace isolation: ubuntu-pod NOT visible in default
-[0;32mPASS[0m namespace isolation: ubuntu-pod visible in z8s-test
+══ 3. Namespace isolation ══
+PASS namespace z8s-test exists
+PASS namespace z8s-prod exists
+PASS namespace isolation: ubuntu-pod NOT visible in default
+PASS namespace isolation: ubuntu-pod visible in z8s-test
 
-[1;33m══ 4. ConfigMap validation ══[0m
-[0;32mPASS[0m configmap app-config: APP_ENV=production
-[0;32mPASS[0m configmap app-config (z8s-test): APP_ENV=staging
-[0;32mPASS[0m describe configmap (z8s-test) shows data keys
+══ 4. ConfigMap validation ══
+PASS configmap app-config: APP_ENV=production
+PASS configmap app-config (z8s-test): APP_ENV=staging
+PASS describe configmap (z8s-test) shows data keys
 
-[1;33m══ 5. Secret validation ══[0m
-[0;32mPASS[0m secret type is Opaque
-[0;32mPASS[0m describe secret works
+══ 5. Secret validation ══
+PASS secret type is Opaque
+PASS describe secret works
 
-[1;33m══ 6. Pod validation ══[0m
-[0;36m  ▸ Alpine pod — env vars[0m
-[0;32mPASS[0m alpine: DIRECT_ENV injected
-[0;32mPASS[0m alpine: envFrom configmap APP_ENV=production
-[0;32mPASS[0m alpine: envFrom secret DB_PASSWORD=password123
-[0;36m  ▸ Alpine pod — configMap volume[0m
-[0;32mPASS[0m alpine: configMap volume file APP_ENV
-[0;32mPASS[0m alpine: configMap volume config.yaml
-[0;36m  ▸ Alpine pod — secret volume[0m
-[0;32mPASS[0m alpine: secret volume DB_PASSWORD
-[0;36m  ▸ Alpine pod — emptyDir volume[0m
-[0;32mPASS[0m alpine: emptyDir write+read works
-[0;36m  ▸ Ubuntu pod — non-root security context[0m
-[0;32mPASS[0m ubuntu (z8s-test): runAsUser=1000 confirmed
-[0;36m  ▸ Ubuntu pod — non-root file access restrictions[0m
-[0;32mPASS[0m ubuntu: non-root cannot write to /etc (permission denied)
-[0;32mPASS[0m ubuntu: /etc/shadow check — root:*:20564:0:99999:7:::
+══ 6. Pod validation ══
+  ▸ Alpine pod — env vars
+PASS alpine: DIRECT_ENV injected
+PASS alpine: envFrom configmap APP_ENV=production
+PASS alpine: envFrom secret DB_PASSWORD=password123
+  ▸ Alpine pod — configMap volume
+PASS alpine: configMap volume file APP_ENV
+PASS alpine: configMap volume config.yaml
+  ▸ Alpine pod — secret volume
+PASS alpine: secret volume DB_PASSWORD
+  ▸ Alpine pod — emptyDir volume
+PASS alpine: emptyDir write+read works
+  ▸ Ubuntu pod — non-root security context
+PASS ubuntu (z8s-test): runAsUser=1000 confirmed
+  ▸ Ubuntu pod — non-root file access restrictions
+PASS ubuntu: non-root cannot write to /etc (permission denied)
+PASS ubuntu: /etc/shadow check — root:*:20564:0:99999:7:::
 daemon:*:20564:0:99999:7:::
 bin:*:20564:0:99999:7:::
 sys:*:20564:0:99999:7:::
@@ -149,73 +150,73 @@ irc:*:20564:0:99999:7:::
 _apt:*:20564:0:99999:7:::
 nobody:*:20564:0:99999:7:::
 ubuntu:!:20564:0:99999:7:::
-[0;36m  ▸ Ubuntu pod — hostPath volume[0m
-[0;32mPASS[0m ubuntu: hostPath volume accessible: /host/etc/hostname
-[0;32mPASS[0m ubuntu (z8s-test): envFrom configmap APP_ENV=staging
-[0;32mPASS[0m ubuntu (z8s-test): envFrom secret DB_PASSWORD
-[0;36m  ▸ Python pod — HTTP server[0m
-[0;32mPASS[0m python: HTTP server responds (try 1)
-[0;32mPASS[0m python: runAsUser=2000 confirmed
-[0;36m  ▸ Postgres pod — database process[0m
-[0;32mPASS[0m postgres: pg_isready reports accepting connections
-[0;32mPASS[0m postgres: psql query succeeded
+  ▸ Ubuntu pod — hostPath volume
+PASS ubuntu: hostPath volume accessible: /host/etc/hostname
+PASS ubuntu (z8s-test): envFrom configmap APP_ENV=staging
+PASS ubuntu (z8s-test): envFrom secret DB_PASSWORD
+  ▸ Python pod — HTTP server
+PASS python: HTTP server responds (try 1)
+PASS python: runAsUser=2000 confirmed
+  ▸ Postgres pod — database process
+PASS postgres: pg_isready reports accepting connections
+PASS postgres: psql query succeeded
 
-[1;33m══ 7. Deployment validation ══[0m
-[0;36m  ▸ Deployment ordering: deploy resource before pods[0m
-[0;32mPASS[0m deployment order-test-1780034440 appeared in get deployments
-[0;32mPASS[0m ordering: deployment seen at 31ms < pod at 5981ms ✅
-deployment.apps "order-test-1780034440" deleted
-[0;32mPASS[0m alpine-deploy: replicas=2
-[0;32mPASS[0m alpine-deploy pod: envFrom configmap works
-[0;32mPASS[0m alpine-deploy pod: direct env var
-[0;32mPASS[0m ubuntu-deploy (z8s-test): replicas=1
-[0;32mPASS[0m ubuntu-deploy pod uid — uid=1000(ubuntu) gid=0(root) groups=0(root)
-[0;32mPASS[0m ubuntu-deploy pod: envFrom configmap (z8s-test ns)
-[0;32mPASS[0m python-deploy: replicas=2
-[0;32mPASS[0m python-deploy pod: direct env var
-[0;32mPASS[0m postgres-deploy: replicas=1
-[0;32mPASS[0m postgres-deploy pod: DB env vars
-[0;32mPASS[0m nginx-deploy: replicas=2
-[0;32mPASS[0m nginx-deploy pod: env var NGINX_HOST
-[0;32mPASS[0m nginx-deploy: serves HTTP content
+══ 7. Deployment validation ══
+  ▸ Deployment ordering: deploy resource before pods
+PASS deployment order-test-1780081590 appeared in get deployments
+PASS ordering: deployment seen at 34ms < pod at 589ms ✅
+deployment.apps "order-test-1780081590" deleted
+PASS alpine-deploy: replicas=2
+PASS alpine-deploy pod: envFrom configmap works
+PASS alpine-deploy pod: direct env var
+PASS ubuntu-deploy (z8s-test): replicas=1
+PASS ubuntu-deploy pod: runAsUser=1001
+PASS ubuntu-deploy pod: envFrom configmap (z8s-test ns)
+PASS python-deploy: replicas=2
+PASS python-deploy pod: direct env var
+PASS postgres-deploy: replicas=1
+PASS postgres-deploy pod: DB env vars
+PASS nginx-deploy: replicas=2
+PASS nginx-deploy pod: env var NGINX_HOST
+PASS nginx-deploy: serves HTTP content
 
-[1;33m══ 8. kubectl common commands & volume validation ══[0m
-[0;36m  ▸ kubectl logs on logger pods[0m
+══ 8. kubectl common commands & volume validation ══
+  ▸ kubectl logs on logger pods
 pod/logger-pod
 deployment.apps/logger-deploy
-[0;32mPASS[0m kubectl logs: logger-pod stdout shows log messages
-[0;32mPASS[0m kubectl logs: logger-pod stderr captured (DEBUG lines present)
-[0;32mPASS[0m kubectl logs: timestamps present in output
-[0;32mPASS[0m kubectl logs: logger-deploy pod shows log messages
-[0;32mPASS[0m kubectl logs: hostname appears in deployment pod logs
-[0;32mPASS[0m kubectl logs: one-shot log-pod captured stdout
-[0;36m  ▸ kubectl create (via apply)[0m
-[0;32mPASS[0m kubectl apply: configmap created (imp_key=imp_val)
-[0;32mPASS[0m kubectl apply: secret created (sec_key data correct)
-[0;36m  ▸ kubectl expose deployment[0m
-[0;32mPASS[0m kubectl expose deployment: service created
-[0;32mPASS[0m kubectl expose: assigned clusterIP 10.96.0.14
-[0;36m  ▸ kubectl describe all resource types[0m
-[0;32mPASS[0m kubectl describe pod alpine-pod -n default
-[0;32mPASS[0m kubectl describe deployment alpine-deploy -n default
-[0;32mPASS[0m kubectl describe svc python-svc -n default
-[0;32mPASS[0m kubectl describe configmap imp-cm -n z8s-test
-[0;32mPASS[0m kubectl describe secret imp-sec -n z8s-test
-[0;32mPASS[0m kubectl describe node
-[0;36m  ▸ kubectl delete[0m
+PASS kubectl logs: logger-pod stdout shows log messages
+PASS kubectl logs: logger-pod stderr captured (DEBUG lines present)
+PASS kubectl logs: timestamps present in output
+PASS kubectl logs: logger-deploy pod shows log messages
+PASS kubectl logs: hostname appears in deployment pod logs
+PASS kubectl logs: one-shot log-pod captured stdout
+  ▸ kubectl create (via apply)
+PASS kubectl apply: configmap created (imp_key=imp_val)
+PASS kubectl apply: secret created (sec_key data correct)
+  ▸ kubectl expose deployment
+PASS kubectl expose deployment: service created
+PASS kubectl expose: assigned clusterIP 10.96.0.14
+  ▸ kubectl describe all resource types
+PASS kubectl describe pod alpine-pod -n default
+PASS kubectl describe deployment alpine-deploy -n default
+PASS kubectl describe svc python-svc -n default
+PASS kubectl describe configmap imp-cm -n z8s-test
+PASS kubectl describe secret imp-sec -n z8s-test
+PASS kubectl describe node
+  ▸ kubectl delete
 error: failed to create configmap: invalid body: not valid JSON or YAML
-[0;32mPASS[0m kubectl delete configmap
-[0;32mPASS[0m kubectl get after delete: correctly gone
-[0;36m  ▸ Volume content validation via exec (same namespace)[0m
-[0;32mPASS[0m vol-test-pod: pod with cm+secret volumes ready
-[0;32mPASS[0m volume exec: configMap file content correct via exec
-[0;32mPASS[0m volume exec: secret file content correct via exec
-[0;32mPASS[0m kubectl logs: configMap content appears in pod output
-[0;32mPASS[0m kubectl get configmap: data matches (from API)
-[0;32mPASS[0m kubectl get configmap: multi-line data correct (from API)
-[0;32mPASS[0m kubectl get secret: object exists (from API)
-[0;32mPASS[0m volume read-only: configMap volume rejects writes
-[0;32mPASS[0m volume read-only: secret volume rejects writes
+PASS kubectl delete configmap
+PASS kubectl get after delete: correctly gone
+  ▸ Volume content validation via exec (same namespace)
+PASS vol-test-pod: pod with cm+secret volumes ready
+PASS volume exec: configMap file content correct via exec
+PASS volume exec: secret file content correct via exec
+PASS kubectl logs: configMap content appears in pod output
+PASS kubectl get configmap: data matches (from API)
+PASS kubectl get configmap: multi-line data correct (from API)
+PASS kubectl get secret: object exists (from API)
+PASS volume read-only: configMap volume rejects writes
+PASS volume read-only: secret volume rejects writes
 pod "log-pod" deleted
 pod "vol-test-pod" deleted
 configmap "imp-cm" deleted
@@ -224,88 +225,89 @@ secret "imp-sec" deleted
 secret "vol-sec" deleted
 service "nginx-exposed" deleted
 
-[1;33m══ 9. Exec validation (fast) ══[0m
-[0;36m  ▸ Combined exec validation[0m
-[0;32mPASS[0m exec: file write in /tmp works
-[0;32mPASS[0m exec: /proc write — HOST=build-78544975c-2f2g5
+══ 9. Exec validation (fast) ══
+  ▸ Combined exec validation
+PASS exec: file write in /tmp works
+PASS exec: /proc write — HOST=build-684d948d4d-4528g
 WRITE=ok
 /proc/1/exe
-[0;32mPASS[0m exec: PID namespace isolated
-[0;32mPASS[0m exec: internet reachable (1.1.1.1)
-[0;32mPASS[0m exec: stdin pipe works
+PASS exec: PID namespace isolated
+PASS exec: internet reachable (1.1.1.1)
+PASS exec: stdin pipe works
 
-[1;33m══ 10. Deployment scaling with timing ══[0m
-[0;36m  ▸ Scaling alpine-deploy from 2 → 4 → 1[0m
-[0;32mPASS[0m alpine-deploy: scale up 2→4 completed in 8s
-[0;32mPASS[0m alpine-deploy: scale down 4→1 completed in 0s
-[0;36m  ▸ Scaling python-deploy from 2 → 3[0m
-[0;32mPASS[0m python-deploy: scale up 2→3 completed in 12s
+══ 10. Deployment scaling with timing ══
+  ▸ Scaling alpine-deploy from 2 → 4 → 1
+PASS alpine-deploy: scale up 2→4 completed in 2s
+PASS alpine-deploy: scale down 4→1 completed in 0s
+  ▸ Scaling python-deploy from 2 → 3
+PASS python-deploy: scale up 2→3 completed in 4s
 
-[1;33m══ 11. Scale to 100 — performance ══[0m
-[0;36m  ▸ Scaling alpine-deploy to 100 replicas[0m
-[0;32mPASS[0m alpine-deploy: scaled 2→100 in 11s
-[0;32mPASS[0m alpine-deploy: status.readyReplicas=100 confirmed
-[0;36m  ▸ Spot-check individual pods[0m
-[0;32mPASS[0m alpine-deploy: 100/100 pods visible in listing
-[0;32mPASS[0m alpine-deploy: scaled 100→1
+══ 11. Scale to 100 — performance ══
+  ▸ Scaling alpine-deploy to 100 replicas
+PASS alpine-deploy: scaled 2→100 in 5s
+PASS alpine-deploy: status.readyReplicas=100 confirmed
+  ▸ Spot-check individual pods
+PASS alpine-deploy: 100/100 pods visible in listing
+PASS alpine-deploy: scaled 100→1
 
-[1;33m══ 12. Service validation ══[0m
-[0;32mPASS[0m service tests: using client pod svc-client
-[0;36m  ▸ HTTP service reachability & response validation[0m
-[0;32mPASS[0m svc: python HTTP server — response matches (try 1)
-[0;32mPASS[0m svc: nginx default page — response matches (try 1)
-[0;32mPASS[0m svc: whoami info page — response matches (try 1)
-[0;32mPASS[0m svc: http-echo text — response matches (try 1)
-[0;32mPASS[0m svc: hostinfo page — response matches (try 1)
-[0;32mPASS[0m svc: nginx-hello page — response matches (try 1)
-[0;36m  ▸ Service env var injection[0m
-[0;32mPASS[0m svc: 3/3 expected service env vars injected
-[0;36m  ▸ DNS-based service resolution[0m
-[0;32mPASS[0m svc: DNS name resolution works (python-svc:18080)
+══ 12. Service validation ══
+PASS service tests: using client pod svc-client
+  ▸ HTTP service reachability & response validation
+PASS svc: python HTTP server — response matches (try 1)
+PASS svc: nginx default page — response matches (try 1)
+PASS svc: whoami info page — response matches (try 2)
+PASS svc: http-echo text — response matches (try 1)
+PASS svc: hostinfo page — response matches (try 1)
+PASS svc: nginx-hello page — response matches (try 1)
+  ▸ Service env var injection
+PASS svc: 3/3 expected service env vars injected
+  ▸ DNS-based service resolution
+PASS svc: DNS name resolution works (python-svc:18080)
 pod "svc-client" deleted
-[0;32mPASS[0m svc: NodePort check skipped (nc not available)
+PASS svc: NodePort check skipped (nc not available)
 
-[1;33m══ 13. Volume persistence tests ══[0m
-[0;36m  ▸ emptyDir persistence: data should NOT survive pod delete+recreate[0m
-[0;32mPASS[0m emptyDir: initial write successful
+══ 13. Volume persistence tests ══
+  ▸ emptyDir persistence: data should NOT survive pod delete+recreate
+PASS emptyDir: initial write successful
 pod "alpine-pod" deleted
-[0;32mPASS[0m emptyDir: alpine-pod recreated and ready
-[0;32mPASS[0m emptyDir: data correctly LOST after pod recreate (ephemeral)
-[0;36m  ▸ hostPath persistence: data should SURVIVE pod delete+recreate[0m
-[0;32mPASS[0m hostPath: initial write successful
+PASS emptyDir: alpine-pod recreated and ready
+PASS emptyDir: data correctly LOST after pod recreate (ephemeral)
+  ▸ hostPath persistence: data should SURVIVE pod delete+recreate
+PASS hostPath: initial write successful
 pod "hostpath-vol-pod" deleted
-[0;32mPASS[0m hostPath: data PERSISTED across pod recreate
+PASS hostPath: data PERSISTED across pod recreate
 pod "hostpath-vol-pod-2" deleted
-[0;36m  ▸ ConfigMap volume: should be read-only or immutable[0m
-[0;32mPASS[0m configMap volume: write —  (read-only filesystem may not be enforced)
-[0;32mPASS[0m secret volume: write —  (read-only filesystem may not be enforced)
-[0;36m  ▸ Deployment volume persistence: emptyDir data LOST after scale[0m
-[0;32mPASS[0m nginx-deploy: wrote test file to emptyDir
-[0;32mPASS[0m nginx-deploy: scaled 0→1 in 2s
+  ▸ ConfigMap volume: should be read-only or immutable
+PASS configMap volume: write —  (read-only filesystem may not be enforced)
+PASS secret volume: write —  (read-only filesystem may not be enforced)
+  ▸ Deployment volume persistence: emptyDir data LOST after scale
+PASS nginx-deploy: wrote test file to emptyDir
+PASS nginx-deploy: scaled 0→1 in 1s
+PASS nginx-deploy: emptyDir correctly FRESH after scale
 
-[1;33m══ 14. PV / PVC storage tests ══[0m
-[0;36m  ▸ PersistentVolume CRUD[0m
-[0;32mPASS[0m pv: pv-test listed via get pv
-[0;32mPASS[0m pv: pv-test-2 listed via get pv
-[0;32mPASS[0m pv: pv-test capacity=1Gi
-[0;32mPASS[0m pv: pv-test-2 capacity=5Gi
-[0;32mPASS[0m pv: describe pv-test shows storage details
-[0;36m  ▸ PersistentVolumeClaim CRUD[0m
-[0;32mPASS[0m pvc: pvc-test listed in default ns
-[0;32mPASS[0m pvc: pvc-test listed in z8s-test ns
-[0;32mPASS[0m pvc: default/pvc-test requests 500Mi
-[0;32mPASS[0m pvc: get -o json returns valid object
-[0;32mPASS[0m pvc: describe works
-[0;36m  ▸ PVC volume mount in pod[0m
-[0;32mPASS[0m pvc: pvc-pod with persistentVolumeClaim volume is Running
-[0;32mPASS[0m pvc: volume mounted successfully at /mnt/storage
+══ 14. PV / PVC storage tests ══
+  ▸ PersistentVolume CRUD
+PASS pv: pv-test listed via get pv
+PASS pv: pv-test-2 listed via get pv
+PASS pv: pv-test capacity=1Gi
+PASS pv: pv-test-2 capacity=5Gi
+PASS pv: describe pv-test shows storage details
+  ▸ PersistentVolumeClaim CRUD
+PASS pvc: pvc-test listed in default ns
+PASS pvc: pvc-test listed in z8s-test ns
+PASS pvc: default/pvc-test requests 500Mi
+PASS pvc: get -o json returns valid object
+PASS pvc: describe works
+  ▸ PVC volume mount in pod
+PASS pvc: pvc-pod with persistentVolumeClaim volume is Running
+PASS pvc: volume mounted successfully at /mnt/storage
 
-[1;33m══ 16. Security context and isolation ══[0m
-[0;36m  ▸ PID namespace — container has its own PID 1[0m
-[0;32mPASS[0m PID isolation: container has its own PID namespace
-[0;36m  ▸ Non-root access restrictions[0m
-[0;32mPASS[0m security-pod: non-root pod ready (uid 12345)
-[0;32mPASS[0m security: /etc/shadow — root:*::0:::::
+══ 16. Security context and isolation ══
+  ▸ PID namespace — container has its own PID 1
+PASS PID isolation: container has its own PID namespace
+  ▸ Non-root access restrictions
+PASS security-pod: non-root pod ready (uid 12345)
+PASS security: /etc/shadow — root:*::0:::::
 bin:!::0:::::
 daemon:!::0:::::
 lp:!::0:::::
@@ -322,75 +324,75 @@ games:!::0:::::
 ntp:!::0:::::
 guest:!::0:::::
 nobody:!::0:::::
-[0;32mPASS[0m security: non-root cannot write to /etc
-[0;32mPASS[0m security: non-root cannot read /proc/1/environ
-[0;32mPASS[0m security: uid_map —          0          0 4294967295
-[0;32mPASS[0m security-pod: direct env var USER
-[0;32mPASS[0m security: uid_map —          0          0 4294967295 (best-effort)
-[0;32mPASS[0m security-pod: direct env var USER
+PASS security: non-root cannot write to /etc
+PASS security: non-root cannot read /proc/1/environ
+PASS security: uid_map —          0          0 4294967295
+PASS security-pod: direct env var USER
+PASS security: uid_map —          0          0 4294967295 (best-effort)
+PASS security-pod: direct env var USER
 pod "security-pod" deleted
-[0;36m  ▸ Root-in-userns isolation[0m
-[0;32mPASS[0m isolation: root inside container (user namespace)
-[0;32mPASS[0m isolation: root cannot access host /proc/sysrq-trigger
-[0;32mPASS[0m isolation: write to /proc — 
-[0;32mPASS[0m isolation: write to /proc —  (best-effort)
+  ▸ Root-in-userns isolation
+PASS isolation: root inside container (user namespace)
+PASS isolation: root cannot access host /proc/sysrq-trigger
+PASS isolation: write to /proc — 
+PASS isolation: write to /proc —  (best-effort)
 
-[1;33m══ 17. Multi-container exec (via alpine-deploy pods) ══[0m
-[0;32mPASS[0m exec: multi-container pod (deployment) exec works
+══ 17. Multi-container exec (via alpine-deploy pods) ══
+PASS exec: multi-container pod (deployment) exec works
 
-[1;33m══ 18. Info deployment validation ══[0m
-[0;32mPASS[0m info: nginx-hello — content served (try 1)
-[0;32mPASS[0m info: whoami — content served (try 1)
-[0;32mPASS[0m info: http-echo — content served (try 1)
-[0;32mPASS[0m info: hostinfo — content served (try 1)
-[0;32mPASS[0m info: cluster-dashboard — content served (try 1)
-[0;36m  ▸ Info pods reachable via services[0m
-[0;32mPASS[0m info: nginx-hello-svc has clusterIP 10.96.0.9
-[0;32mPASS[0m info: whoami-svc has clusterIP 10.96.0.10
-[0;32mPASS[0m info: http-echo-svc has clusterIP 10.96.0.11
-[0;32mPASS[0m info: hostinfo-svc has clusterIP 10.96.0.12
-[0;32mPASS[0m info: cluster-dashboard-svc has clusterIP 10.96.0.13
+══ 18. Info deployment validation ══
+PASS info: nginx-hello — content served (try 1)
+PASS info: whoami — content served (try 1)
+PASS info: http-echo — content served (try 1)
+PASS info: hostinfo — content served (try 1)
+PASS info: cluster-dashboard — content served (try 1)
+  ▸ Info pods reachable via services
+PASS info: nginx-hello-svc has clusterIP 10.96.0.9
+PASS info: whoami-svc has clusterIP 10.96.0.10
+PASS info: http-echo-svc has clusterIP 10.96.0.11
+PASS info: hostinfo-svc has clusterIP 10.96.0.12
+PASS info: cluster-dashboard-svc has clusterIP 10.96.0.13
 
-[1;33m══ 19. API output formats ══[0m
-[0;32mPASS[0m get pod -o json (valid)
-[0;32mPASS[0m get pod -o yaml
-[0;32mPASS[0m get pod -o jsonpath name
-[0;32mPASS[0m get pods -l type=test-pod (label selector, 3 row(s))
+══ 19. API output formats ══
+PASS get pod -o json (valid)
+PASS get pod -o yaml
+PASS get pod -o jsonpath name
+PASS get pods -l type=test-pod (label selector, 3 row(s))
 
-[1;33m══ 20. All-namespaces listing ══[0m
-[0;32mPASS[0m pod alpine-pod visible via --all-namespaces
-[0;32mPASS[0m pod postgres-pod visible via --all-namespaces
-[0;32mPASS[0m python pod(s) visible via --all-namespaces
-[0;32mPASS[0m pod ubuntu-pod (z8s-test) visible via --all-namespaces
-[0;32mPASS[0m deployment alpine-deploy visible via --all-namespaces
-[0;32mPASS[0m deployment ubuntu-deploy visible via --all-namespaces
-[0;32mPASS[0m deployment python-deploy visible via --all-namespaces
-[0;32mPASS[0m deployment postgres-deploy visible via --all-namespaces
-[0;32mPASS[0m deployment nginx-deploy visible via --all-namespaces
-[0;32mPASS[0m deployment nginx-hello visible via --all-namespaces
-[0;32mPASS[0m deployment whoami visible via --all-namespaces
-[0;32mPASS[0m deployment http-echo visible via --all-namespaces
-[0;32mPASS[0m deployment hostinfo visible via --all-namespaces
-[0;32mPASS[0m deployment cluster-dashboard visible via --all-namespaces
-[0;32mPASS[0m service ubuntu-svc (z8s-test) visible via --all-namespaces
-[0;32mPASS[0m pv: pv-test visible (cluster-scoped)
-[0;32mPASS[0m pvc: pvc-test visible via --all-namespaces
+══ 20. All-namespaces listing ══
+PASS pod alpine-pod visible via --all-namespaces
+PASS pod postgres-pod visible via --all-namespaces
+PASS python pod(s) visible via --all-namespaces
+PASS pod ubuntu-pod (z8s-test) visible via --all-namespaces
+PASS deployment alpine-deploy visible via --all-namespaces
+PASS deployment ubuntu-deploy visible via --all-namespaces
+PASS deployment python-deploy visible via --all-namespaces
+PASS deployment postgres-deploy visible via --all-namespaces
+PASS deployment nginx-deploy visible via --all-namespaces
+PASS deployment nginx-hello visible via --all-namespaces
+PASS deployment whoami visible via --all-namespaces
+PASS deployment http-echo visible via --all-namespaces
+PASS deployment hostinfo visible via --all-namespaces
+PASS deployment cluster-dashboard visible via --all-namespaces
+PASS service ubuntu-svc (z8s-test) visible via --all-namespaces
+PASS pv: pv-test visible (cluster-scoped)
+PASS pvc: pvc-test visible via --all-namespaces
 
-[1;33m══ 21. Server health endpoints ══[0m
-[0;32mPASS[0m healthz returns ok
-[0;32mPASS[0m readyz returns ok
-[0;32mPASS[0m livez returns ok
+══ 21. Server health endpoints ══
+PASS healthz returns ok
+PASS readyz returns ok
+PASS livez returns ok
 
-[1;33m══ 22. Version endpoint ══[0m
-[0;32mPASS[0m version endpoint returns z8s
+══ 22. Version endpoint ══
+PASS version endpoint returns z8s
 
-[1;33m══ All tests complete ══[0m
+══ All tests complete ══
   Pods:       5 ready, 0 failed
   Deployments: 11 ready, 0 failed
 
 
-[1;33m══ Cleanup ══[0m
-[0;36m  ▸ Deleting all test resources...[0m
+══ Cleanup ══
+  ▸ Deleting all test resources...
 pod "alpine-pod" deleted
 pod "python-pod" deleted
 pod "postgres-pod" deleted
@@ -428,47 +430,47 @@ namespace "z8s-test" deleted
 namespace "z8s-prod" deleted
 
 ════════════════════════════════════════════
- Results: 177 passed, 0 failed
+ Results: 178 passed, 0 failed
 ════════════════════════════════════════════
 
 --- Last 40 lines of server log (/tmp/z8s.log) ---
-2026-05-29T06:02:36.496225Z  INFO ThreadId(23) z8s::cri::runtime: CRI: stopping pod hostinfo-pod-1892cf78
-2026-05-29T06:02:36.496240Z  INFO ThreadId(23) z8s::cri::runtime: Stopping container hostinfo-pod-1892cf78-hostinfo (PID 56032)
-2026-05-29T06:02:36.997839Z  INFO ThreadId(23) z8s::cri::cgroup: Removed cgroup: /sys/fs/cgroup/z8s/Pod_default_hostinfo-pod-1892cf78
-2026-05-29T06:02:36.997976Z  INFO ThreadId(23) z8s::api::handlers::deployment: Deleted deployment default/hostinfo
-2026-05-29T06:02:36.998561Z  INFO ThreadId(23) z8s::api::handlers::deployment: Deleting pod logger-deploy-pod-4492aa4b owned by deployment default/logger-deploy
-2026-05-29T06:02:36.998745Z  INFO ThreadId(23) z8s::cri::runtime: CRI: stopping pod logger-deploy-pod-4492aa4b
-2026-05-29T06:02:36.998755Z  INFO ThreadId(23) z8s::cri::runtime: Stopping container logger-deploy-pod-4492aa4b-logger (PID 56102)
-2026-05-29T06:02:37.500244Z  INFO ThreadId(23) z8s::cri::cgroup: Removed cgroup: /sys/fs/cgroup/z8s/Pod_default_logger-deploy-pod-4492aa4b
-2026-05-29T06:02:37.500374Z  INFO ThreadId(23) z8s::api::handlers::deployment: Deleting pod logger-deploy-pod-506381f6 owned by deployment default/logger-deploy
-2026-05-29T06:02:37.500590Z  INFO ThreadId(23) z8s::cri::runtime: CRI: stopping pod logger-deploy-pod-506381f6
-2026-05-29T06:02:37.500602Z  INFO ThreadId(23) z8s::cri::runtime: Stopping container logger-deploy-pod-506381f6-logger (PID 56097)
-2026-05-29T06:02:38.001310Z  INFO ThreadId(11) z8s::api::handlers::deployment: Deleted deployment default/logger-deploy
-2026-05-29T06:02:38.002027Z  INFO ThreadId(02) z8s::api::handlers::deployment: Deleting pod cluster-dashboard-pod-b907c557 owned by deployment default/cluster-dashboard
-2026-05-29T06:02:38.002250Z  INFO ThreadId(02) z8s::cri::runtime: CRI: stopping pod cluster-dashboard-pod-b907c557
-2026-05-29T06:02:38.002268Z  INFO ThreadId(02) z8s::cri::runtime: Stopping container cluster-dashboard-pod-b907c557-dashboard (PID 56108)
-2026-05-29T06:02:38.503311Z  INFO ThreadId(02) z8s::cri::cgroup: Removed cgroup: /sys/fs/cgroup/z8s/Pod_default_cluster-dashboard-pod-b907c557
-2026-05-29T06:02:38.503485Z  INFO ThreadId(02) z8s::api::handlers::deployment: Deleted deployment default/cluster-dashboard
-2026-05-29T06:02:38.734111Z  INFO ThreadId(02) z8s::components::network::service: Stopped service proxy for default/alpine-svc:clusterip:80
-2026-05-29T06:02:38.734829Z  INFO ThreadId(11) z8s::components::network::service: Stopped service proxy for default/python-svc:clusterip:18080
-2026-05-29T06:02:38.735059Z  INFO ThreadId(02) z8s::components::network::service: Stopped service proxy for default/python-nodeport:clusterip:18080
-2026-05-29T06:02:38.735074Z  INFO ThreadId(02) z8s::components::network::service: Stopped service proxy for default/python-nodeport:nodeport:30080
-2026-05-29T06:02:38.735273Z  INFO ThreadId(11) z8s::components::network::service: Stopped service proxy for default/postgres-svc:clusterip:5432
-2026-05-29T06:02:38.735534Z  INFO ThreadId(07) z8s::components::network::service: Stopped service proxy for default/nginx-svc:clusterip:80
-2026-05-29T06:02:38.735751Z  INFO ThreadId(02) z8s::components::network::service: Stopped service proxy for default/nginx-nodeport:nodeport:30081
-2026-05-29T06:02:38.735765Z  INFO ThreadId(02) z8s::components::network::service: Stopped service proxy for default/nginx-nodeport:clusterip:80
-2026-05-29T06:02:38.736143Z  INFO ThreadId(11) z8s::components::network::service: Stopped service proxy for default/nginx-hello-svc:clusterip:80
-2026-05-29T06:02:38.736326Z  INFO ThreadId(07) z8s::components::network::service: Stopped service proxy for default/whoami-svc:clusterip:80
-2026-05-29T06:02:38.933476Z  INFO ThreadId(02) z8s::components::network::service: Stopped service proxy for default/http-echo-svc:clusterip:5678
-2026-05-29T06:02:39.134479Z  INFO ThreadId(11) z8s::components::network::service: Stopped service proxy for default/hostinfo-svc:clusterip:18081
-2026-05-29T06:02:39.333439Z  INFO ThreadId(07) z8s::components::network::service: Stopped service proxy for default/cluster-dashboard-svc:clusterip:80
-2026-05-29T06:02:40.100521Z  INFO ThreadId(02) z8s::cri::runtime: CRI: stopping pod ubuntu-deploy-pod-fc2a203a
-2026-05-29T06:02:40.100558Z  INFO ThreadId(02) z8s::cri::runtime: Stopping container ubuntu-deploy-pod-fc2a203a-ubuntu (PID 56324)
-2026-05-29T06:02:40.601821Z  INFO ThreadId(07) z8s::cri::cgroup: Removed cgroup: /sys/fs/cgroup/z8s/Pod_z8s-test_ubuntu-deploy-pod-fc2a203a
-2026-05-29T06:02:40.602139Z  INFO ThreadId(07) z8s::cri::runtime: CRI: stopping pod ubuntu-pod
-2026-05-29T06:02:40.602154Z  INFO ThreadId(07) z8s::cri::runtime: Stopping container ubuntu-pod-ubuntu (PID 55232)
-2026-05-29T06:02:41.103722Z  INFO ThreadId(11) z8s::cri::cgroup: Removed cgroup: /sys/fs/cgroup/z8s/Pod_z8s-test_ubuntu-pod
-2026-05-29T06:02:41.103960Z  INFO ThreadId(11) z8s::components::network::service: Stopped service proxy for z8s-test/alpine-svc:clusterip:80
-2026-05-29T06:02:41.103996Z  INFO ThreadId(11) z8s::components::network::service: Stopped service proxy for z8s-test/ubuntu-svc:clusterip:80
-2026-05-29T06:02:41.104054Z  INFO ThreadId(11) z8s::api::handlers::namespace: Deleted namespace: z8s-test
-2026-05-29T06:02:41.104631Z  INFO ThreadId(02) z8s::api::handlers::namespace: Deleted namespace: z8s-prod
+2026-05-29T19:08:06.580834Z  INFO ThreadId(24) z8s::components::network::service: Stopped service proxy for default/alpine-svc:clusterip:80
+2026-05-29T19:08:06.630436Z  INFO ThreadId(24) z8s::netmux::nftables: nftables: removed DNAT for 10.96.0.1:80
+2026-05-29T19:08:06.663714Z  INFO ThreadId(25) z8s::components::network::service: Stopped service proxy for default/python-svc:clusterip:18080
+2026-05-29T19:08:06.708433Z  INFO ThreadId(25) z8s::netmux::nftables: nftables: removed DNAT for 10.96.0.3:18080
+2026-05-29T19:08:06.793842Z  INFO ThreadId(25) z8s::components::network::service: Stopped service proxy for default/python-nodeport:clusterip:18080
+2026-05-29T19:08:06.837417Z  INFO ThreadId(25) z8s::netmux::nftables: nftables: removed DNAT for 10.96.0.4:18080
+2026-05-29T19:08:06.837479Z  INFO ThreadId(25) z8s::components::network::service: Stopped service proxy for default/python-nodeport:nodeport:30080
+2026-05-29T19:08:06.875415Z  INFO ThreadId(25) z8s::netmux::nftables: nftables: removed DNAT for 10.96.0.4:30080
+2026-05-29T19:08:06.945739Z  INFO ThreadId(24) z8s::components::network::service: Stopped service proxy for default/postgres-svc:clusterip:5432
+2026-05-29T19:08:06.981415Z  INFO ThreadId(24) z8s::netmux::nftables: nftables: removed DNAT for 10.96.0.5:5432
+2026-05-29T19:08:07.008817Z  INFO ThreadId(24) z8s::components::network::service: Stopped service proxy for default/nginx-svc:clusterip:80
+2026-05-29T19:08:07.046420Z  INFO ThreadId(24) z8s::netmux::nftables: nftables: removed DNAT for 10.96.0.6:80
+2026-05-29T19:08:07.069780Z  INFO ThreadId(25) z8s::components::network::service: Stopped service proxy for default/nginx-nodeport:clusterip:80
+2026-05-29T19:08:07.110420Z  INFO ThreadId(25) z8s::netmux::nftables: nftables: removed DNAT for 10.96.0.7:80
+2026-05-29T19:08:07.110482Z  INFO ThreadId(25) z8s::components::network::service: Stopped service proxy for default/nginx-nodeport:nodeport:30081
+2026-05-29T19:08:07.136410Z  INFO ThreadId(25) z8s::netmux::nftables: nftables: removed DNAT for 10.96.0.7:30081
+2026-05-29T19:08:07.164675Z  INFO ThreadId(25) z8s::components::network::service: Stopped service proxy for default/nginx-hello-svc:clusterip:80
+2026-05-29T19:08:07.183418Z  INFO ThreadId(25) z8s::netmux::nftables: nftables: removed DNAT for 10.96.0.9:80
+2026-05-29T19:08:07.217722Z  INFO ThreadId(23) z8s::components::network::service: Stopped service proxy for default/whoami-svc:clusterip:80
+2026-05-29T19:08:07.242425Z  INFO ThreadId(23) z8s::netmux::nftables: nftables: removed DNAT for 10.96.0.10:80
+2026-05-29T19:08:07.278739Z  INFO ThreadId(23) z8s::components::network::service: Stopped service proxy for default/http-echo-svc:clusterip:5678
+2026-05-29T19:08:07.317417Z  INFO ThreadId(23) z8s::netmux::nftables: nftables: removed DNAT for 10.96.0.11:5678
+2026-05-29T19:08:07.318195Z  INFO ThreadId(25) z8s::components::network::service: Stopped service proxy for default/hostinfo-svc:clusterip:18081
+2026-05-29T19:08:07.378425Z  INFO ThreadId(25) z8s::netmux::nftables: nftables: removed DNAT for 10.96.0.12:18081
+2026-05-29T19:08:07.379097Z  INFO ThreadId(23) z8s::components::network::service: Stopped service proxy for default/cluster-dashboard-svc:clusterip:80
+2026-05-29T19:08:07.415408Z  INFO ThreadId(23) z8s::netmux::nftables: nftables: removed DNAT for 10.96.0.13:80
+2026-05-29T19:08:08.183607Z  INFO ThreadId(24) z8s::cri::runtime: CRI: stopping pod ubuntu-pod
+2026-05-29T19:08:08.183656Z  INFO ThreadId(24) z8s::cri::runtime: Stopping container ubuntu-pod-ubuntu (PID 173531)
+2026-05-29T19:08:08.685084Z  INFO ThreadId(25) z8s::cri::cgroup: Removed cgroup: /sys/fs/cgroup/z8s/Pod_z8s-test_ubuntu-pod
+2026-05-29T19:08:08.685622Z  INFO ThreadId(25) z8s::cri::runtime: CRI: stopping pod ubuntu-deploy-pod-67875f0e
+2026-05-29T19:08:08.685646Z  INFO ThreadId(25) z8s::cri::runtime: Stopping container ubuntu-deploy-pod-67875f0e-ubuntu (PID 174361)
+2026-05-29T19:08:09.050602Z  INFO ThreadId(23) z8s::scheduler::process: Reaped zombie child 173531 (signal SIGTERM)
+2026-05-29T19:08:09.050733Z  INFO ThreadId(23) z8s::scheduler::process: Reaped zombie child 174361 (signal SIGTERM)
+2026-05-29T19:08:09.187228Z  INFO ThreadId(23) z8s::cri::cgroup: Removed cgroup: /sys/fs/cgroup/z8s/Pod_z8s-test_ubuntu-deploy-pod-67875f0e
+2026-05-29T19:08:09.187558Z  INFO ThreadId(23) z8s::components::network::service: Stopped service proxy for z8s-test/alpine-svc:clusterip:80
+2026-05-29T19:08:09.217414Z  INFO ThreadId(23) z8s::netmux::nftables: nftables: removed DNAT for 10.96.0.8:80
+2026-05-29T19:08:09.217487Z  INFO ThreadId(23) z8s::components::network::service: Stopped service proxy for z8s-test/ubuntu-svc:clusterip:80
+2026-05-29T19:08:09.238424Z  INFO ThreadId(23) z8s::netmux::nftables: nftables: removed DNAT for 10.96.0.2:80
+2026-05-29T19:08:09.238513Z  INFO ThreadId(23) z8s::api::handlers::namespace: Deleted namespace: z8s-test
+2026-05-29T19:08:09.239250Z  INFO ThreadId(23) z8s::api::handlers::namespace: Deleted namespace: z8s-prod
