@@ -212,6 +212,11 @@ impl NetMux {
         self.nft.remove_dnat(cluster_ip, port)
     }
 
+    /// Add NodePort DNAT rule (matches on tcp dport, any dest IP).
+    pub fn add_nodeport_dnat(&self, node_port: u16, backends: &[(Ipv4Addr, u16)]) -> Result<()> {
+        self.nft.add_nodeport_dnat(node_port, backends)
+    }
+
     /// Add forward allow rule between two CIDRs.
     pub fn add_forward_allow(&self, src_cidr: &str, dst_cidr: &str) -> Result<()> {
         self.nft.add_forward_allow(src_cidr, dst_cidr)

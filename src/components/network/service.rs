@@ -128,6 +128,10 @@ impl NetworkManager {
                     if let Err(e) = self.netmux.add_dnat(cluster_ip_addr, svc_port.port as u16, &backends) {
                         tracing::error!("add_dnat failed for {}: {:?}", key, e);
                     }
+                    tracing::info!("calling add_nodeport_dnat for {}: node_port={}, backends={}", key, node_port, backends.len());
+                    if let Err(e) = self.netmux.add_nodeport_dnat(node_port, &backends) {
+                        tracing::error!("add_nodeport_dnat failed for {}: {:?}", key, e);
+                    }
                     proxies.insert(port_key, RunningProxy { handle: tokio::spawn(async { /* DNAT via nftables */ }) });
                 }
             }
