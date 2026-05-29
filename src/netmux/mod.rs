@@ -7,6 +7,7 @@ pub mod crds;
 pub mod vnet_controller;
 pub mod np_controller;
 pub mod ingress;
+pub mod cluster;
 
 use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex};
@@ -194,6 +195,14 @@ impl NetMux {
         self.nft.add_forward_deny(src_cidr, dst_cidr)
     }
 
+    /// Add a subnet route via a gateway (for cross-node routing).
+    pub fn add_subnet_route_raw(&self, dest_cidr: &str, gateway: &str) -> Result<()> {
+        let (ip, prefix) = parse_cidr(dest_cidr)?;
+        let gw: Ipv4Addr = gateway.parse().context("Invalid gateway IP")?;
+        let route = routing::add_subnet_route(&ip, prefix, &gw);
+        route.context("add_subnet_route_raw")
+    }
+
     /// Clean up orphaned veths at startup.
     pub fn clean_orphan_veths(&self, active_uids: &[String]) -> Result<()> {
         veth::clean_orphan_veths(active_uids)
@@ -208,4 +217,11 @@ impl NetMux {
     pub fn ensure_loopback_up() -> Result<()> {
         netlink::ensure_loopback_up()
     }
+}
+
+fn parse_cidr(s: &str) -> Result<(Ipv4Addr, u8)> {
+    let (ip_str, prefix_str) = s.split_once('/').context("Missing '/' in CIDR")?;
+    let prefix: u8 = prefix_str.parse().context("Invalid prefix")?;
+    let ip: Ipv4Addr = ip_str.parse().context("Invalid IP")?;
+    Ok((ip, prefix))
 }

@@ -25,8 +25,10 @@ pub struct Config {
     pub dns_port: Option<u16>,
     pub manifests_dir: String,
     pub data_dir: Option<String>,
-    /// Pod CIDR for IPAM (e.g. "10.42.0.0/16").
     pub pod_cidr: String,
+    pub node_name: String,
+    pub node_ip: String,
+    pub peers: Vec<(String, String)>,
 }
 
 impl Config {
@@ -70,6 +72,9 @@ impl Config {
             manifests_dir: "/etc/z8s/manifests".to_string(),
             data_dir: None,
             pod_cidr: "10.42.0.0/16".to_string(),
+            node_name: hostname(),
+            node_ip: auto_detect_node_ip().unwrap_or_else(|| "127.0.0.1".to_string()),
+            peers: Vec::new(),
         }
     }
 
@@ -142,6 +147,28 @@ impl Config {
                         }
                     }
                 }
+                "--node-name" => {
+                    i += 1;
+                    if let Some(v) = args.get(i) {
+                        cfg.node_name = v.to_string();
+                    }
+                }
+                "--node-ip" => {
+                    i += 1;
+                    if let Some(v) = args.get(i) {
+                        cfg.node_ip = v.to_string();
+                    }
+                }
+                "--peers" => {
+                    i += 1;
+                    if let Some(v) = args.get(i) {
+                        for pair in v.split(',') {
+                            if let Some((name, ip)) = pair.split_once('=') {
+                                cfg.peers.push((name.to_string(), ip.to_string()));
+                            }
+                        }
+                    }
+                }
                 other => {
                     eprintln!("Unknown argument: {}", other);
                     eprintln!("{}", HELP);
@@ -152,6 +179,27 @@ impl Config {
         }
         cfg
     }
+}
+
+fn hostname() -> String {
+    std::env::var("HOSTNAME").unwrap_or_else(|_| "node-0".to_string())
+}
+
+fn auto_detect_node_ip() -> Option<String> {
+    // Parse /proc/net/fib_trie for the first non-loopback local address
+    let content = std::fs::read_to_string("/proc/self/net/fib_trie").ok()?;
+    for line in content.lines() {
+        if let Some(rest) = line.trim_start().strip_prefix("Local:") {
+            if let Some(ip_str) = rest.split('/').next() {
+                if let Ok(ip) = ip_str.trim().parse::<std::net::Ipv4Addr>() {
+                    if !ip.is_loopback() && !ip.is_link_local() && !ip.is_multicast() {
+                        return Some(ip.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 fn parse_cidr(s: &str) -> Option<([u8; 4], u8)> {

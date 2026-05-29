@@ -23,6 +23,7 @@ anyhow = { version = "1", features = ["backtrace"] }
 uuid = { version = "1", features = ["v4"] }
 chrono = "0.4"
 axum = { version = "0.8", default-features = false, features = ["json", "tokio", "http1", "ws", "query"] }
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 async-trait = "0.1"
 rustables = "0.8"

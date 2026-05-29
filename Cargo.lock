@@ -2561,6 +2561,7 @@ dependencies = [
  "nix 0.31.3",
  "notify",
  "oci-distribution",
+ "reqwest",
  "rustables",
  "serde",
  "serde_json",
