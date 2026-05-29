@@ -22,15 +22,23 @@ use rustables::expr::{
 pub const NAT_TABLE: &str = "z8s_nat";
 pub const FILTER_TABLE: &str = "z8s_filter";
 
+/// nftables engine — manages tables, chains, and rules via rustables.
+/// All modifications go through a serialized Mutex writer to prevent
+/// concurrent batch conflicts (plan §7).
 pub struct NftEngine {
     writer: Mutex<()>,
 }
 
 impl NftEngine {
+    /// Create the nftables engine.
     pub fn new() -> Self {
         Self { writer: Mutex::new(()) }
     }
 
+    /// Initialize nftables tables and baseline chains.
+    /// Creates `z8s_nat` (prerouting/postrouting) and `z8s_filter`
+    /// (forward drop + conntrack baseline, input/output accept).
+    /// Must be called once at startup. Panics on failure per plan §15.
     pub fn init(&self) -> Result<()> {
         let _lock = self.writer.lock().expect("lock poisoned");
         let mut batch = Batch::new();

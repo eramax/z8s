@@ -8,6 +8,8 @@ use tokio::time::sleep;
 
 use super::NetMux;
 
+/// Per-node info tracked by each member of the cluster.
+/// Used for cross-node routing and health monitoring.
 #[derive(Debug, Clone)]
 pub struct NodeInfo {
     pub name: String,
@@ -24,6 +26,9 @@ struct VNetBitmap {
     used: Vec<bool>,
 }
 
+/// Multi-node cluster state — manages peers, per-VNet /24 bitmaps,
+/// join-handshake, heartbeat, and cross-node routes.
+/// Plan §10: two-level IPAM (global /24 bitmap + local BTreeSet).
 pub struct Cluster {
     name: String,
     host_ip: Ipv4Addr,
@@ -36,6 +41,8 @@ pub struct Cluster {
 }
 
 impl Cluster {
+    /// Create a new Cluster. Initializes the per-VNet /24 bitmap
+    /// and populates seed peers from `--peers` flag.
     pub fn new(name: String, host_ip: Ipv4Addr, pod_cidr: &str, api_port: u16, peers: &[(String, String)]) -> Result<Self> {
         let cidr = super::pool::Ipv4Cidr::parse(pod_cidr).context("Invalid pod CIDR")?;
         let host_bits = 32 - cidr.prefix;
@@ -110,24 +117,33 @@ impl Cluster {
 
     pub async fn announce_to_peers(&self) -> Result<()> {
         let peers = self.peers.lock().expect("lock poisoned").clone();
+        let body = serde_json::json!({
+            "node_name": self.name,
+            "node_ip": self.host_ip.to_string(),
+            "token": self.join_token,
+            "vnet": "default",
+        });
+        let body_bytes = serde_json::to_vec(&body).context("serialize join body")?;
+
         for (_, peer) in &peers {
-            let url = format!("http://{}:{}/join", peer.host_ip, self.api_port);
-            let client = reqwest::Client::new();
-            let body = serde_json::json!({
-                "node_name": self.name,
-                "node_ip": self.host_ip.to_string(),
-                "token": self.join_token,
-                "vnet": "default",
-            });
-            match client.post(&url).json(&body).send().await {
-                Ok(resp) => {
-                    if let Ok(assigned) = resp.text().await {
-                        info!("Joined cluster via {}: assigned {}", peer.name, assigned);
+            let addr = format!("{}:{}", peer.host_ip, self.api_port);
+            let request = format!(
+                "POST /join HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                addr, body_bytes.len()
+            );
+            match tokio::net::TcpStream::connect(&addr).await {
+                Ok(mut stream) => {
+                    use tokio::io::AsyncWriteExt;
+                    let _ = stream.write_all(request.as_bytes()).await;
+                    let _ = stream.write_all(&body_bytes).await;
+                    let mut resp = Vec::new();
+                    use tokio::io::AsyncReadExt;
+                    let _ = stream.read_to_end(&mut resp).await;
+                    if let Ok(text) = String::from_utf8(resp) {
+                        debug!("Joined via {}: {}", peer.name, text.lines().last().unwrap_or(""));
                     }
                 }
-                Err(e) => {
-                    debug!("Announce to {} failed: {}", peer.name, e);
-                }
+                Err(e) => debug!("Announce to {} failed: {}", peer.name, e),
             }
         }
         Ok(())

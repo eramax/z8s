@@ -1,12 +1,16 @@
 use std::collections::BTreeSet;
 use std::net::Ipv4Addr;
 
+/// Unified IP pool allocator using a BTreeSet free-list.
+/// Per-VNet for pod CIDRs, single for service CIDR.
+/// Plan §5: one code path for pods, services, public IPs.
 #[derive(Debug, Clone)]
 pub struct IpPool {
     cidr: Ipv4Cidr,
     free: BTreeSet<u32>,
 }
 
+/// An IPv4 CIDR (network + prefix length).
 #[derive(Debug, Clone)]
 pub struct Ipv4Cidr {
     pub network: Ipv4Addr,
