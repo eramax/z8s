@@ -606,6 +606,22 @@ impl ProcessSupervisor {
                 drop(sync_w);
                 drop(ack_r);
 
+                if let Some(gid) = run_as_group {
+                    if let Err(e) = nix::unistd::setgid(nix::unistd::Gid::from_raw(gid)) {
+                        warn!("setgid({}) failed: {}", gid, e);
+                    }
+                }
+                if let Some(uid) = run_as_user {
+                    if let Err(e) = nix::unistd::setuid(nix::unistd::Uid::from_raw(uid)) {
+                        warn!("setuid({}) failed: {}", uid, e);
+                    }
+                }
+                if let Some(wd) = &working_dir {
+                    if let Err(e) = nix::unistd::chdir(std::path::Path::new(wd)) {
+                        warn!("chdir({}) failed: {}", wd, e);
+                    }
+                }
+
                 raise_nproc_limit();
                 rootfs::drop_capabilities(privileged, &extra_caps);
                 if isolation != rootfs::RootfsIsolation::Degraded {
