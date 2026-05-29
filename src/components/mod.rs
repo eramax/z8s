@@ -27,6 +27,7 @@ pub trait Component: Send + Sync + 'static {
     async fn on_delete(&self, ctx: &ReconcileContext, resource: &AnyResource) -> Result<()>;
 }
 
+#[derive(Clone)]
 pub struct ReconcileContext {
     pub store: Arc<ResourceStore>,
     pub pipeline: Arc<ReconciliationPipeline>,

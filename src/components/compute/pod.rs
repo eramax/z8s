@@ -24,7 +24,14 @@ impl Component for PodResource {
 
     async fn reconcile(&self, ctx: &ReconcileContext, tracker: &ResourceTracker) -> Result<()> {
         if tracker.state == ResourceState::Pending {
-            ctx.process_tracker.start_pod(&tracker.resource).await?;
+            // Spawn pod start in background to avoid blocking the reconciler
+            let ctx = ctx.clone();
+            let resource = tracker.resource.clone();
+            tokio::spawn(async move {
+                if let Err(e) = ctx.process_tracker.start_pod(&resource).await {
+                    tracing::error!("Failed to start pod {}: {}", resource.name(), e);
+                }
+            });
         }
         // When pod is running AND ready (has IP), sync services for DNAT
         if tracker.state == ResourceState::Running && ctx.process_tracker.is_ready(tracker.resource.name()).await {
