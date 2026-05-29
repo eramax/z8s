@@ -31,6 +31,11 @@ impl Component for PodResource {
 
     async fn on_apply(&self, ctx: &ReconcileContext, resource: &AnyResource) -> Result<()> {
         ctx.process_tracker.start_pod(resource).await?;
+        if let AnyResource::Pod(pod) = resource {
+            let labels = pod.metadata.labels.clone().unwrap_or_default();
+            let ns = pod.metadata.namespace.as_deref().unwrap_or("default");
+            let _ = ctx.net.sync_services_for_labels(ns, &labels).await;
+        }
         Ok(())
     }
 

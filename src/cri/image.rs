@@ -4,6 +4,7 @@ use oci_distribution::config::ConfigFile;
 use oci_distribution::secrets::RegistryAuth;
 use oci_distribution::Reference;
 use std::path::Path;
+use std::sync::Mutex;
 use tracing::{debug, info};
 
 use crate::cri::oci::{save_image_config, OCI_CONFIG_FILE};
@@ -31,6 +32,7 @@ pub struct ImageManager {
     client: Client,
     cache_dir: String,
     rootfs_dir: String,
+    pull_locks: Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl ImageManager {
@@ -50,6 +52,7 @@ impl ImageManager {
             client,
             cache_dir,
             rootfs_dir,
+            pull_locks: Mutex::new(std::collections::HashMap::new()),
         })
     }
 
@@ -71,19 +74,25 @@ impl ImageManager {
     /// Recursively copy a directory tree without spawning an external process.
     /// Preserves permissions and symlinks; skips special files (devices/fifos)
     /// which require root to create and are not needed for container rootfs copies.
-    fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
-        std::fs::create_dir_all(dst)?;
+    fn copy_dir(src: &Path, dst: &Path) -> anyhow::Result<()> {
+        std::fs::create_dir_all(dst)
+            .with_context(|| format!("create_dir_all({:?})", dst))?;
         if let Ok(m) = std::fs::symlink_metadata(src) {
             std::fs::set_permissions(dst, m.permissions()).ok();
         }
-        for entry in std::fs::read_dir(src)? {
-            let entry = entry?;
+        for entry in std::fs::read_dir(src)
+            .with_context(|| format!("read_dir({:?})", src))?
+        {
+            let entry = entry
+                .with_context(|| format!("read_dir entry in {:?}", src))?;
             let src_child = entry.path();
             let dst_child = dst.join(entry.file_name());
-            let meta = std::fs::symlink_metadata(&src_child)?;
+            let meta = std::fs::symlink_metadata(&src_child)
+                .with_context(|| format!("metadata({:?})", src_child))?;
             let ft = meta.file_type();
             if ft.is_symlink() {
-                let target = std::fs::read_link(&src_child)?;
+                let target = std::fs::read_link(&src_child)
+                    .with_context(|| format!("read_link({:?})", src_child))?;
                 // Remove stale entry at dst so symlink creation succeeds
                 if dst_child.exists() || std::fs::symlink_metadata(&dst_child).is_ok() {
                     if dst_child.is_dir() {
@@ -92,11 +101,14 @@ impl ImageManager {
                         std::fs::remove_file(&dst_child).ok();
                     }
                 }
-                std::os::unix::fs::symlink(&target, &dst_child)?;
+                std::os::unix::fs::symlink(&target, &dst_child)
+                    .with_context(|| format!("symlink({:?} -> {:?})", dst_child, target))?;
             } else if ft.is_dir() {
-                Self::copy_dir(&src_child, &dst_child)?;
+                Self::copy_dir(&src_child, &dst_child)
+                    .with_context(|| format!("copy_dir({:?} -> {:?})", src_child, dst_child))?;
             } else if ft.is_file() {
-                std::fs::copy(&src_child, &dst_child)?;
+                std::fs::copy(&src_child, &dst_child)
+                    .with_context(|| format!("copy({:?} -> {:?})", src_child, dst_child))?;
                 std::fs::set_permissions(&dst_child, meta.permissions()).ok();
             }
             // Skip block/char/fifo — not needed for rootfs clones and require root
@@ -105,6 +117,15 @@ impl ImageManager {
     }
 
     pub async fn unpack_image(&self, image_ref: &str, container_id: &str) -> Result<String> {
+        // Per-image lock to prevent concurrent pulls of the same image
+        let image_lock = {
+            let mut locks = self.pull_locks.lock().unwrap();
+            locks.entry(image_ref.to_string())
+                .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        };
+        let _guard = image_lock.lock().await;
+
         let container_rootfs = format!("{}/{}", self.rootfs_dir, container_id);
 
         if container_rootfs.as_str() == "/" {
@@ -129,32 +150,7 @@ impl ImageManager {
             if let Ok(cached_ref) = std::fs::read_to_string(&cache_meta) {
                 if cached_ref.trim() == image_ref {
                     info!("Copying cached rootfs for {} to {}", image_ref, container_rootfs);
-                    if Path::new(&container_rootfs).exists() {
-                        std::fs::remove_dir_all(&container_rootfs)?;
-                    }
-                    Self::copy_dir(Path::new(&cache_path), Path::new(&container_rootfs))?;
-                    Self::copy_oci_config(&cache_path, &container_rootfs);
-                    // Backfill OCI config for caches created before we stored Entrypoint/Cmd
-                    let oci_cfg = Path::new(&cache_path).join(OCI_CONFIG_FILE);
-                    let needs_guess = !oci_cfg.exists()
-                        || {
-                            let cfg = crate::cri::oci::read_image_config(&cache_path);
-                            cfg.entrypoint.as_ref().is_none_or(|ep| ep.is_empty())
-                                && cfg.cmd.as_ref().is_none_or(|c| c.is_empty())
-                        };
-                    if needs_guess {
-                        let guessed = crate::cri::oci::guess_image_config(&cache_path);
-                        save_image_config(
-                            &cache_path,
-                            guessed.entrypoint.clone(),
-                            guessed.cmd.clone(),
-                            guessed.env.clone(),
-                            None,
-                        );
-                        Self::copy_oci_config(&cache_path, &container_rootfs);
-                    }
-                    std::fs::write(&meta_path, image_ref)?;
-                    return Ok(container_rootfs);
+                    return Self::copy_cache_to_container(&cache_path, &container_rootfs, &meta_path, image_ref);
                 }
             }
         }
@@ -173,14 +169,47 @@ impl ImageManager {
             }
         };
 
+        // Double-check: another thread may have populated the cache while we pulled
+        if Path::new(&cache_meta).exists() {
+            if let Ok(cached_ref) = std::fs::read_to_string(&cache_meta) {
+                if cached_ref.trim() == image_ref {
+                    info!("Cache populated by concurrent pull for {}", image_ref);
+                    return Self::copy_cache_to_container(&cache_path, &container_rootfs, &meta_path, image_ref);
+                }
+            }
+        }
+
         // Unpack to shared cache first
         if Path::new(&cache_path).exists() {
             std::fs::remove_dir_all(&cache_path)?;
         }
         std::fs::create_dir_all(&cache_path)?;
 
+        // Fix layer order: oci_distribution's buffer_unordered collects layers
+        // in arbitrary (completion) order, not manifest order. Restore order so
+        // that base layers are extracted before dependent layers.
+        let mut image_data = image_data;
+        if let Some(manifest) = &image_data.manifest {
+            let mut by_digest: std::collections::HashMap<String, ImageLayer> = std::collections::HashMap::new();
+            for layer in image_data.layers {
+                by_digest.insert(layer.sha256_digest(), layer);
+            }
+            let mut ordered = Vec::with_capacity(manifest.layers.len());
+            for desc in &manifest.layers {
+                if let Some(layer) = by_digest.remove(&desc.digest) {
+                    ordered.push(layer);
+                }
+            }
+            // Append any extra layers not in the manifest (should not happen)
+            ordered.extend(by_digest.into_values());
+            image_data.layers = ordered;
+        }
+
         let layers = &image_data.layers;
         info!("Unpacking {} layers for {}", layers.len(), image_ref);
+
+        // Save the OCI entrypoint/cmd/env from the registry config
+        // (must be done before guess_image_config fallback below)
         let config_file: ConfigFile = image_data
             .config
             .clone()
@@ -197,8 +226,17 @@ impl ImageManager {
         save_image_config(&cache_path, image_ep, image_cmd, image_env, image_wd);
 
         for (i, layer) in layers.iter().enumerate() {
-            self.unpack_layer(layer, &cache_path, i)?;
+            self.unpack_layer(layer, &cache_path, i)
+                .with_context(|| format!("Failed to unpack layer {}/{} ({})", i + 1, layers.len(), layer.media_type))?;
         }
+        // Backfill OCI config on the cache (guess if needed)
+        let oci_cfg = Path::new(&cache_path).join(OCI_CONFIG_FILE);
+        let needs_guess = !oci_cfg.exists()
+            || {
+                let cfg = crate::cri::oci::read_image_config(&cache_path);
+                cfg.entrypoint.as_ref().is_none_or(|ep| ep.is_empty())
+                    && cfg.cmd.as_ref().is_none_or(|c| c.is_empty())
+            };
         if needs_guess {
             let guessed = crate::cri::oci::guess_image_config(&cache_path);
             save_image_config(
@@ -209,18 +247,62 @@ impl ImageManager {
                 None,
             );
         }
-        std::fs::write(&cache_meta, image_ref)?;
+        std::fs::write(&cache_meta, image_ref)
+            .context("Failed to write cache metadata")?;
 
-        // Copy from cache to container-specific path
-        if Path::new(&container_rootfs).exists() {
-            std::fs::remove_dir_all(&container_rootfs)?;
+        Self::copy_cache_to_container(&cache_path, &container_rootfs, &meta_path, image_ref)
+            .context("Failed to copy image cache to container rootfs")
+    }
+
+    fn copy_cache_to_container(cache_path: &str, container_rootfs: &str, meta_path: &str, image_ref: &str) -> Result<String> {
+        if Path::new(container_rootfs).exists() {
+            Self::unmount_stale_rootfs(container_rootfs);
+            std::fs::remove_dir_all(container_rootfs)
+                .with_context(|| format!("remove_dir_all({:?})", container_rootfs))?;
         }
-        Self::copy_dir(Path::new(&cache_path), Path::new(&container_rootfs))?;
-        Self::copy_oci_config(&cache_path, &container_rootfs);
-        std::fs::write(&meta_path, image_ref)?;
+        Self::copy_dir(Path::new(cache_path), Path::new(container_rootfs))
+            .with_context(|| format!("copy_dir({:?} -> {:?})", cache_path, container_rootfs))?;
+        Self::copy_oci_config(cache_path, container_rootfs);
+        Self::backfill_oci_config(cache_path, container_rootfs);
+        std::fs::write(meta_path, image_ref)?;
+        Ok(container_rootfs.to_string())
+    }
 
-        info!("Image {} unpacked to {}", image_ref, container_rootfs);
-        Ok(container_rootfs)
+    fn unmount_stale_rootfs(path: &str) {
+        if let Ok(entries) = std::fs::read_dir(path) {
+            for entry in entries.flatten() {
+                let child = entry.path();
+                if child.is_dir() {
+                    // Try regular umount first, then lazy detach for busy mounts
+                    if nix::mount::umount(&child).is_err() {
+                        let _ = nix::mount::umount2(&child, nix::mount::MntFlags::MNT_DETACH);
+                    }
+                    // Recurse into subdirectories for nested mounts
+                    Self::unmount_stale_rootfs(child.to_str().unwrap_or(""));
+                }
+            }
+        }
+    }
+
+    fn backfill_oci_config(cache_path: &str, container_rootfs: &str) {
+        let oci_cfg = Path::new(cache_path).join(OCI_CONFIG_FILE);
+        let needs_guess = !oci_cfg.exists()
+            || {
+                let cfg = crate::cri::oci::read_image_config(cache_path);
+                cfg.entrypoint.as_ref().is_none_or(|ep| ep.is_empty())
+                    && cfg.cmd.as_ref().is_none_or(|c| c.is_empty())
+            };
+        if needs_guess {
+            let guessed = crate::cri::oci::guess_image_config(cache_path);
+            save_image_config(
+                cache_path,
+                guessed.entrypoint.clone(),
+                guessed.cmd.clone(),
+                guessed.env.clone(),
+                None,
+            );
+            Self::copy_oci_config(cache_path, container_rootfs);
+        }
     }
 
     fn unpack_layer(&self, layer: &ImageLayer, target: &str, index: usize) -> Result<()> {

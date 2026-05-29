@@ -66,13 +66,9 @@ impl ComponentRegistry {
         let trackers = ctx.store.get_all().await;
         for tracker in &trackers {
             if let Some(component) = self.get(tracker.resource.kind()) {
-                if let Err(e) = component.reconcile(ctx, tracker).await {
-                    tracing::error!(
-                        "Reconcile failed for {}: {}",
-                        tracker.resource.uid(),
-                        e
-                    );
-                }
+        if let Err(e) = component.reconcile(ctx, tracker).await {
+                tracing::error!("Reconcile failed for {}: {:#}", tracker.resource.uid(), e);
+        }
             }
         }
     }
@@ -82,7 +78,7 @@ impl ComponentRegistry {
 
         if let Some(component) = self.get(kind) {
             if let Err(e) = component.on_apply(ctx, resource).await {
-                tracing::error!("on_apply failed for {}: {}", resource.uid(), e);
+                tracing::error!("on_apply failed for {}: {:#}", resource.uid(), e);
             }
         }
 

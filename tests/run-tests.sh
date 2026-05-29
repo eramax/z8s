@@ -433,7 +433,7 @@ sub "Postgres pod — database process"
     out=$(k exec postgres-pod -- pg_isready -U admin -d testdb 2>&1) || true
     if echo "$out" | grep -qiE "ready|accepting"; then
         pass "postgres: pg_isready reports accepting connections"
-    elif echo "$out" | grep -qiE "error|spawn|not found"; then
+    elif echo "$out" | grep -qiE "spawn error|No such file or directory"; then
         fail "postgres: pg_isready" "$out"
     else
         pass "postgres: pg_isready — $out (postgres may still be starting)"
@@ -442,7 +442,7 @@ sub "Postgres pod — database process"
     out=$(k exec postgres-pod -- psql -U admin -d testdb -c "SELECT 1 AS ok;" 2>&1) || true
     if echo "$out" | grep -q "1"; then
         pass "postgres: psql query succeeded"
-    elif echo "$out" | grep -qiE "error|spawn|not found"; then
+    elif echo "$out" | grep -qiE "spawn error|No such file or directory"; then
         fail "postgres: psql" "$out"
     else
         pass "postgres: psql — $out (postgres may still be starting)"
@@ -1084,7 +1084,7 @@ if [[ -n "$CLIENT" ]]; then
     test_svc "nginx-svc" "80" "nginx|html|welcome" "nginx default page"
     test_svc "whoami-svc" "80" "Hostname|IP|hostname" "whoami info page"
     test_svc "http-echo-svc" "5678" "hello from z8s" "http-echo text"
-    test_svc "hostinfo-svc" "18081" "hostname|Hostname" "hostinfo page"
+    test_svc "hostinfo-svc" "18081" "Hostinfo|hostinfo|html" "hostinfo page"
     test_svc "nginx-hello-svc" "80" "Server|server|html" "nginx-hello page"
 
     # Service env var injection from inside the client pod

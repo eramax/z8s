@@ -242,11 +242,11 @@ fn spawn_with_pty(
         .stderr(Stdio::from(slave));
     child_cmd.kill_on_drop(true);
 
-    let ns_fds = rootfs_pid.and_then(|(_, pid)| try_open_namespace_fds(pid));
+    let ns = rootfs_pid.map(|(_, pid)| try_open_namespace_fds(pid));
 
     unsafe {
         child_cmd.as_std_mut().pre_exec(move || {
-            if let Some(ref ns) = ns_fds {
+            if let Some(ref ns) = ns {
                 // Try full namespace entry; if user-ns setns fails (common in nested
                 // environments), fall back to entering only mnt+net namespaces.
                 if enter_container_namespaces(ns, isolated_net, isolated_net).is_err() {
@@ -297,45 +297,48 @@ fn spawn_with_pipes(
     Ok(child_cmd)
 }
 
-struct ContainerNamespaces {
-    user: OwnedFd,
-    mnt: OwnedFd,
-    net: OwnedFd,
+struct NamespaceFds {
+    user: Option<OwnedFd>,
+    mnt: Option<OwnedFd>,
+    net: Option<OwnedFd>,
 }
 
-fn try_open_namespace_fds(container_pid: u32) -> Option<ContainerNamespaces> {
+/// Try to open each namespace fd independently. Returns whatever we can open
+/// (user namespace often fails for userns containers, but mnt/net may still work).
+fn try_open_namespace_fds(container_pid: u32) -> NamespaceFds {
     let open_flags = OFlag::O_RDONLY | OFlag::O_CLOEXEC;
     let mode = nix::sys::stat::Mode::empty();
-    let user_path = format!("/proc/{}/ns/user", container_pid);
-    let mnt_path = format!("/proc/{}/ns/mnt", container_pid);
-    let net_path = format!("/proc/{}/ns/net", container_pid);
-    let user_fd = nix::fcntl::open(user_path.as_str(), open_flags, mode).ok()?;
-    let mnt_fd = nix::fcntl::open(mnt_path.as_str(), open_flags, mode).ok()?;
-    let net_fd = nix::fcntl::open(net_path.as_str(), open_flags, mode).ok()?;
-    Some(ContainerNamespaces {
-        user: user_fd,
-        mnt: mnt_fd,
-        net: net_fd,
-    })
+    let open_one = |path: &str| nix::fcntl::open(path, open_flags, mode).ok();
+    NamespaceFds {
+        user: open_one(&format!("/proc/{}/ns/user", container_pid)),
+        mnt: open_one(&format!("/proc/{}/ns/mnt", container_pid)),
+        net: open_one(&format!("/proc/{}/ns/net", container_pid)),
+    }
 }
 
 fn enter_container_namespaces(
-    ns: &ContainerNamespaces,
+    ns: &NamespaceFds,
     isolated_net: bool,
     use_mnt_ns: bool,
 ) -> Result<(), std::io::Error> {
-    nix::sched::setns(&ns.user, CloneFlags::CLONE_NEWUSER).map_err(|e| {
-        std::io::Error::new(std::io::ErrorKind::Other, format!("setns(CLONE_NEWUSER): {e}"))
-    })?;
-    if use_mnt_ns {
-        nix::sched::setns(&ns.mnt, CloneFlags::CLONE_NEWNS).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::Other, format!("setns(CLONE_NEWNS): {e}"))
+    if let Some(ref user) = ns.user {
+        nix::sched::setns(user, CloneFlags::CLONE_NEWUSER).map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::Other, format!("setns(CLONE_NEWUSER): {e}"))
         })?;
     }
+    if use_mnt_ns {
+        if let Some(ref mnt) = ns.mnt {
+            nix::sched::setns(mnt, CloneFlags::CLONE_NEWNS).map_err(|e| {
+                std::io::Error::new(std::io::ErrorKind::Other, format!("setns(CLONE_NEWNS): {e}"))
+            })?;
+        }
+    }
     if isolated_net {
-        nix::sched::setns(&ns.net, CloneFlags::CLONE_NEWNET).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::Other, format!("setns(CLONE_NEWNET): {e}"))
-        })?;
+        if let Some(ref net) = ns.net {
+            nix::sched::setns(net, CloneFlags::CLONE_NEWNET).map_err(|e| {
+                std::io::Error::new(std::io::ErrorKind::Other, format!("setns(CLONE_NEWNET): {e}"))
+            })?;
+        }
     }
     Ok(())
 }
@@ -345,19 +348,23 @@ fn enter_container_namespaces(
 /// AppArmor restrictions, or multi-threaded caller that already has the
 /// container's user-ns caps via the parent process being the namespace owner).
 fn enter_namespaces_no_user(
-    ns: &ContainerNamespaces,
+    ns: &NamespaceFds,
     isolated_net: bool,
     use_mnt_ns: bool,
 ) -> Result<(), std::io::Error> {
     if use_mnt_ns {
-        nix::sched::setns(&ns.mnt, CloneFlags::CLONE_NEWNS).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::Other, format!("setns(CLONE_NEWNS): {e}"))
-        })?;
+        if let Some(ref mnt) = ns.mnt {
+            nix::sched::setns(mnt, CloneFlags::CLONE_NEWNS).map_err(|e| {
+                std::io::Error::new(std::io::ErrorKind::Other, format!("setns(CLONE_NEWNS): {e}"))
+            })?;
+        }
     }
     if isolated_net {
-        nix::sched::setns(&ns.net, CloneFlags::CLONE_NEWNET).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::Other, format!("setns(CLONE_NEWNET): {e}"))
-        })?;
+        if let Some(ref net) = ns.net {
+            nix::sched::setns(net, CloneFlags::CLONE_NEWNET).map_err(|e| {
+                std::io::Error::new(std::io::ErrorKind::Other, format!("setns(CLONE_NEWNET): {e}"))
+            })?;
+        }
     }
     Ok(())
 }
@@ -414,9 +421,14 @@ fn build_command(
             (None, None)
         };
 
-        let ns_fds = try_open_namespace_fds(container_pid);
+        let ns = try_open_namespace_fds(container_pid);
+        let can_enter_mnt = ns.mnt.is_some();
         let fs_isolated = rootfs::container_fs_isolated(container_pid, root);
-        let (exec_path, prog_args) = if fs_isolated {
+        eprintln!("DEBUG_EXEC: cmd={cmd} root={root} fs_isolated={fs_isolated} can_enter_mnt={can_enter_mnt} mnt={} user={}",
+            ns.mnt.is_some(), ns.user.is_some());
+        // Use in-container paths only when we can enter the mount namespace.
+        // Otherwise use host-rootfs paths so wrap_dynamic_linker can find the binary.
+        let (exec_path, prog_args) = if fs_isolated && can_enter_mnt {
             rootfs::build_container_argv_in_mount_ns(cmd, &args_owned, root)
         } else {
             rootfs::build_container_argv(cmd, &args_owned, root)
@@ -425,7 +437,8 @@ fn build_command(
         // container rootfs — don't enter the mount namespace so the host PATH
         // is searched instead (e.g. wget in a scratch/minimal image).
         let binary_in_rootfs = exec_path.contains('/');
-        let use_mnt_ns = fs_isolated && binary_in_rootfs;
+        let use_mnt_ns = fs_isolated && binary_in_rootfs && can_enter_mnt;
+        eprintln!("DEBUG_EXEC: exec_path={exec_path} binary_in_rootfs={binary_in_rootfs} use_mnt_ns={use_mnt_ns}");
         let (program, prog_args) = if use_mnt_ns {
             (exec_path, prog_args)
         } else {
@@ -437,26 +450,32 @@ fn build_command(
             c.arg(a);
         }
         apply_env(&mut c);
-
-        if let Some(ns) = ns_fds {
-            let use_mnt = use_mnt_ns;
-            let iso_net = isolated_net;
-            unsafe {
-                c.as_std_mut().pre_exec(move || {
-                    if enter_container_namespaces(&ns, iso_net, use_mnt).is_err() {
-                        let _ = enter_namespaces_no_user(&ns, iso_net, use_mnt);
-                    }
-                    if let Some(g) = c_gid {
-                        let _ = nix::unistd::setgid(nix::unistd::Gid::from_raw(g));
-                    }
-                    if let Some(u) = c_uid {
-                        let _ = nix::unistd::setuid(nix::unistd::Uid::from_raw(u));
-                    }
-                    Ok(())
-                });
+        // When using the dynamic linker fallback (no mount namespace entry),
+        // set LD_LIBRARY_PATH so libraries in the rootfs can be found.
+        if !use_mnt_ns {
+            let r = root.trim_end_matches('/');
+            if program.starts_with(r) {
+                let ld_path = format!("{r}/usr/local/lib:{r}/usr/lib:{r}/lib");
+                eprintln!("DEBUG_EXEC: setting LD_LIBRARY_PATH={ld_path}");
+                c.env("LD_LIBRARY_PATH", ld_path);
             }
-        } else {
-            c.current_dir(root);
+        }
+
+        let use_mnt = use_mnt_ns;
+        let iso_net = isolated_net;
+        unsafe {
+            c.as_std_mut().pre_exec(move || {
+                if enter_container_namespaces(&ns, iso_net, use_mnt).is_err() {
+                    let _ = enter_namespaces_no_user(&ns, iso_net, use_mnt);
+                }
+                if let Some(g) = c_gid {
+                    let _ = nix::unistd::setgid(nix::unistd::Gid::from_raw(g));
+                }
+                if let Some(u) = c_uid {
+                    let _ = nix::unistd::setuid(nix::unistd::Uid::from_raw(u));
+                }
+                Ok(())
+            });
         }
         c
     } else {

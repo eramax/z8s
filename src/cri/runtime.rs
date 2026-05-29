@@ -383,7 +383,28 @@ impl ProcessSupervisor {
         let rootfs_owned = rootfs_path.to_string();
         let entrypoint_owned = entrypoint.to_string();
         let args_owned = cmd_args.to_vec();
-        let env_owned = env_vars.to_vec();
+
+        // Merge OCI image env into container env (Pod-specified env takes precedence).
+        // OCI env is read from the rootfs after image unpack.
+        let oci_env = crate::cri::oci::read_image_config(&rootfs_owned).env.unwrap_or_default();
+        let mut env_owned: Vec<(String, String)> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        // OCI env first (lower priority) — format: ["KEY=VALUE", ...]
+        for entry in &oci_env {
+            if let Some(eq) = entry.find('=') {
+                let key = entry[..eq].to_string();
+                let val = entry[eq+1..].to_string();
+                if seen.insert(key.clone()) {
+                    env_owned.push((key, val));
+                }
+            }
+        }
+        // Pod env second (higher priority — overwrites OCI defaults)
+        for (k, v) in env_vars {
+            if seen.insert(k.clone()) {
+                env_owned.push((k.clone(), v.clone()));
+            }
+        }
 
         match unsafe { nix::unistd::fork() } {
             Ok(nix::unistd::ForkResult::Parent { child }) => {
@@ -580,7 +601,25 @@ impl ProcessSupervisor {
         let rootfs_owned = rootfs_path.to_string();
         let entrypoint_owned = entrypoint.to_string();
         let args_owned: Vec<String> = cmd_args.to_vec();
-        let env_owned: Vec<(String, String)> = env_vars.to_vec();
+
+        // Merge OCI image env into container env (Pod-specified env takes precedence)
+        let oci_env = crate::cri::oci::read_image_config(&rootfs_owned).env.unwrap_or_default();
+        let mut env_owned: Vec<(String, String)> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for entry in &oci_env {
+            if let Some(eq) = entry.find('=') {
+                let key = entry[..eq].to_string();
+                let val = entry[eq+1..].to_string();
+                if seen.insert(key.clone()) {
+                    env_owned.push((key, val));
+                }
+            }
+        }
+        for (k, v) in env_vars {
+            if seen.insert(k.clone()) {
+                env_owned.push((k.clone(), v.clone()));
+            }
+        }
 
         match unsafe { nix::unistd::fork() } {
             Ok(nix::unistd::ForkResult::Parent { child }) => {

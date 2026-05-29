@@ -19,6 +19,8 @@ spec:
       containers:
       - name: python
         image: python:3-slim
+        ports:
+        - containerPort: 18080
         command: ["/bin/sh", "-c"]
         args:
         - |
