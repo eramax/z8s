@@ -158,6 +158,13 @@ impl ProcessTracker {
                 if let AnyResource::Pod(pod) = &t.resource { pod.spec.as_ref()?.restart_policy.clone() } else { None }
             }).unwrap_or_else(|| "Always".to_string());
             let pod_uid = pod_tracker.map(|t| t.resource.uid()).unwrap_or_default();
+            // Kill any orphaned child processes from the container's process group
+            // These survive the parent exit and can hold ports (e.g., postgres pg_ctl spawn)
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(-(pid as i32)),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+
             let should_restart = match restart_policy.as_str() {
                 "Always" => true, "OnFailure" => exit_code != 0, "Never" => false, _ => true,
             };

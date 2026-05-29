@@ -1026,9 +1026,14 @@ impl ProcessSupervisor {
         if let Some(rc) = running.remove(container_id) {
             if let Some(pid) = rc.instance.pid {
                 info!("Stopping container {} (PID {})", container_id, pid);
-                let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
+                // Kill the entire process group (container is session leader via setsid())
+                // Negative PID targets the process group, killing orphaned children
+                let pgid = nix::unistd::Pid::from_raw(-(pid as i32));
+                let _ = kill(pgid, Signal::SIGTERM);
                 tokio::time::sleep(Duration::from_millis(500)).await;
-                let _ = kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
+                let _ = kill(pgid, Signal::SIGKILL);
+                // Also kill the main PID in case the pgid kill missed it
+                let _ = kill(nix::unistd::Pid::from_raw(pid as i32), Signal::SIGKILL);
             }
         }
     }
