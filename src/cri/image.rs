@@ -4,7 +4,6 @@ use oci_distribution::config::ConfigFile;
 use oci_distribution::secrets::RegistryAuth;
 use oci_distribution::Reference;
 use std::path::Path;
-use std::time::Duration;
 use tracing::{debug, info};
 
 use crate::cri::oci::{save_image_config, OCI_CONFIG_FILE};
@@ -25,14 +24,6 @@ fn z8s_base_dir() -> String {
         "/var/lib/z8s".to_string()
     } else {
         format!("{}/.local/share/z8s", std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string()))
-    }
-}
-
-/// Guard that removes a lock file on drop.
-struct LockGuard(String);
-impl Drop for LockGuard {
-    fn drop(&mut self) {
-        std::fs::remove_file(&self.0).ok();
     }
 }
 
@@ -155,44 +146,7 @@ impl ImageManager {
             }
         };
 
-        // Apply a file-based lock so concurrent pulls of the same image
-        // don't both extract to cache_path simultaneously.
-        let lock_path = format!("{cache_path}.lock");
-        loop {
-            match std::fs::OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&lock_path)
-            {
-                Ok(mut f) => {
-                    use std::io::Write;
-                    let _ = f.write_fmt(format_args!("{}", std::process::id()));
-                    drop(f);
-                    break;
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    // Another thread/process is extracting; wait and retry
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    // After acquiring lock, recheck cache (it may be ready now)
-                    if Path::new(&cache_meta).exists() {
-                        if let Ok(cached_ref) = std::fs::read_to_string(&cache_meta) {
-                            if cached_ref.trim() == image_ref {
-                                info!("Cache ready after waiting for concurrent pull of {}", image_ref);
-                                let _ = std::fs::remove_file(&lock_path);
-                                return Self::copy_cache_to_container(&cache_path, &container_rootfs, &meta_path, image_ref);
-                            }
-                        }
-                    }
-                    continue;
-                }
-                Err(e) => anyhow::bail!("Failed to create image lock {}: {}", lock_path, e),
-            }
-        }
-
-        let _lock_guard = LockGuard(lock_path.clone());
-
-        // Double-check after acquiring lock: another thread may have populated the cache
-        // while we were waiting for the lock or pulling.
+        // Double-check after pull: another thread may have populated the cache while we pulled
         if Path::new(&cache_meta).exists() {
             if let Ok(cached_ref) = std::fs::read_to_string(&cache_meta) {
                 if cached_ref.trim() == image_ref {

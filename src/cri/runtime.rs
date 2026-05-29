@@ -266,10 +266,35 @@ impl ProcessSupervisor {
         crate::cri::volumes::cleanup_emptydir(pod_uid);
 
         {
-            let running = self.running.lock().await;
+            let mut running = self.running.lock().await;
             if running.keys().any(|cid| cid.starts_with(&format!("{}-", pod_name))) {
                 info!("Pod {} already running, skipping duplicate start", pod_name);
                 return Ok(());
+            }
+            // Insert placeholder entries so concurrent reconcile sees the pod as in-progress
+            for cfg in &spec.containers {
+                let cid = &cfg.container_id;
+                if !running.contains_key(cid.as_str()) {
+                    running.insert(cid.clone(), RunningContainer {
+                        child: None,
+                        instance: ContainerInstance {
+                            container_id: cid.clone(),
+                            container_name: cfg.container_name.clone(),
+                            image: cfg.image.clone(),
+                            pid: None,
+                            rootfs: String::new(),
+                            started_at: None,
+                            env_vars: Vec::new(),
+                            published_ports: std::collections::HashMap::new(),
+                            isolated_net: false,
+                        },
+                        restart_count: 0,
+                        log_buffer: Arc::new(Mutex::new(Vec::new())),
+                        ready: Arc::new(AtomicBool::new(false)),
+                        healthy: Arc::new(Mutex::new(true)),
+                        port_publish: None,
+                    });
+                }
             }
         }
 
