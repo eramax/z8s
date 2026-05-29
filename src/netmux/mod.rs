@@ -16,7 +16,8 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result};
 use tracing::{info, warn};
 
-use pool::{IpPool, Ipv4Cidr};
+pub use pool::Ipv4Cidr;
+use pool::IpPool;
 pub use nftables::NftEngine;
 
 /// Unified network engine — one pool, veth management, host routing, nftables.
@@ -71,6 +72,10 @@ impl NetMux {
 
     pub fn count_free(&self) -> usize {
         self.pool.lock().expect("lock poisoned").count_free()
+    }
+
+    pub fn allocate_subnet(&self, prefix: u8) -> Option<Ipv4Cidr> {
+        self.pool.lock().expect("lock poisoned").allocate_subnet(prefix)
     }
 
     /// Attach a pod to the network: create veth, assign IP, add host route.

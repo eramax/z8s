@@ -106,7 +106,7 @@ cleanup() {
     tail -40 "$LOG"
     [[ $FAIL -eq 0 ]] && exit 0 || exit 1
 }
-trap cleanup EXIT
+#trap cleanup EXIT
 
 # ── 0. Server startup ──────────────────────────────────────────────────────────
 section "0. Server startup"

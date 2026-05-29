@@ -432,9 +432,11 @@ pub fn del_link(ifindex: u32) -> Result<()> {
 // ── Utility ────────────────────────────────────────────────────────────────
 
 pub fn enable_ip_forward() -> Result<()> {
-    std::fs::write("/proc/sys/net/ipv4/ip_forward", "1\n")
-        .context("Failed to enable ip_forward")?;
-    Ok(())
+    let val = "1\n".as_bytes().to_vec();
+    tokio::task::block_in_place(|| {
+        std::fs::write("/proc/sys/net/ipv4/ip_forward", &val)
+            .context("Failed to enable ip_forward")
+    })
 }
 
 /// Apply system hardening recommended by the plan:

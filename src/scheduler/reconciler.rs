@@ -21,6 +21,7 @@ impl Reconciler {
 
     pub async fn run(&self) {
         let mut ticker = tokio::time::interval(Duration::from_secs(2));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             ticker.tick().await;
             let reaped = self.process_tracker.reap_zombies();

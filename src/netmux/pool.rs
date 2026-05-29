@@ -110,6 +110,33 @@ impl IpPool {
     pub fn cidr(&self) -> &Ipv4Cidr {
         &self.cidr
     }
+
+    /// Allocate a contiguous subnet from the pool.
+    /// Returns the CIDR of the allocated block, or None if unavailable.
+    pub fn allocate_subnet(&mut self, subnet_prefix: u8) -> Option<Ipv4Cidr> {
+        let subnet_size = 1u32 << (32 - subnet_prefix as u32);
+        let free_vec: Vec<u32> = self.free.iter().copied().collect();
+        if (free_vec.len() as u32) < subnet_size {
+            return None;
+        }
+        // Find first aligned contiguous block
+        for window in free_vec.windows(subnet_size as usize) {
+            let start = window[0];
+            if (start & (subnet_size - 1)) != 0 {
+                continue;
+            }
+            if window.iter().enumerate().all(|(i, &v)| v == start + i as u32) {
+                for ip in start..start + subnet_size {
+                    self.free.remove(&ip);
+                }
+                return Some(Ipv4Cidr {
+                    network: Ipv4Addr::from(start),
+                    prefix: subnet_prefix,
+                });
+            }
+        }
+        None
+    }
 }
 
 #[cfg(test)]
