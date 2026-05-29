@@ -76,14 +76,22 @@ impl NetworkManager {
                     old.handle.abort();
                 }
                 let listen_addr = format!("{}:{}", cluster_ip, svc_port.port);
-                let port = svc_port.port as u16;
+                let svc_port_num = svc_port.port as u16;
+                // Resolve container port: targetPort can be an integer or a port name
+                let container_port = match &target_port {
+                    IntOrString::Int(n) => *n as u16,
+                    IntOrString::String(name) => {
+                        // Look up the named port from pod container specs
+                        Self::resolve_named_port(&self.store, &svc_ns, name).await.unwrap_or(svc_port_num)
+                    }
+                };
 
                 // Resolve backend pods matching the selector
-                let backends = Self::resolve_backend_pods(&self.store, &self.process_tracker, &selector, &svc_ns, port).await;
+                let backends = Self::resolve_backend_pods(&self.store, &self.process_tracker, &selector, &svc_ns, container_port).await;
                 tracing::info!("resolve_backend_pods for {}: found {} backends", key, backends.len());
                 let cluster_ip_addr: std::net::Ipv4Addr = cluster_ip.parse().unwrap_or(std::net::Ipv4Addr::new(10, 96, 0, 1));
                 tracing::info!("Service {} → ClusterIP {} — adding DNAT with {} backends", key, listen_addr, backends.len());
-                if let Err(e) = self.netmux.add_dnat(cluster_ip_addr, port, &backends) {
+                if let Err(e) = self.netmux.add_dnat(cluster_ip_addr, svc_port_num, &backends) {
                     tracing::error!("add_dnat failed for {}: {:?}", key, e);
                 }
                 proxies.insert(port_key, RunningProxy { handle: tokio::spawn(async { /* DNAT via nftables */ }) });
@@ -97,11 +105,16 @@ impl NetworkManager {
                         old.handle.abort();
                     }
                     let listen_addr = format!("0.0.0.0:{}", node_port);
-                    let port = svc_port.port as u16;
-                    let backends = Self::resolve_backend_pods(&self.store, &self.process_tracker, &selector, &svc_ns, port).await;
+                    let container_port = match &target_port {
+                        IntOrString::Int(n) => *n as u16,
+                        IntOrString::String(name) => {
+                            Self::resolve_named_port(&self.store, &svc_ns, name).await.unwrap_or(svc_port.port as u16)
+                        }
+                    };
+                    let backends = Self::resolve_backend_pods(&self.store, &self.process_tracker, &selector, &svc_ns, container_port).await;
                     let cluster_ip_addr: std::net::Ipv4Addr = cluster_ip.parse().unwrap_or(std::net::Ipv4Addr::new(10, 96, 0, 1));
                     tracing::info!("Service {} → NodePort {} — adding DNAT with {} backends", key, listen_addr, backends.len());
-                    if let Err(e) = self.netmux.add_dnat(cluster_ip_addr, port, &backends) {
+                    if let Err(e) = self.netmux.add_dnat(cluster_ip_addr, svc_port.port as u16, &backends) {
                         tracing::error!("add_dnat failed for {}: {:?}", key, e);
                     }
                     proxies.insert(port_key, RunningProxy { handle: tokio::spawn(async { /* DNAT via nftables */ }) });
@@ -131,6 +144,26 @@ impl NetworkManager {
             }
         }
         backends
+    }
+
+    /// Resolve a named port from pod containers to a numeric port.
+    async fn resolve_named_port(store: &ResourceStore, ns: &str, name: &str) -> Option<u16> {
+        let pods = store.get_by_kind("Pod").await;
+        for t in &pods {
+            if t.resource.namespace() != ns { continue; }
+            let containers = crate::types::extract_containers(&t.resource);
+            for c in &containers {
+                if let Some(ports) = &c.ports {
+                    for p in ports {
+                        if p.name.as_deref() == Some(name) {
+                            return Some(p.container_port as u16);
+                        }
+                    }
+                }
+            }
+        }
+        // Fallback: try to parse as number (e.g., targetPort was set as "8080")
+        name.parse::<u16>().ok()
     }
 
     /// Re-bind service proxies when a pod becomes ready (pods often start after their Service).
