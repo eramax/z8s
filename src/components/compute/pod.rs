@@ -26,6 +26,16 @@ impl Component for PodResource {
         if tracker.state == ResourceState::Pending {
             ctx.process_tracker.start_pod(&tracker.resource).await?;
         }
+        // When pod is running AND ready (has IP), sync services for DNAT
+        if tracker.state == ResourceState::Running && ctx.process_tracker.is_ready(tracker.resource.name()).await {
+            if let AnyResource::Pod(pod) = &tracker.resource {
+                let labels = pod.metadata.labels.clone().unwrap_or_default();
+                let ns = pod.metadata.namespace.as_deref().unwrap_or("default");
+                if let Err(e) = ctx.net.sync_services_for_labels(ns, &labels).await {
+                    tracing::warn!("sync_services_for_labels failed: {}", e);
+                }
+            }
+        }
         Ok(())
     }
 

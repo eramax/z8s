@@ -4,11 +4,15 @@ use tracing::{info, warn};
 
 use super::netlink;
 
-/// Veth naming: `veth-<uid8>` where `<uid8>` = first 8 hex chars of pod UID.
+/// Veth naming: `veth-<uid8>` where `<uid8>` = last 8 hex chars of pod UID.
 /// Linux interface name limit is 15 chars.
+/// Uses last 8 hex chars to avoid collisions from common UID prefixes
+/// (e.g., "Pod/default/nginx-deploy-pod-<suffix>").
 pub fn veth_name_from_uid(uid: &str) -> String {
-    let hex: String = uid.chars().filter(|c| c.is_ascii_hexdigit()).take(8).collect();
-    format!("veth-{}", hex)
+    let hex: Vec<char> = uid.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+    let start = hex.len().saturating_sub(8);
+    let name: String = hex[start..].iter().collect();
+    format!("veth-{}", name)
 }
 
 /// Peer side of veth pair (inside pod netns). Capped at 15 chars (Linux IFNAMSIZ).
@@ -182,14 +186,17 @@ mod tests {
     #[test]
     fn test_veth_name_from_uid_15chars() {
         let name = veth_name_from_uid("a1b2c3d4-e5f6-7890-abcd-ef1234567890");
-        assert_eq!(name, "veth-a1b2c3d4");
+        assert_eq!(name, "veth-34567890");
         assert!(name.len() <= 15, "name {} exceeds 15 chars", name);
     }
 
     #[test]
-    fn test_veth_peer_name_15chars() {
-        let host = veth_name_from_uid("a1b2c3d4-e5f6-7890-abcd-ef1234567890");
-        let peer = veth_peer_name(&host);
-        assert!(peer.len() <= 15, "peer name {} exceeds 15 chars", peer);
+    fn test_veth_name_same_prefix_unique_suffix() {
+        // Two pods in the same deployment should get different veth names
+        let name1 = veth_name_from_uid("Pod/default/nginx-deploy-pod-bdaf80a2");
+        let name2 = veth_name_from_uid("Pod/default/nginx-deploy-pod-19d6b9c5");
+        assert_ne!(name1, name2, "veth names must not collide");
+        assert_eq!(name1, "veth-bdaf80a2");
+        assert_eq!(name2, "veth-19d6b9c5");
     }
 }

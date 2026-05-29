@@ -75,6 +75,7 @@ impl NetMux {
 
     /// Attach a pod to the network: create veth, assign IP, add host route.
     /// Returns the allocated pod IP, host veth ifindex, and peer veth ifindex.
+    /// On failure, cleans up any partially-created resources.
     pub fn attach_pod(&self, pod_uid: &str) -> Result<(Ipv4Addr, u32, u32)> {
         let pod_ip = self.allocate_ip()
             .context("No IPs available in pod CIDR")?;
@@ -83,11 +84,15 @@ impl NetMux {
             veth::create_pod_veth(pod_uid)
                 .context("create_pod_veth")?;
 
-        veth::bring_up_veth(host_idx)
-            .context("bring_up_veth")?;
+        if let Err(e) = veth::bring_up_veth(host_idx) {
+            self.rollback_veth(pod_uid, &pod_ip, host_idx);
+            return Err(e).context("bring_up_veth");
+        }
 
-        veth::add_pod_host_route(&pod_ip, host_idx)
-            .context("add_pod_host_route")?;
+        if let Err(e) = veth::add_pod_host_route(&pod_ip, host_idx) {
+            self.rollback_veth(pod_uid, &pod_ip, host_idx);
+            return Err(e).context("add_pod_host_route");
+        }
 
         info!(
             "Attached pod {} -> IP {} via {} (host ifindex {}, peer ifindex {})",
@@ -178,8 +183,8 @@ impl NetMux {
     }
 
     /// Initialize nftables tables and chains.
-    pub fn init_nftables(&self) -> Result<()> {
-        self.nft.init()
+    pub fn init_nftables(&self, pod_cidr: &str) -> Result<()> {
+        self.nft.init(pod_cidr)
     }
 
     /// Add MASQUERADE rule for pod internet access (per-VNet).
@@ -238,6 +243,15 @@ impl NetMux {
     /// Ensure loopback is up.
     pub fn ensure_loopback_up() -> Result<()> {
         netlink::ensure_loopback_up()
+    }
+
+    /// Rollback partially-created veth resources on failure.
+    fn rollback_veth(&self, pod_uid: &str, pod_ip: &Ipv4Addr, host_ifindex: u32) {
+        let host_name = veth::veth_name_from_uid(pod_uid);
+        veth::del_pod_host_route(pod_ip, host_ifindex).ok();
+        veth::delete_veth(&host_name).ok();
+        self.release_ip(*pod_ip);
+        warn!("Rolled back veth for {}", pod_uid);
     }
 }
 

@@ -65,7 +65,8 @@ impl IpPool {
                 free.insert(network + i);
             }
         } else {
-            for i in 1..(total - 1) {
+            // Skip first host (network+1 = gateway), start from network+2
+            for i in 2..(total - 1) {
                 free.insert(network + i);
             }
         }
@@ -132,9 +133,10 @@ mod tests {
     fn test_pool_alloc_release() {
         let cidr = Ipv4Cidr::parse("10.42.0.0/30").unwrap();
         let mut pool = IpPool::new(cidr);
-        assert_eq!(pool.count_free(), 2); // .1 and .2
+        // /30 has 4 IPs: network=0, gateway=1 reserved, 2-3 usable, broadcast=3 excluded
+        // So only IP .2 is available
+        assert_eq!(pool.count_free(), 1);
         let ip1 = pool.allocate().unwrap();
-        let _ip2 = pool.allocate().unwrap();
         assert!(pool.allocate().is_none());
         pool.release(ip1);
         assert_eq!(pool.count_free(), 1);
@@ -142,14 +144,16 @@ mod tests {
 
     #[test]
     fn test_pool_deterministic_order() {
-        let cidr = Ipv4Cidr::parse("10.42.0.0/30").unwrap();
+        let cidr = Ipv4Cidr::parse("10.42.0.0/29").unwrap();
         let mut pool = IpPool::new(cidr);
+        // /29 has 8 IPs: network=0, gateway=1 reserved, 2-5 usable, broadcast=7 excluded
         let ip1 = pool.allocate().unwrap();
         let ip2 = pool.allocate().unwrap();
         assert_ne!(ip1, ip2);
+        assert_eq!(format!("{}", ip1), "10.42.0.2");
+        assert_eq!(format!("{}", ip2), "10.42.0.3");
         pool.release(ip1);
         pool.release(ip2);
-        // Same allocation order after release
         let ip3 = pool.allocate().unwrap();
         assert_eq!(ip3, ip1);
     }

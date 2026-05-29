@@ -54,8 +54,10 @@ impl NetworkManager {
 
         let selector: BTreeMap<String, String> = spec.selector.clone().unwrap_or_default();
         if selector.is_empty() {
+            tracing::info!("sync_service_proxies {}: empty selector, skipping", key);
             return; // headless or external-name services — no proxy
         }
+        tracing::info!("sync_service_proxies {}: selector={:?}", key, selector);
 
         let svc_type = spec.type_.as_deref().unwrap_or("ClusterIP");
         let cluster_ip = spec.cluster_ip.as_deref().unwrap_or("").to_string();
@@ -78,10 +80,13 @@ impl NetworkManager {
 
                 // Resolve backend pods matching the selector
                 let backends = Self::resolve_backend_pods(&self.store, &self.process_tracker, &selector, &svc_ns, port).await;
+                tracing::info!("resolve_backend_pods for {}: found {} backends", key, backends.len());
                 if !backends.is_empty() {
                     let cluster_ip_addr: std::net::Ipv4Addr = cluster_ip.parse().unwrap_or(std::net::Ipv4Addr::new(10, 96, 0, 1));
-                    info!("Service {} → ClusterIP {} — adding DNAT with {} backends", key, listen_addr, backends.len());
-                    self.netmux.add_dnat(cluster_ip_addr, port, &backends).ok();
+                    tracing::info!("Service {} → ClusterIP {} — adding DNAT with {} backends", key, listen_addr, backends.len());
+                    if let Err(e) = self.netmux.add_dnat(cluster_ip_addr, port, &backends) {
+                        tracing::error!("add_dnat failed for {}: {}", key, e);
+                    }
                 }
                 proxies.insert(port_key, RunningProxy { handle: tokio::spawn(async { /* DNAT via nftables */ }) });
             }
@@ -99,7 +104,9 @@ impl NetworkManager {
                     if !backends.is_empty() {
                         let cluster_ip_addr: std::net::Ipv4Addr = cluster_ip.parse().unwrap_or(std::net::Ipv4Addr::new(10, 96, 0, 1));
                         info!("Service {} → NodePort {} — adding DNAT with {} backends", key, listen_addr, backends.len());
-                        self.netmux.add_dnat(cluster_ip_addr, port, &backends).ok();
+                    if let Err(e) = self.netmux.add_dnat(cluster_ip_addr, port, &backends) {
+                        tracing::error!("add_dnat failed for {}: {}", key, e);
+                    }
                     }
                     proxies.insert(port_key, RunningProxy { handle: tokio::spawn(async { /* DNAT via nftables */ }) });
                 }
@@ -420,6 +427,7 @@ impl Component for ServiceResource {
 
     async fn on_apply(&self, _ctx: &ReconcileContext, resource: &AnyResource) -> Result<()> {
         if let AnyResource::Service(svc) = resource {
+            tracing::info!("ServiceResource::on_apply for {}", svc.metadata.name.as_deref().unwrap_or("?"));
             self.network.sync_service(svc).await;
         }
         Ok(())

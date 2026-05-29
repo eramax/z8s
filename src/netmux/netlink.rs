@@ -22,8 +22,10 @@ pub const NLM_F_ACK: u16 = 4;
 
 pub const NLMSG_ERROR: u16 = 2;
 
-pub const RTN_UNICAST: u8 = 0;
+pub const RTN_UNICAST: u8 = 1;
+pub const RT_TABLE_MAIN: u32 = 254;
 pub const RT_SCOPE_UNIVERSE: u8 = 0;
+pub const RT_SCOPE_LINK: u8 = 253;
 pub const RTPROT_BOOT: u8 = 3;
 
 pub const IFLA_IFNAME: u16 = 3;
@@ -50,16 +52,18 @@ pub const IFF_RUNNING: i32 = 0x40;
 
 // ── Netlink helpers ─────────────────────────────────────────────────────────
 
-/// Open a netlink socket. Uses nix::sys::socket to get proper IO safety
-/// (OwnedFd tracking) required by Rust edition 2024.
+/// Open a netlink socket with explicit bind.
 pub fn netlink_socket() -> Result<std::os::fd::OwnedFd> {
-    nix::sys::socket::socket(
+    let fd = nix::sys::socket::socket(
         nix::sys::socket::AddressFamily::Netlink,
         nix::sys::socket::SockType::Raw,
         nix::sys::socket::SockFlag::SOCK_CLOEXEC,
         nix::sys::socket::SockProtocol::NetlinkRoute,
     )
-    .context("netlink socket")
+    .context("netlink socket")?;
+    let addr = nix::sys::socket::NetlinkAddr::new(0, 0);
+    nix::sys::socket::bind(fd.as_raw_fd(), &addr).context("netlink bind")?;
+    Ok(fd)
 }
 
 pub fn send_nlmsg(fd: &std::os::fd::OwnedFd, buf: &[u8]) -> Result<()> {
@@ -152,14 +156,8 @@ pub fn create_veth_pair(host_name: &str, peer_name: &str, peer_pid: Option<u32>)
     let fd = netlink_socket()?;
 
     let mut peer_data = Vec::new();
-    // IFLA_VETH_PEER must start with a full ifinfomsg struct
+    // IFLA_VETH_PEER must start with a full ifinfomsg struct (all zeros, matching ip command)
     let mut peer_infomsg = vec![0u8; 16];
-    peer_infomsg[0] = 0; // family = AF_UNSPEC
-    peer_infomsg[1] = 0; // padding
-    peer_infomsg[2..4].copy_from_slice(&0u16.to_ne_bytes()); // type
-    peer_infomsg[4..8].copy_from_slice(&0i32.to_ne_bytes()); // index
-    peer_infomsg[8..12].copy_from_slice(&(IFF_UP as u32).to_ne_bytes()); // flags
-    peer_infomsg[12..16].copy_from_slice(&0xFFFFFFFFu32.to_ne_bytes()); // change mask
     peer_data.extend_from_slice(&peer_infomsg);
     peer_data.extend_from_slice(&nlattr_bytes(IFLA_IFNAME, peer_name.as_bytes()));
     if let Some(pid) = peer_pid {
@@ -169,7 +167,8 @@ pub fn create_veth_pair(host_name: &str, peer_name: &str, peer_pid: Option<u32>)
 
     let mut info_data = Vec::new();
     info_data.extend_from_slice(&nlattr_bytes(IFLA_INFO_KIND, b"veth\0"));
-    info_data.extend_from_slice(&peer_nested);
+    // IFLA_INFO_DATA wraps the peer info
+    info_data.extend_from_slice(&nlattr_nested(IFLA_INFO_DATA, &peer_nested));
     let info_nested = nlattr_nested(IFLA_LINKINFO, &info_data);
 
     let ifname_attr = nlattr_bytes(IFLA_IFNAME, host_name.as_bytes());
@@ -289,8 +288,9 @@ pub fn add_route(dest: &Ipv4Addr, prefix: u8, gateway: Option<&Ipv4Addr>, oif: O
         attrs.push(nlattr(RTA_OIF, &idx));
     }
 
+    let scope = if gateway.is_some() { RT_SCOPE_UNIVERSE } else { RT_SCOPE_LINK };
     let attrs_len: usize = attrs.iter().map(|a| a.len()).sum();
-    let total_len = 16 + 16 + attrs_len;
+    let total_len = 16 + 12 + attrs_len; // nlmsghdr(16) + rtmsg(12) + attrs
     let mut buf = vec![0u8; total_len];
 
     buf[0..4].copy_from_slice(&(total_len as u32).to_ne_bytes());
@@ -299,18 +299,18 @@ pub fn add_route(dest: &Ipv4Addr, prefix: u8, gateway: Option<&Ipv4Addr>, oif: O
     buf[8..12].copy_from_slice(&1u32.to_ne_bytes());
     buf[12..16].copy_from_slice(&0u32.to_ne_bytes());
 
+    // rtmsg: struct rtmsg — order: family, dst_len, src_len, tos, table, protocol, scope, type, flags
     buf[16] = AF_INET as u8;
     buf[17] = prefix;
     buf[18] = 0;
     buf[19] = 0;
-    buf[20] = RTN_UNICAST;
-    buf[21] = RT_SCOPE_UNIVERSE;
-    buf[22] = RTPROT_BOOT;
-    buf[23] = 0;
-    buf[24..28].copy_from_slice(&0u32.to_ne_bytes());
-    buf[28..32].copy_from_slice(&0u32.to_ne_bytes());
+    buf[20] = RT_TABLE_MAIN as u8;
+    buf[21] = RTPROT_BOOT;
+    buf[22] = scope;
+    buf[23] = RTN_UNICAST;
+    buf[24..28].copy_from_slice(&0u32.to_ne_bytes()); // rtm_flags
 
-    let mut offset = 32;
+    let mut offset = 28;
     for attr in &attrs {
         buf[offset..offset+attr.len()].copy_from_slice(attr);
         offset += attr.len();
@@ -338,7 +338,7 @@ pub fn del_route(dest: &Ipv4Addr, prefix: u8, gateway: Option<&Ipv4Addr>, oif: O
     }
 
     let attrs_len: usize = attrs.iter().map(|a| a.len()).sum();
-    let total_len = 16 + 16 + attrs_len;
+    let total_len = 16 + 12 + attrs_len; // nlmsghdr(16) + rtmsg(12) + attrs
     let mut buf = vec![0u8; total_len];
 
     buf[0..4].copy_from_slice(&(total_len as u32).to_ne_bytes());
@@ -347,18 +347,18 @@ pub fn del_route(dest: &Ipv4Addr, prefix: u8, gateway: Option<&Ipv4Addr>, oif: O
     buf[8..12].copy_from_slice(&1u32.to_ne_bytes());
     buf[12..16].copy_from_slice(&0u32.to_ne_bytes());
 
+    // rtmsg: order: family, dst_len, src_len, tos, table, protocol, scope, type, flags
     buf[16] = AF_INET as u8;
     buf[17] = prefix;
     buf[18] = 0;
     buf[19] = 0;
-    buf[20] = RTN_UNICAST;
-    buf[21] = RT_SCOPE_UNIVERSE;
-    buf[22] = RTPROT_BOOT;
-    buf[23] = 0;
+    buf[20] = RT_TABLE_MAIN as u8;
+    buf[21] = RTPROT_BOOT;
+    buf[22] = RT_SCOPE_UNIVERSE;
+    buf[23] = RTN_UNICAST;
     buf[24..28].copy_from_slice(&0u32.to_ne_bytes());
-    buf[28..32].copy_from_slice(&0u32.to_ne_bytes());
 
-    let mut offset = 32;
+    let mut offset = 28;
     for attr in &attrs {
         buf[offset..offset+attr.len()].copy_from_slice(attr);
         offset += attr.len();

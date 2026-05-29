@@ -38,8 +38,9 @@ impl NftEngine {
     /// Initialize nftables tables and baseline chains.
     /// Creates `z8s_nat` (prerouting/postrouting) and `z8s_filter`
     /// (forward drop + conntrack baseline, input/output accept).
+    /// `pod_cidr` is the pod IP range for inter-pod forwarding.
     /// Must be called once at startup. Panics on failure per plan §15.
-    pub fn init(&self) -> Result<()> {
+    pub fn init(&self, pod_cidr: &str) -> Result<()> {
         let _lock = self.writer.lock().expect("lock poisoned");
         let mut batch = Batch::new();
 
@@ -87,6 +88,14 @@ impl NftEngine {
         let ct_rule = Rule::new(&forward)?
             .established()?;
         batch.add(&ct_rule, rustables::MsgType::Add);
+
+        // Allow pod-to-pod forwarding within the pod CIDR (needed for ClusterIP DNAT)
+        let pod_net: IpNetwork = pod_cidr.parse().context("Invalid pod CIDR in nftables init")?;
+        let inter_pod_rule = Rule::new(&forward)?
+            .snetwork(pod_net)?
+            .dnetwork(pod_net)?
+            .accept();
+        batch.add(&inter_pod_rule, rustables::MsgType::Add);
 
         batch.send().context("Failed to send nftables init batch")?;
         info!("nftables: initialized tables ({}, {}) and baseline chains", NAT_TABLE, FILTER_TABLE);

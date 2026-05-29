@@ -12,3 +12,4 @@
 /run/
 /tmp/
 codedb.snapshot
+build-server.yaml
