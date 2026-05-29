@@ -6,6 +6,7 @@ use std::sync::Arc;
 use crate::types::{AnyResource, ResourceStore, ResourceTracker};
 use crate::cri::RuntimeProvider;
 use crate::netmux::network::NetworkEngine;
+use crate::netmux::NetMux;
 use crate::scheduler::process::ProcessTracker;
 use crate::storage::StorageProvisioner;
 

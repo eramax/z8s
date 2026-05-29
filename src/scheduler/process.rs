@@ -73,6 +73,20 @@ impl ProcessTracker {
             .collect()
     }
 
+    /// Get the pod IP for a given pod name.
+    pub async fn pod_ip(&self, pod_name: &str) -> Option<std::net::Ipv4Addr> {
+        let prefix = format!("{}-", pod_name);
+        let running = self.running.lock().await;
+        for (cid, rc) in running.iter() {
+            if cid.starts_with(&prefix) {
+                if let Some(ip) = rc.instance.pod_ip {
+                    return Some(ip);
+                }
+            }
+        }
+        None
+    }
+
     pub async fn backend_connect_port(&self, pod_name: &str, container_port: u16) -> u16 {
         let prefix = format!("{}-", pod_name);
         let running = self.running.lock().await;

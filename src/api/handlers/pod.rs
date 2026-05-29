@@ -43,7 +43,8 @@ pub async fn list_pods_in_ns(
             }
             let ready = state.process_tracker.is_ready(t.resource.name()).await;
             let restarts = state.process_tracker.pod_restart_counts(t.resource.name()).await;
-            items.push(resource_to_pod_json_with_status(&t.resource, &t.state, ready, &restarts));
+            let ip = state.process_tracker.pod_ip(t.resource.name()).await.map(|a| a.to_string());
+            items.push(resource_to_pod_json_with_status(&t.resource, &t.state, ready, &restarts, ip.as_deref()));
         }
     }
     if accepts_table(&headers) {
@@ -67,7 +68,8 @@ pub async fn get_pod(
         if t.resource.namespace() == namespace && t.resource.name() == name {
             let ready = state.process_tracker.is_ready(t.resource.name()).await;
             let restarts = state.process_tracker.pod_restart_counts(t.resource.name()).await;
-            return Ok(Json(resource_to_pod_json_with_status(&t.resource, &t.state, ready, &restarts)));
+            let ip = state.process_tracker.pod_ip(t.resource.name()).await.map(|a| a.to_string());
+            return Ok(Json(resource_to_pod_json_with_status(&t.resource, &t.state, ready, &restarts, ip.as_deref())));
         }
     }
     Err(ApiError::not_found(format!("pod \"{}\" not found", name)))
@@ -134,12 +136,12 @@ pub async fn pod_handler(
                 .unwrap_or(ResourceState::Pending);
             let is_ready = state.process_tracker.is_ready(&pod_name).await;
             let restarts = state.process_tracker.pod_restart_counts(&pod_name).await;
-            Ok(Json(resource_to_pod_json_with_status(&resource, &tracker_state, is_ready, &restarts)).into_response())
+            let ip = state.process_tracker.pod_ip(&pod_name).await.map(|a| a.to_string());
+            Ok(Json(resource_to_pod_json_with_status(&resource, &tracker_state, is_ready, &restarts, ip.as_deref())).into_response())
         }
         _ => Err(ApiError::method_not_allowed("method not allowed".into())),
     }
 }
-
 
 pub async fn delete_pod(
     State(state): State<AppState>,
@@ -156,7 +158,6 @@ pub async fn delete_pod(
     }
     Err(ApiError::not_found(format!("pod \"{}\" not found", name)))
 }
-
 
 pub async fn create_pod(
     State(state): State<AppState>,
@@ -175,10 +176,7 @@ pub async fn create_pod(
     }
     fill_pod_metadata(&mut pod);
     let resource = AnyResource::Pod(pod);
-    state
-        .store
-        .apply(resource.clone())
-        .await
+    state.store.apply(resource.clone()).await
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
 
     state.registry.on_apply(&state.ctx, &resource).await;
@@ -190,7 +188,8 @@ pub async fn create_pod(
         .unwrap_or(ResourceState::Pending);
     let is_ready = state.process_tracker.is_ready(resource.name()).await;
     let restarts = state.process_tracker.pod_restart_counts(resource.name()).await;
-    Ok((StatusCode::CREATED, Json(resource_to_pod_json_with_status(&resource, &tracker_state, is_ready, &restarts))).into_response())
+    let ip = state.process_tracker.pod_ip(resource.name()).await.map(|a| a.to_string());
+    Ok((StatusCode::CREATED, Json(resource_to_pod_json_with_status(&resource, &tracker_state, is_ready, &restarts, ip.as_deref()))).into_response())
 }
 
 
@@ -215,6 +214,7 @@ pub fn resource_to_pod_json_with_status(
     state: &ResourceState,
     is_ready: bool,
     restart_counts: &std::collections::HashMap<String, u32>,
+    pod_ip: Option<&str>,
 ) -> serde_json::Value {
     use k8s_openapi::api::core::v1::{ContainerStateTerminated, ContainerStateWaiting};
 
@@ -233,12 +233,13 @@ pub fn resource_to_pod_json_with_status(
     };
     let ready = if is_ready && matches!(state, ResourceState::Running) { "True" } else { "False" };
 
+    let ip = pod_ip.unwrap_or("127.0.0.1").to_string();
     let status = PodStatus {
         phase: Some(phase.into()),
-        host_ip: Some("127.0.0.1".into()),
-        host_ips: Some(vec![HostIP { ip: "127.0.0.1".into() }]),
-        pod_ip: Some("127.0.0.1".into()),
-        pod_ips: Some(vec![PodIP { ip: "127.0.0.1".into() }]),
+        host_ip: Some(ip.clone()),
+        host_ips: Some(vec![HostIP { ip: ip.clone() }]),
+        pod_ip: Some(ip.clone()),
+        pod_ips: Some(vec![PodIP { ip }]),
         start_time: Some(time.clone()),
         conditions: Some(vec![
             pod_condition("Initialized", "True", &time),
