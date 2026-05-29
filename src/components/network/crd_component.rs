@@ -53,8 +53,10 @@ impl Component for CrdWatcher {
             AnyResource::Subnet(_) => info!("Subnet applied"),
             AnyResource::RouteTable(_) => info!("RouteTable applied"),
             AnyResource::Ingress(ing) => {
-                let state = std::sync::Arc::new(crate::netmux::ingress::IngressState::new());
-                let ctrl = crate::netmux::ingress::IngressController::new(self.store.clone(), state);
+                let ctrl = crate::netmux::ingress::IngressController::new(
+                    self.store.clone(),
+                    self.netmux.ingress_state.clone(),
+                );
                 ctrl.apply_ingress(ing)?;
                 info!("Ingress '{}/{}' applied",
                     ing.metadata.namespace.as_deref().unwrap_or("default"),

@@ -35,8 +35,9 @@ pub struct Cluster {
     assigned_cidr: String,
     join_token: String,
     api_port: u16,
+    // CONCURRENCY: std::sync::Mutex for brief synchronous access. Never held across .await.
     peers: Mutex<HashMap<String, NodeInfo>>,
-    /// Per-VNet bitmaps: "vnet_name" -> VNetBitmap
+    // CONCURRENCY: std::sync::Mutex for brief bitmap read/write. Never held across .await.
     bitmaps: Mutex<HashMap<String, VNetBitmap>>,
 }
 

@@ -21,10 +21,13 @@ pub use nftables::NftEngine;
 
 /// Unified network engine — one pool, veth management, host routing, nftables.
 pub struct NetMux {
+    // CONCURRENCY: std::sync::Mutex used for brief synchronous access only.
+    // Lock held only during allocate/release, never across .await points.
     pool: Mutex<IpPool>,
     prefix: u8,
     gateway: Ipv4Addr,
     pub nft: NftEngine,
+    pub ingress_state: Arc<crate::netmux::ingress::IngressState>,
 }
 
 impl NetMux {
@@ -33,11 +36,13 @@ impl NetMux {
             .context("Invalid pod CIDR")?;
         let gateway = Self::derive_gateway(&cidr)?;
         let nft = NftEngine::new();
+        let ingress_state = Arc::new(crate::netmux::ingress::IngressState::new());
         Ok(Self {
             pool: Mutex::new(IpPool::new(cidr.clone())),
             prefix: cidr.prefix,
             gateway,
             nft,
+            ingress_state,
         })
     }
 
@@ -195,11 +200,6 @@ impl NetMux {
     /// Remove DNAT chain for a ClusterIP.
     pub fn remove_dnat(&self, cluster_ip: Ipv4Addr, port: u16) -> Result<()> {
         self.nft.remove_dnat(cluster_ip, port)
-    }
-
-    /// Update ClusterIP backends (atomically replaces DNAT chain).
-    pub fn update_dnat_backends(&self, cluster_ip: Ipv4Addr, port: u16, backends: &[(Ipv4Addr, u16)]) -> Result<()> {
-        self.nft.add_dnat(cluster_ip, port, backends)
     }
 
     /// Add forward allow rule between two CIDRs.

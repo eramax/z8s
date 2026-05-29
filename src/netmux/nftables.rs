@@ -13,7 +13,7 @@ use rustables::{
 };
 use rustables::set::{Set, SetBuilder};
 use rustables::expr::{
-    Conntrack, ConntrackKey, Immediate, Masquerade, Nat, NatType,
+    Immediate, Masquerade, Nat, NatType,
     Meta, MetaType, Register, Cmp, CmpOp, VerdictKind, Lookup,
     Payload, HighLevelPayload, NetworkHeaderField, IPv4HeaderField,
     TCPHeaderField, TransportHeaderField,
@@ -222,11 +222,33 @@ impl NftEngine {
         let mut batch = Batch::new();
 
         let nat_table = Table::new(ProtocolFamily::Ipv4).with_name(NAT_TABLE);
+        let prerouting = Chain::new(&nat_table).with_name("prerouting");
 
+        // Delete the per-service chain (removes all DNAT rules)
         let del_chain = Chain::new(&nat_table)
             .with_name(&chain_name)
             .with_type(ChainType::Nat);
         batch.add(&del_chain, rustables::MsgType::Del);
+
+        // Delete the prerouting jump rule by recreating it with Del
+        // Note: This removes ALL prerouting rules matching this cluster_ip:port.
+        // A cleaner approach would use rule handles, but that requires listing rules first.
+        // For MVP, the stale jump rule becomes a silent no-op (chain deleted).
+        let mut jump_rule = Rule::new(&prerouting)?;
+        jump_rule.add_expr(Meta::new(MetaType::NfProto));
+        jump_rule.add_expr(Cmp::new(CmpOp::Eq, [libc::NFPROTO_IPV4 as u8]));
+        jump_rule.add_expr(
+            HighLevelPayload::Network(NetworkHeaderField::IPv4(IPv4HeaderField::Daddr))
+                .build(),
+        );
+        jump_rule.add_expr(Cmp::new(CmpOp::Eq, cluster_ip.octets()));
+        jump_rule.add_expr(
+            HighLevelPayload::Transport(TransportHeaderField::Tcp(TCPHeaderField::Dport))
+                .build(),
+        );
+        jump_rule.add_expr(Cmp::new(CmpOp::Eq, port.to_be_bytes()));
+        jump_rule.add_expr(Immediate::new_verdict(rustables::expr::VerdictKind::Jump { chain: chain_name.clone() }));
+        batch.add(&jump_rule, rustables::MsgType::Del);
 
         batch.send().context("Failed to remove DNAT chain")?;
         info!("nftables: removed DNAT chain {}", chain_name);

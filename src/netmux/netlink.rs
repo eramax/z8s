@@ -115,6 +115,7 @@ pub fn nlattr<T: Copy>(nla_type: u16, data: &T) -> Vec<u8> {
     let mut buf = vec![0u8; size];
     buf[0..2].copy_from_slice(&(size as u16).to_ne_bytes());
     buf[2..4].copy_from_slice(&nla_type.to_ne_bytes());
+    // SAFETY: T is Copy, data points to valid memory of known size (mem::size_of::<T>())
     let data_bytes = unsafe { std::slice::from_raw_parts(data as *const T as *const u8, mem::size_of::<T>()) };
     buf[4..].copy_from_slice(data_bytes);
     buf
@@ -139,9 +140,9 @@ pub fn nlattr_nested(nla_type: u16, attrs: &[u8]) -> Vec<u8> {
     buf
 }
 
-/// Safely close a file descriptor. Safe because the fd was opened
-/// successfully by netlink_socket() and is a valid owned fd.
+/// Safely close a file descriptor.
 fn close_fd(fd: std::os::fd::RawFd) {
+    // SAFETY: fd is a valid socket returned by netlink_socket(). Standard close(2).
     unsafe { nix::libc::close(fd); }
 }
 
@@ -465,6 +466,8 @@ pub fn harden_sysctl() -> Result<()> {
 }
 
 pub fn ensure_loopback_up() -> Result<()> {
+    // SAFETY: All ioctl/libc calls use standard SIOCGIFFLAGS/SIOCSIFFLAGS
+    // which are safe ioctls. fd opened with SOCK_CLOEXEC, closed on all paths.
     unsafe {
         let fd = nix::libc::socket(nix::libc::AF_INET, nix::libc::SOCK_DGRAM | nix::libc::SOCK_CLOEXEC, 0);
         if fd < 0 {
