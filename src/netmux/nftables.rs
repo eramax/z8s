@@ -1,5 +1,9 @@
 use std::net::Ipv4Addr;
 use std::sync::Mutex;
+// CONCURRENCY: Mutex used only for brief lock-hold-during-batch-send.
+// Never held across .await points. std::sync::Mutex is safe here because
+// the critical section (building and sending a Batch) is synchronous and
+// never yields. This is the serialized write channel required by the plan.
 use anyhow::{Context, Result};
 use tracing::info;
 use ipnetwork::IpNetwork;
@@ -28,7 +32,7 @@ impl NftEngine {
     }
 
     pub fn init(&self) -> Result<()> {
-        let _lock = self.writer.lock().unwrap();
+        let _lock = self.writer.lock().expect("lock poisoned");
         let mut batch = Batch::new();
 
         let nat_table = Table::new(ProtocolFamily::Ipv4).with_name(NAT_TABLE);
@@ -84,7 +88,7 @@ impl NftEngine {
     /// Add MASQUERADE for a specific VNet's CIDR (hub VNet gets SNAT, spokes don't).
     /// The `vnet_name` is used to tag the rule so it can be removed later.
     pub fn add_snat(&self, vnet_name: &str, vnet_cidr: &str) -> Result<()> {
-        let _lock = self.writer.lock().unwrap();
+        let _lock = self.writer.lock().expect("lock poisoned");
         let mut batch = Batch::new();
         let nat_table = Table::new(ProtocolFamily::Ipv4).with_name(NAT_TABLE);
         let postrouting = Chain::new(&nat_table).with_name("postrouting");
@@ -102,7 +106,7 @@ impl NftEngine {
 
     /// Remove MASQUERADE for a specific VNet by CIDR.
     pub fn remove_snat(&self, vnet_cidr: &str) -> Result<()> {
-        let _lock = self.writer.lock().unwrap();
+        let _lock = self.writer.lock().expect("lock poisoned");
         let mut batch = Batch::new();
         let nat_table = Table::new(ProtocolFamily::Ipv4).with_name(NAT_TABLE);
         let postrouting = Chain::new(&nat_table).with_name("postrouting");
@@ -123,7 +127,7 @@ impl NftEngine {
             return Ok(());
         }
         let chain_name = format!("svc-{}-{}", cluster_ip, port);
-        let _lock = self.writer.lock().unwrap();
+        let _lock = self.writer.lock().expect("lock poisoned");
         let mut batch = Batch::new();
 
         let nat_table = Table::new(ProtocolFamily::Ipv4).with_name(NAT_TABLE);
@@ -146,7 +150,8 @@ impl NftEngine {
         // Shuffle backends for pseudo-round-robin
         let mut shuffled: Vec<(Ipv4Addr, u16)> = backends.to_vec();
         use std::time::{SystemTime, UNIX_EPOCH};
-        let seed = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().subsec_nanos();
+        let seed = SystemTime::now().duration_since(UNIX_EPOCH)
+            .expect("system time before epoch").subsec_nanos();
         let mut rng = (seed as u64).wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
         for i in (1..shuffled.len()).rev() {
             let j = (rng >> 33) as usize % (i + 1);
@@ -205,7 +210,7 @@ impl NftEngine {
     /// Remove DNAT chain and jump rule for a ClusterIP.
     pub fn remove_dnat(&self, cluster_ip: Ipv4Addr, port: u16) -> Result<()> {
         let chain_name = format!("svc-{}-{}", cluster_ip, port);
-        let _lock = self.writer.lock().unwrap();
+        let _lock = self.writer.lock().expect("lock poisoned");
         let mut batch = Batch::new();
 
         let nat_table = Table::new(ProtocolFamily::Ipv4).with_name(NAT_TABLE);
@@ -221,7 +226,7 @@ impl NftEngine {
     }
 
     pub fn add_forward_allow(&self, src_cidr: &str, dst_cidr: &str) -> Result<()> {
-        let _lock = self.writer.lock().unwrap();
+        let _lock = self.writer.lock().expect("lock poisoned");
         let mut batch = Batch::new();
 
         let filter_table = Table::new(ProtocolFamily::Ipv4).with_name(FILTER_TABLE);
@@ -242,7 +247,7 @@ impl NftEngine {
     }
 
     pub fn add_forward_deny(&self, src_cidr: &str, dst_cidr: &str) -> Result<()> {
-        let _lock = self.writer.lock().unwrap();
+        let _lock = self.writer.lock().expect("lock poisoned");
         let mut batch = Batch::new();
 
         let filter_table = Table::new(ProtocolFamily::Ipv4).with_name(FILTER_TABLE);
@@ -265,7 +270,7 @@ impl NftEngine {
     /// Create an nftables set for pod IPs (for NetworkPolicy).
     /// If `initial_ips` is provided, the set is created with those IPs.
     pub fn create_set(&self, name: &str, initial_ips: &[Ipv4Addr]) -> Result<()> {
-        let _lock = self.writer.lock().unwrap();
+        let _lock = self.writer.lock().expect("lock poisoned");
         let mut batch = Batch::new();
 
         let table = Table::new(ProtocolFamily::Ipv4).with_name(FILTER_TABLE);
@@ -285,7 +290,7 @@ impl NftEngine {
 
     /// Replace a set's elements (delete and recreate).
     pub fn replace_set(&self, name: &str, ips: &[Ipv4Addr]) -> Result<()> {
-        let _lock = self.writer.lock().unwrap();
+        let _lock = self.writer.lock().expect("lock poisoned");
         let mut batch = Batch::new();
 
         let table = Table::new(ProtocolFamily::Ipv4).with_name(FILTER_TABLE);
@@ -313,7 +318,7 @@ impl NftEngine {
 
     /// Add a forward rule that matches packets with src IP in a named set.
     pub fn add_forward_allow_set_src(&self, set_name: &str, dst_cidr: &str) -> Result<()> {
-        let _lock = self.writer.lock().unwrap();
+        let _lock = self.writer.lock().expect("lock poisoned");
         let mut batch = Batch::new();
 
         let filter_table = Table::new(ProtocolFamily::Ipv4).with_name(FILTER_TABLE);

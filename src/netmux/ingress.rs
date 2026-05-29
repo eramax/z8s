@@ -54,7 +54,7 @@ impl IngressController {
             Some(s) => s,
             None => return Ok(()),
         };
-        let mut routes = self.state.routes.write().unwrap();
+        let mut routes = self.state.routes.write().expect("lock poisoned");
         routes.clear();
         if let Some(rules) = &spec.rules {
             for rule in rules {
@@ -92,7 +92,7 @@ async fn handle_connection(
 
     let host = extract_host(&buf[..n]).unwrap_or("");
     let addr = {
-        let routes = state.routes.read().unwrap();
+        let routes = state.routes.read().expect("lock poisoned");
         routes.get(host).cloned()
             .or_else(|| routes.get("*").cloned())
     };

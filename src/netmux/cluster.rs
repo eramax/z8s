@@ -83,7 +83,7 @@ impl Cluster {
             anyhow::bail!("Invalid join token");
         }
 
-        let mut bitmaps = self.bitmaps.lock().unwrap();
+        let mut bitmaps = self.bitmaps.lock().expect("lock poisoned");
         let bm = bitmaps.get_mut(vnet).ok_or_else(|| {
             anyhow::anyhow!("VNet '{}' not found in bitmap", vnet)
         })?;
@@ -96,7 +96,7 @@ impl Cluster {
         let block_ip = Ipv4Addr::from(bm.base + (block_idx as u32) * 256);
         let assigned_cidr = format!("{}/24", block_ip);
 
-        let mut peers = self.peers.lock().unwrap();
+        let mut peers = self.peers.lock().expect("lock poisoned");
         peers.insert(node_name.to_string(), NodeInfo {
             name: node_name.to_string(),
             host_ip: node_ip,
@@ -109,7 +109,7 @@ impl Cluster {
     }
 
     pub async fn announce_to_peers(&self) -> Result<()> {
-        let peers = self.peers.lock().unwrap().clone();
+        let peers = self.peers.lock().expect("lock poisoned").clone();
         for (_, peer) in &peers {
             let url = format!("http://{}:{}/join", peer.host_ip, self.api_port);
             let client = reqwest::Client::new();
@@ -139,7 +139,7 @@ impl Cluster {
             sleep(Duration::from_secs(30)).await;
             let _ = self.announce_to_peers().await;
 
-            let mut peers = self.peers.lock().unwrap();
+            let mut peers = self.peers.lock().expect("lock poisoned");
             let dead: Vec<String> = peers.iter()
                 .filter(|(_, n)| n.last_seen.elapsed() > Duration::from_secs(90))
                 .map(|(name, _)| name.clone())
@@ -158,7 +158,7 @@ impl Cluster {
 
     /// Install cross-node routes for all known peers.
     pub async fn install_routes(&self, netmux: &NetMux) -> Result<()> {
-        let peers = self.peers.lock().unwrap().clone();
+        let peers = self.peers.lock().expect("lock poisoned").clone();
         for (name, peer) in &peers {
             if let Some(ref cidr) = peer.pod_cidr {
                 match netmux.add_subnet_route_raw(cidr, &peer.host_ip.to_string()) {
@@ -171,7 +171,7 @@ impl Cluster {
     }
 
     pub fn update_peer_heartbeat(&self, name: &str) {
-        if let Some(peer) = self.peers.lock().unwrap().get_mut(name) {
+        if let Some(peer) = self.peers.lock().expect("lock poisoned").get_mut(name) {
             peer.last_seen = Instant::now();
         }
     }
@@ -180,5 +180,5 @@ impl Cluster {
     pub fn host_ip(&self) -> Ipv4Addr { self.host_ip }
     pub fn assigned_cidr(&self) -> &str { &self.assigned_cidr }
     pub fn join_token(&self) -> &str { &self.join_token }
-    pub fn peers(&self) -> HashMap<String, NodeInfo> { self.peers.lock().unwrap().clone() }
+    pub fn peers(&self) -> HashMap<String, NodeInfo> { self.peers.lock().expect("lock poisoned").clone() }
 }

@@ -1,3 +1,7 @@
+/// SAFETY: All netlink operations use raw libc FFI because rtnetlink
+/// functions (veth creation, routes, addresses) are not available via
+/// the `nix` crate. Each unsafe block is justified inline.
+
 use std::mem;
 use std::net::Ipv4Addr;
 use anyhow::{Context, Result};
@@ -46,6 +50,8 @@ pub const IFF_RUNNING: i32 = 0x40;
 // ── Netlink helpers ─────────────────────────────────────────────────────────
 
 pub fn netlink_socket() -> Result<std::os::fd::RawFd> {
+    // SAFETY: libc socket()/bind() are FFI. Return value checked for errors.
+    // SOCK_CLOEXEC prevents fd leaks to child processes.
     unsafe {
         let fd = nix::libc::socket(AF_NETLINK, nix::libc::SOCK_RAW | nix::libc::SOCK_CLOEXEC, NETLINK_ROUTE);
         if fd < 0 {
@@ -67,6 +73,7 @@ pub fn netlink_socket() -> Result<std::os::fd::RawFd> {
 }
 
 pub fn send_nlmsg(fd: std::os::fd::RawFd, buf: &[u8]) -> Result<()> {
+    // SAFETY: libc sendmsg FFI. iovec points to valid buffer. Return checked.
     unsafe {
         let iov = nix::libc::iovec {
             iov_base: buf.as_ptr() as *mut nix::libc::c_void,
@@ -84,7 +91,8 @@ pub fn send_nlmsg(fd: std::os::fd::RawFd, buf: &[u8]) -> Result<()> {
 }
 
 pub fn recv_nlmsg(fd: std::os::fd::RawFd) -> Result<Vec<u8>> {
-    let mut buf = vec![0u8; 8192];
+    let mut buf = vec![0u8; 8192]; // 8KB buffer — sufficient for netlink responses
+    // SAFETY: libc recvmsg FFI. iovec points to valid buffer. Return checked.
     unsafe {
         let iov = nix::libc::iovec {
             iov_base: buf.as_mut_ptr() as *mut nix::libc::c_void,
@@ -131,7 +139,13 @@ pub fn nlattr_nested(nla_type: u16, attrs: &[u8]) -> Vec<u8> {
     buf
 }
 
-/// Check netlink response for error.
+/// Safely close a file descriptor. Safe because the fd was opened
+/// successfully by netlink_socket() and is a valid owned fd.
+fn close_fd(fd: std::os::fd::RawFd) {
+    unsafe { nix::libc::close(fd); }
+}
+
+/// Check netlink response for error. Returns Ok(()) if response is not an error.
 fn check_nl_response(resp: &[u8], context: &str) -> Result<()> {
     if resp.len() >= 16 {
         let msg_type = u16::from_ne_bytes([resp[4], resp[5]]);
@@ -190,7 +204,7 @@ pub fn create_veth_pair(host_name: &str, peer_name: &str, peer_pid: Option<u32>)
 
     send_nlmsg(fd, &buf)?;
     let resp = recv_nlmsg(fd)?;
-    unsafe { nix::libc::close(fd); }
+    close_fd(fd);
     check_nl_response(&resp, "create_veth")?;
 
     let host_idx = get_ifindex(host_name)?;
@@ -224,7 +238,7 @@ pub fn get_ifindex(name: &str) -> Result<u32> {
 
     send_nlmsg(fd, &buf)?;
     let resp = recv_nlmsg(fd)?;
-    unsafe { nix::libc::close(fd); }
+    close_fd(fd);
 
     if resp.len() >= 20 {
         let msg_type = u16::from_ne_bytes([resp[4], resp[5]]);
@@ -259,7 +273,7 @@ pub fn set_link_up(ifindex: u32) -> Result<()> {
 
     send_nlmsg(fd, &buf)?;
     let resp = recv_nlmsg(fd)?;
-    unsafe { nix::libc::close(fd); }
+    close_fd(fd);
     check_nl_response(&resp, "set_link_up")
 }
 
@@ -307,7 +321,7 @@ pub fn add_route(dest: &Ipv4Addr, prefix: u8, gateway: Option<&Ipv4Addr>, oif: O
 
     send_nlmsg(fd, &buf)?;
     let resp = recv_nlmsg(fd)?;
-    unsafe { nix::libc::close(fd); }
+    close_fd(fd);
     check_nl_response(&resp, "add_route")
 }
 
@@ -355,7 +369,7 @@ pub fn del_route(dest: &Ipv4Addr, prefix: u8, gateway: Option<&Ipv4Addr>, oif: O
 
     send_nlmsg(fd, &buf)?;
     let resp = recv_nlmsg(fd)?;
-    unsafe { nix::libc::close(fd); }
+    close_fd(fd);
     check_nl_response(&resp, "del_route")
 }
 
@@ -389,7 +403,7 @@ pub fn add_addr(ifindex: u32, ip: &Ipv4Addr, prefix: u8) -> Result<()> {
 
     send_nlmsg(fd, &buf)?;
     let resp = recv_nlmsg(fd)?;
-    unsafe { nix::libc::close(fd); }
+    close_fd(fd);
     check_nl_response(&resp, "add_addr")
 }
 
@@ -413,7 +427,7 @@ pub fn del_link(ifindex: u32) -> Result<()> {
 
     send_nlmsg(fd, &buf)?;
     let resp = recv_nlmsg(fd)?;
-    unsafe { nix::libc::close(fd); }
+    close_fd(fd);
     check_nl_response(&resp, "del_link")
 }
 

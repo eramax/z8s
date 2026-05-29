@@ -120,6 +120,7 @@ pub fn move_peer_to_netns(peer_ifindex: u32, pid: u32) -> Result<()> {
 
     netlink::send_nlmsg(fd, &buf)?;
     let resp = netlink::recv_nlmsg(fd)?;
+    // SAFETY: fd is a valid socket returned by netlink_socket()
     unsafe { nix::libc::close(fd); }
 
     if resp.len() >= 16 {

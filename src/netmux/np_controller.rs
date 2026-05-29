@@ -20,6 +20,8 @@ struct PolicySet {
 pub struct NetworkPolicyController {
     netmux: Arc<NetMux>,
     /// Tracked sets: "np:<ns>:<name>:<idx>" -> PolicySet
+    /// CONCURRENCY: std::sync::Mutex used because lock is held briefly for
+    /// HashMap read/write, never across .await points.
     sets: std::sync::Mutex<std::collections::HashMap<String, PolicySet>>,
 }
 
@@ -53,7 +55,7 @@ impl NetworkPolicyController {
                         // Fix Bug #4: use 0.0.0.0/0 as destination (match all dest IPs)
                         self.netmux.add_forward_allow_set_src(&set_name, "0.0.0.0/0")?;
 
-                        let mut sets = self.sets.lock().unwrap();
+                        let mut sets = self.sets.lock().expect("lock poisoned");
                         sets.entry(set_name).or_insert_with(|| PolicySet {
                             ip_addrs: Vec::new(),
                             pod_selector: Some(ps.clone()),
@@ -68,7 +70,7 @@ impl NetworkPolicyController {
                         self.netmux.nft.create_set(&ns_set_name, &[])?;
                         self.netmux.add_forward_allow_set_src(&ns_set_name, "0.0.0.0/0")?;
 
-                        let mut sets = self.sets.lock().unwrap();
+                        let mut sets = self.sets.lock().expect("lock poisoned");
                         sets.entry(ns_set_name).or_insert_with(|| PolicySet {
                             ip_addrs: Vec::new(),
                             pod_selector: None,
@@ -99,7 +101,7 @@ impl NetworkPolicyController {
 
     /// Update a pod in all matching NetworkPolicy sets.
     pub fn update_pod(&self, pod_ip: Ipv4Addr, labels: &BTreeMap<String, String>, _ns: &str) -> Result<()> {
-        let mut sets = self.sets.lock().unwrap();
+        let mut sets = self.sets.lock().expect("lock poisoned");
         for (set_name, policy_set) in sets.iter_mut() {
             // Check if pod labels match this set's selector
             let matches = match &policy_set.pod_selector {
@@ -118,7 +120,7 @@ impl NetworkPolicyController {
 
     /// Remove a pod from all matching NetworkPolicy sets.
     pub fn remove_pod(&self, pod_ip: Ipv4Addr) -> Result<()> {
-        let mut sets = self.sets.lock().unwrap();
+        let mut sets = self.sets.lock().expect("lock poisoned");
         for (set_name, policy_set) in sets.iter_mut() {
             if let Some(pos) = policy_set.ip_addrs.iter().position(|ip| *ip == pod_ip) {
                 policy_set.ip_addrs.remove(pos);

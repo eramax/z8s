@@ -56,15 +56,16 @@ impl NetMux {
     }
 
     pub fn allocate_ip(&self) -> Option<Ipv4Addr> {
-        self.pool.lock().unwrap().allocate()
+        // SAFETY: lock only held briefly, no .await, panic only on poison
+        self.pool.lock().expect("lock poisoned").allocate()
     }
 
     pub fn release_ip(&self, ip: Ipv4Addr) {
-        self.pool.lock().unwrap().release(ip);
+        self.pool.lock().expect("lock poisoned").release(ip);
     }
 
     pub fn count_free(&self) -> usize {
-        self.pool.lock().unwrap().count_free()
+        self.pool.lock().expect("lock poisoned").count_free()
     }
 
     /// Attach a pod to the network: create veth, assign IP, add host route.
@@ -123,6 +124,7 @@ impl NetMux {
 
         // Enter pod netns to assign IP and add default route
         let netns_path = format!("/proc/{}/ns/net", container_pid);
+        // SAFETY: nix::fcntl::open wraps the libc open() safely.
         let netns_fd = unsafe {
             nix::fcntl::open(
                 netns_path.as_str(),
@@ -132,6 +134,7 @@ impl NetMux {
         }
         .context("open pod netns")?;
 
+        // SAFETY: nix::sched::setns wraps the libc setns() safely.
         unsafe {
             nix::sched::setns(&netns_fd, nix::sched::CloneFlags::CLONE_NEWNET)
                 .context("setns into pod netns")?;
@@ -150,6 +153,7 @@ impl NetMux {
             .context("add_default_route in pod netns")?;
 
         // Enter back to host netns
+        // SAFETY: nix::fcntl::open wraps the libc open() safely.
         let host_netns_fd = unsafe {
             nix::fcntl::open(
                 "/proc/1/ns/net",
@@ -159,6 +163,7 @@ impl NetMux {
         }
         .context("open host netns")?;
 
+        // SAFETY: nix::sched::setns wraps the libc setns() safely.
         unsafe {
             nix::sched::setns(&host_netns_fd, nix::sched::CloneFlags::CLONE_NEWNET)
                 .context("setns back to host netns")?;
