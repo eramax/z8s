@@ -1,6 +1,3 @@
-pub mod dns;
-pub mod service_proxy;
-
 use async_trait::async_trait;
 use k8s_openapi::api::core::v1::{Endpoints, Service};
 use k8s_openapi::api::discovery::v1::EndpointSlice;

@@ -335,7 +335,7 @@ mod tests {
             store: store.clone(),
             pipeline: pipeline.clone(),
             cri: container_runtime.clone() as Arc<dyn crate::cri::RuntimeProvider>,
-            net: network.clone() as Arc<dyn crate::net::NetworkEngine>,
+            net: network.clone() as Arc<dyn crate::netmux::network::NetworkEngine>,
             process_tracker: process_tracker.clone(),
             vol: Arc::new(crate::storage::ProvisionerDispatcher::new(store.clone())) as Arc<dyn crate::storage::StorageProvisioner>,
         });
@@ -364,7 +364,7 @@ mod tests {
             store: store.clone(),
             pipeline: pipeline.clone(),
             cri: container_runtime.clone() as Arc<dyn crate::cri::RuntimeProvider>,
-            net: network.clone() as Arc<dyn crate::net::NetworkEngine>,
+            net: network.clone() as Arc<dyn crate::netmux::network::NetworkEngine>,
             process_tracker: process_tracker.clone(),
             vol: Arc::new(crate::storage::ProvisionerDispatcher::new(store.clone())) as Arc<dyn crate::storage::StorageProvisioner>,
         });

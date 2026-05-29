@@ -4,7 +4,6 @@ mod config;
 mod cri;
 mod init;
 mod manifest;
-mod net;
 mod netmux;
 mod scheduler;
 mod storage;
@@ -138,7 +137,7 @@ async fn main() -> Result<()> {
 
     let network = Arc::new(NetworkManager::new(store.clone(), process_tracker.clone()));
 
-    if let Some(port) = crate::net::dns::run_dns(store.clone()).await {
+    if let Some(port) = crate::netmux::dns::run_dns(store.clone()).await {
         crate::config::set_dns_port(port);
     }
 
@@ -154,7 +153,7 @@ async fn main() -> Result<()> {
         store: store.clone(),
         pipeline: pipeline.clone(),
         cri: cri.clone(),
-        net: network.clone() as Arc<dyn crate::net::NetworkEngine>,
+        net: network.clone() as Arc<dyn crate::netmux::network::NetworkEngine>,
         process_tracker: process_tracker.clone(),
         vol: provisioner.clone() as Arc<dyn crate::storage::StorageProvisioner>,
     });

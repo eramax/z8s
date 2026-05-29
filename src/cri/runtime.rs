@@ -35,44 +35,7 @@ fn raise_nproc_limit() {
 
 
 
-fn attach_port_publish(
-    pid: u32,
-    ports: &[u16],
-) -> (std::collections::HashMap<u16, u16>, Option<crate::cri::port_publish::PortPublish>) {
-    if ports.is_empty() {
-        return (std::collections::HashMap::new(), None);
-    }
-    let publish = crate::cri::port_publish::publish_ports(pid, ports);
-    (publish.map.clone(), Some(publish))
-}
-
-fn launch_pasta_for_pid(pid: u32) {
-    info!("Launching pasta for PID {}", pid);
-    match std::process::Command::new("pasta")
-        .arg("--quiet")
-        .arg("-t")
-        .arg("none")
-        .arg("-u")
-        .arg("none")
-        .arg("-T")
-        .arg("none")
-        .arg("-U")
-        .arg("none")
-        .arg(pid.to_string())
-        .status()
-    {
-        Ok(status) => {
-            if status.success() {
-                info!("Successfully configured pasta networking for PID {}", pid);
-            } else {
-                warn!("pasta command exited with non-zero status for PID {}", pid);
-            }
-        }
-        Err(e) => {
-            warn!("Failed to launch pasta for PID {}: {}", pid, e);
-        }
-    }
-}
+// old attach_port_publish and launch_pasta_for_pid removed (retired to retired/network/)
 
 
 struct ContainerSpawnCtx<'a> {
@@ -122,7 +85,6 @@ pub struct RunningContainer {
     pub log_buffer: Arc<Mutex<Vec<String>>>,
     pub ready: Arc<AtomicBool>,
     pub healthy: Arc<Mutex<bool>>,
-    port_publish: Option<crate::cri::port_publish::PortPublish>,
 }
 
 pub struct ProcessSupervisor {
@@ -302,7 +264,6 @@ impl ProcessSupervisor {
                         log_buffer: Arc::new(Mutex::new(Vec::new())),
                         ready: Arc::new(AtomicBool::new(false)),
                         healthy: Arc::new(Mutex::new(true)),
-                        port_publish: None,
                     });
                 }
             }
@@ -559,10 +520,13 @@ impl ProcessSupervisor {
                     pod_ip: None,
                     host_veth_ifindex: None,
                 };
-                let (published_ports_map, port_publish) = attach_port_publish(pid, &published_ports);
-                instance.published_ports = published_ports_map;
+                instance.published_ports = std::collections::HashMap::new();
 
-                let (ready, healthy) = Self::spawn_probes(&probes, container_id, &instance.published_ports);
+                let (ready, healthy) = Self::spawn_probes(
+                    &probes,
+                    container_id,
+                    &instance.published_ports,
+                );
 
                 Ok(RunningContainer {
                     child: None,
@@ -571,7 +535,6 @@ impl ProcessSupervisor {
                     log_buffer,
                     ready,
                     healthy,
-                    port_publish,
                 })
             }
             Ok(nix::unistd::ForkResult::Child) => {
@@ -642,6 +605,10 @@ impl ProcessSupervisor {
                 drop(stdout_w);
                 drop(stderr_r);
                 drop(stderr_w);
+                drop(sync_r);
+                drop(sync_w);
+                drop(ack_r);
+                drop(ack_w);
                 anyhow::bail!("Failed to fork: {}", e);
             }
         }
@@ -831,8 +798,7 @@ impl ProcessSupervisor {
                     pod_ip: None,
                     host_veth_ifindex: None,
                 };
-                let (published_ports_map, port_publish) = attach_port_publish(pid, &published_ports);
-                instance.published_ports = published_ports_map;
+                instance.published_ports = std::collections::HashMap::new();
 
                 let (ready, healthy) = Self::spawn_probes(&probes, container_id, &instance.published_ports);
 
@@ -843,7 +809,6 @@ impl ProcessSupervisor {
                     log_buffer,
                     ready,
                     healthy,
-                    port_publish,
                 })
             }
             Ok(nix::unistd::ForkResult::Child) => {
@@ -983,8 +948,7 @@ impl ProcessSupervisor {
                     pod_ip: None,
                     host_veth_ifindex: None,
                 };
-                let (published_ports_map, port_publish) = attach_port_publish(pid, &published_ports);
-                instance.published_ports = published_ports_map;
+                instance.published_ports = std::collections::HashMap::new();
 
                 let (ready, healthy) = Self::spawn_probes(&probes, container_id, &instance.published_ports);
 
@@ -995,7 +959,6 @@ impl ProcessSupervisor {
             log_buffer,
             ready,
             healthy,
-            port_publish,
         })
     }
 
@@ -1022,10 +985,7 @@ impl ProcessSupervisor {
 
     pub async fn stop_container(&self, container_id: &str) {
         let mut running = self.running.lock().await;
-        if let Some(mut rc) = running.remove(container_id) {
-            if let Some(mut pp) = rc.port_publish.take() {
-                pp.stop();
-            }
+        if let Some(rc) = running.remove(container_id) {
             if let Some(pid) = rc.instance.pid {
                 info!("Stopping container {} (PID {})", container_id, pid);
                 let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);

@@ -8,7 +8,7 @@ use tracing::{info, warn};
 use crate::types::{AnyResource, ResourceState, ResourceStore};
 use crate::cri::runtime::RunningContainer;
 use crate::cri::RuntimeProvider;
-use crate::net::PodResolver;
+use crate::netmux::network::PodResolver;
 use async_trait::async_trait;
 
 pub struct ProcessTracker {

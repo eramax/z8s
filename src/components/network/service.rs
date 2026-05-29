@@ -71,28 +71,17 @@ impl NetworkManager {
                     old.handle.abort();
                 }
                 let store = self.store.clone();
-                let resolver: Arc<dyn crate::net::PodResolver> = self.process_tracker.clone();
+                let resolver: Arc<dyn crate::netmux::network::PodResolver> = self.process_tracker.clone();
                 let counter = self.counter.clone();
                 let selector_c = selector.clone();
                 let svc_name_c = svc_name.clone();
                 let svc_ns_c = svc_ns.clone();
                 let target_port_c = target_port.clone();
                 let listen_addr_log = listen_addr.clone();
-                let handle = tokio::spawn(async move {
-                    crate::net::service_proxy::run_proxy_addr_when_ready(
-                        &listen_addr,
-                        selector_c,
-                        target_port_c,
-                        store,
-                        resolver,
-                        counter,
-                        &svc_name_c,
-                        &svc_ns_c,
-                    )
-                    .await;
-                });
-                info!("Service proxy {} → ClusterIP {} (deferred until endpoints ready)", key, listen_addr_log);
-                proxies.insert(port_key, RunningProxy { handle });
+                // Proxy retired in favor of nftables DNAT (NetMux Phase 2)
+                // Old: crate::net::service_proxy::run_proxy_addr_when_ready(...)
+                info!("Service {} → ClusterIP {} — DNAT via nftables", key, listen_addr_log);
+                proxies.insert(port_key, RunningProxy { handle: tokio::spawn(async { /* retired */ }) });
             }
 
             // Also bind NodePort for external access
@@ -104,28 +93,17 @@ impl NetworkManager {
                         old.handle.abort();
                     }
                     let store = self.store.clone();
-                    let resolver: Arc<dyn crate::net::PodResolver> = self.process_tracker.clone();
+                    let resolver: Arc<dyn crate::netmux::network::PodResolver> = self.process_tracker.clone();
                     let counter = self.counter.clone();
                     let selector_c = selector.clone();
                     let svc_name_c = svc_name.clone();
                     let svc_ns_c = svc_ns.clone();
                     let target_port_c = target_port.clone();
                     let listen_addr_log = listen_addr.clone();
-                    let handle = tokio::spawn(async move {
-                        crate::net::service_proxy::run_proxy_addr(
-                            &listen_addr,
-                            selector_c,
-                            target_port_c,
-                            store,
-                            resolver,
-                            counter,
-                            &svc_name_c,
-                            &svc_ns_c,
-                        )
-                        .await;
-                    });
-                    info!("Service proxy {} → NodePort {}", key, listen_addr_log);
-                    proxies.insert(port_key, RunningProxy { handle });
+                    // Proxy retired in favor of nftables DNAT (NetMux Phase 2)
+                    // Old: crate::net::service_proxy::run_proxy_addr(...)
+                    info!("Service {} → NodePort {} — DNAT via nftables", key, listen_addr_log);
+                    proxies.insert(port_key, RunningProxy { handle: tokio::spawn(async { /* retired */ }) });
                 }
             }
         }
@@ -352,7 +330,7 @@ impl NetworkManager {
 }
 
 #[async_trait]
-impl crate::net::NetworkEngine for NetworkManager {
+impl crate::netmux::network::NetworkEngine for NetworkManager {
     fn dns_port(&self) -> Option<u16> {
         crate::config::dns_port()
     }

@@ -8,6 +8,8 @@ pub mod vnet_controller;
 pub mod np_controller;
 pub mod ingress;
 pub mod cluster;
+pub mod dns;
+pub mod network;
 
 use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex};
