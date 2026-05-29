@@ -425,6 +425,31 @@ pub fn enable_ip_forward() -> Result<()> {
     Ok(())
 }
 
+/// Apply system hardening recommended by the plan:
+/// - rp_filter = 1 (strict reverse-path filtering, prevents IP spoofing between VNets)
+/// - arp_announce = 2 (always use best local address for ARP, prevents cross-VNet ARP leaks)
+pub fn harden_sysctl() -> Result<()> {
+    for param in &[
+        "net/ipv4/conf/all/rp_filter",
+        "net/ipv4/conf/default/rp_filter",
+    ] {
+        let path = format!("/proc/sys/{}", param);
+        if let Err(e) = std::fs::write(&path, "1\n") {
+            tracing::warn!("Failed to set {}: {}", path, e);
+        }
+    }
+    for param in &[
+        "net/ipv4/conf/all/arp_announce",
+        "net/ipv4/conf/default/arp_announce",
+    ] {
+        let path = format!("/proc/sys/{}", param);
+        if let Err(e) = std::fs::write(&path, "2\n") {
+            tracing::warn!("Failed to set {}: {}", path, e);
+        }
+    }
+    Ok(())
+}
+
 pub fn ensure_loopback_up() -> Result<()> {
     unsafe {
         let fd = nix::libc::socket(nix::libc::AF_INET, nix::libc::SOCK_DGRAM | nix::libc::SOCK_CLOEXEC, 0);

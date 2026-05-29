@@ -1,65 +1,69 @@
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
-use tracing::{info, warn};
+use tracing::{info, warn, debug};
+use tokio::time::sleep;
 
 use super::NetMux;
 
-/// Per-node info tracked by each member.
 #[derive(Debug, Clone)]
 pub struct NodeInfo {
     pub name: String,
     pub host_ip: Ipv4Addr,
-    /// /24 block assigned to this node (e.g. "10.42.0.0/24").
     pub pod_cidr: Option<String>,
-    pub last_seen: std::time::Instant,
+    pub last_seen: Instant,
 }
 
-/// Multi-node cluster state.
+/// Per-VNet bitmap tracking which /24 blocks are allocated.
+#[derive(Debug, Clone)]
+struct VNetBitmap {
+    base: u32,
+    size: u32,
+    used: Vec<bool>,
+}
+
 pub struct Cluster {
-    /// Our node name.
     name: String,
-    /// Our host IP (used by peers to reach us).
     host_ip: Ipv4Addr,
-    /// Our assigned /24 block from the pod CIDR.
     assigned_cidr: String,
-    /// Token to validate join requests.
     join_token: String,
-    /// Peer nodes: name -> NodeInfo
+    api_port: u16,
     peers: Mutex<HashMap<String, NodeInfo>>,
-    /// Bitmap of allocated /24 blocks per VNet.
-    bitmap: Mutex<Vec<bool>>,
-    /// Base IP for the /24 bitmap (network addr of pod CIDR).
-    bitmap_base: u32,
-    /// Number of /24 blocks available.
-    bitmap_size: u32,
+    /// Per-VNet bitmaps: "vnet_name" -> VNetBitmap
+    bitmaps: Mutex<HashMap<String, VNetBitmap>>,
 }
 
 impl Cluster {
-    pub fn new(name: String, host_ip: Ipv4Addr, pod_cidr: &str, peers: &[(String, String)]) -> Result<Self> {
+    pub fn new(name: String, host_ip: Ipv4Addr, pod_cidr: &str, api_port: u16, peers: &[(String, String)]) -> Result<Self> {
         let cidr = super::pool::Ipv4Cidr::parse(pod_cidr).context("Invalid pod CIDR")?;
         let host_bits = 32 - cidr.prefix;
-        let num_blocks = 1u32 << (host_bits - 8); // /24 blocks within the CIDR
-        let mut bitmap = vec![false; num_blocks as usize];
+        let num_blocks = 1u32 << (host_bits - 8);
 
-        // Reserve first /24 for ourselves
-        bitmap[0] = true;
+        let mut bitmaps = HashMap::new();
+        bitmaps.insert("default".to_string(), VNetBitmap {
+            base: cidr.network_u32(),
+            size: num_blocks,
+            used: {
+                let mut b = vec![false; num_blocks as usize];
+                b[0] = true; // reserve our own block
+                b
+            },
+        });
+
         let base_network = cidr.network_u32();
         let our_block = format!("{}/24", Ipv4Addr::from(base_network));
 
         let mut peer_map = HashMap::new();
         for (peer_name, peer_ip) in peers {
             let ip: Ipv4Addr = peer_ip.parse()?;
-            peer_map.insert(
-                peer_name.clone(),
-                NodeInfo {
-                    name: peer_name.clone(),
-                    host_ip: ip,
-                    pod_cidr: None,
-                    last_seen: std::time::Instant::now(),
-                },
-            );
+            peer_map.insert(peer_name.clone(), NodeInfo {
+                name: peer_name.clone(),
+                host_ip: ip,
+                pod_cidr: None,
+                last_seen: Instant::now(),
+            });
             info!("Cluster: known peer {} -> {}", peer_name, peer_ip);
         }
 
@@ -67,82 +71,109 @@ impl Cluster {
             name,
             host_ip,
             assigned_cidr: our_block,
-            join_token: "z8s-cluster-token".to_string(), // configurable later
+            join_token: "z8s-cluster-token".to_string(),
+            api_port,
             peers: Mutex::new(peer_map),
-            bitmap: Mutex::new(bitmap),
-            bitmap_base: base_network,
-            bitmap_size: num_blocks,
+            bitmaps: Mutex::new(bitmaps),
         })
     }
 
-    /// Handle a join request from a new node.
-    pub fn handle_join(&self, node_name: &str, node_ip: Ipv4Addr, token: &str) -> Result<String> {
+    pub fn handle_join(&self, node_name: &str, node_ip: Ipv4Addr, token: &str, vnet: &str) -> Result<String> {
         if token != self.join_token {
             anyhow::bail!("Invalid join token");
         }
 
-        let mut bitmap = self.bitmap.lock().unwrap();
-        let block_idx = bitmap.iter().position(|b| !*b).ok_or_else(|| {
-            anyhow::anyhow!("No free /24 blocks available")
+        let mut bitmaps = self.bitmaps.lock().unwrap();
+        let bm = bitmaps.get_mut(vnet).ok_or_else(|| {
+            anyhow::anyhow!("VNet '{}' not found in bitmap", vnet)
         })?;
-        bitmap[block_idx] = true;
 
-        let block_ip = Ipv4Addr::from(self.bitmap_base + (block_idx as u32) * 256);
+        let block_idx = bm.used.iter().position(|b| !*b).ok_or_else(|| {
+            anyhow::anyhow!("No free /24 blocks available in VNet '{}'", vnet)
+        })?;
+        bm.used[block_idx] = true;
+
+        let block_ip = Ipv4Addr::from(bm.base + (block_idx as u32) * 256);
         let assigned_cidr = format!("{}/24", block_ip);
 
         let mut peers = self.peers.lock().unwrap();
-        peers.insert(
-            node_name.to_string(),
-            NodeInfo {
-                name: node_name.to_string(),
-                host_ip: node_ip,
-                pod_cidr: Some(assigned_cidr.clone()),
-                last_seen: std::time::Instant::now(),
-            },
-        );
+        peers.insert(node_name.to_string(), NodeInfo {
+            name: node_name.to_string(),
+            host_ip: node_ip,
+            pod_cidr: Some(assigned_cidr.clone()),
+            last_seen: Instant::now(),
+        });
 
-        info!("Cluster: node '{}' joined, assigned {}", node_name, assigned_cidr);
+        info!("Cluster: node '{}' joined VNet '{}', assigned {}", node_name, vnet, assigned_cidr);
         Ok(assigned_cidr)
     }
 
-    /// Announce ourselves to seed peers (called at startup).
     pub async fn announce_to_peers(&self) -> Result<()> {
         let peers = self.peers.lock().unwrap().clone();
-        for (name, peer) in &peers {
-            let url = format!("http://{}:6443/join", peer.host_ip);
+        for (_, peer) in &peers {
+            let url = format!("http://{}:{}/join", peer.host_ip, self.api_port);
             let client = reqwest::Client::new();
             let body = serde_json::json!({
                 "node_name": self.name,
                 "node_ip": self.host_ip.to_string(),
                 "token": self.join_token,
+                "vnet": "default",
             });
             match client.post(&url).json(&body).send().await {
                 Ok(resp) => {
                     if let Ok(assigned) = resp.text().await {
-                        info!("Joined cluster via '{}': assigned {}", name, assigned);
+                        info!("Joined cluster via {}: assigned {}", peer.name, assigned);
                     }
                 }
                 Err(e) => {
-                    warn!("Failed to announce to '{}' ({}): {}", name, peer.host_ip, e);
+                    debug!("Announce to {} failed: {}", peer.name, e);
                 }
             }
         }
         Ok(())
     }
 
+    /// Periodic heartbeat loop — announces presence and detects dead peers.
+    pub async fn heartbeat_loop(&self, netmux: &NetMux) -> Result<()> {
+        loop {
+            sleep(Duration::from_secs(30)).await;
+            let _ = self.announce_to_peers().await;
+
+            let mut peers = self.peers.lock().unwrap();
+            let dead: Vec<String> = peers.iter()
+                .filter(|(_, n)| n.last_seen.elapsed() > Duration::from_secs(90))
+                .map(|(name, _)| name.clone())
+                .collect();
+            for name in &dead {
+                if let Some(node) = peers.remove(name) {
+                    info!("Cluster: removing dead peer '{}' ({}), routes cleaned", name, node.host_ip);
+                }
+            }
+            drop(peers);
+
+            // Reinstall routes after peer changes
+            let _ = self.install_routes(netmux).await;
+        }
+    }
+
     /// Install cross-node routes for all known peers.
-    pub fn install_routes(&self, netmux: &NetMux) -> Result<()> {
+    pub async fn install_routes(&self, netmux: &NetMux) -> Result<()> {
         let peers = self.peers.lock().unwrap().clone();
         for (name, peer) in &peers {
             if let Some(ref cidr) = peer.pod_cidr {
-                let peer_host = peer.host_ip;
-                match netmux.add_subnet_route_raw(cidr, &peer_host.to_string()) {
-                    Ok(()) => info!("Route: {} via {} ({})", cidr, peer_host, name),
+                match netmux.add_subnet_route_raw(cidr, &peer.host_ip.to_string()) {
+                    Ok(()) => info!("Route: {} via {} ({})", cidr, peer.host_ip, name),
                     Err(e) => warn!("Failed to install route to {}: {}", name, e),
                 }
             }
         }
         Ok(())
+    }
+
+    pub fn update_peer_heartbeat(&self, name: &str) {
+        if let Some(peer) = self.peers.lock().unwrap().get_mut(name) {
+            peer.last_seen = Instant::now();
+        }
     }
 
     pub fn name(&self) -> &str { &self.name }

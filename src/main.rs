@@ -110,10 +110,11 @@ async fn main() -> Result<()> {
     if let Err(e) = crate::netmux::NetMux::ensure_loopback_up() {
         warn!("Failed to bring up loopback: {}", e);
     }
+    crate::netmux::netlink::harden_sysctl().ok();
     if let Err(e) = netmux.init_nftables() {
         panic!("nftables init failed: {} — nftables is required, refusing to start", e);
     }
-    if let Err(e) = netmux.add_snat(&cfg.pod_cidr) {
+    if let Err(e) = netmux.add_snat("default", &cfg.pod_cidr) {
         warn!("Failed to add SNAT: {} — pods may not reach internet", e);
     }
 

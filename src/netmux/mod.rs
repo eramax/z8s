@@ -172,9 +172,14 @@ impl NetMux {
         self.nft.init()
     }
 
-    /// Add MASQUERADE rule for pod internet access.
-    pub fn add_snat(&self, pod_cidr: &str) -> Result<()> {
-        self.nft.add_snat(pod_cidr)
+    /// Add MASQUERADE rule for pod internet access (per-VNet).
+    pub fn add_snat(&self, vnet_name: &str, vnet_cidr: &str) -> Result<()> {
+        self.nft.add_snat(vnet_name, vnet_cidr)
+    }
+
+    /// Remove MASQUERADE rule for a VNet.
+    pub fn remove_snat(&self, vnet_cidr: &str) -> Result<()> {
+        self.nft.remove_snat(vnet_cidr)
     }
 
     /// Add DNAT rule for ClusterIP.

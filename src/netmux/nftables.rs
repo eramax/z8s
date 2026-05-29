@@ -81,21 +81,40 @@ impl NftEngine {
         Ok(())
     }
 
-    pub fn add_snat(&self, pod_cidr: &str) -> Result<()> {
+    /// Add MASQUERADE for a specific VNet's CIDR (hub VNet gets SNAT, spokes don't).
+    /// The `vnet_name` is used to tag the rule so it can be removed later.
+    pub fn add_snat(&self, vnet_name: &str, vnet_cidr: &str) -> Result<()> {
         let _lock = self.writer.lock().unwrap();
         let mut batch = Batch::new();
-
         let nat_table = Table::new(ProtocolFamily::Ipv4).with_name(NAT_TABLE);
         let postrouting = Chain::new(&nat_table).with_name("postrouting");
 
-        let cidr: IpNetwork = pod_cidr.parse().context("Invalid pod CIDR")?;
+        let cidr: IpNetwork = vnet_cidr.parse().context("Invalid VNet CIDR")?;
         let rule = Rule::new(&postrouting)?
             .snetwork(cidr)?
             .masquerade();
         batch.add(&rule, rustables::MsgType::Add);
 
         batch.send().context("Failed to send SNAT batch")?;
-        info!("nftables: added MASQUERADE for {}", pod_cidr);
+        info!("nftables: added MASQUERADE for VNet '{}' (CIDR {})", vnet_name, vnet_cidr);
+        Ok(())
+    }
+
+    /// Remove MASQUERADE for a specific VNet by CIDR.
+    pub fn remove_snat(&self, vnet_cidr: &str) -> Result<()> {
+        let _lock = self.writer.lock().unwrap();
+        let mut batch = Batch::new();
+        let nat_table = Table::new(ProtocolFamily::Ipv4).with_name(NAT_TABLE);
+        let postrouting = Chain::new(&nat_table).with_name("postrouting");
+
+        let cidr: IpNetwork = vnet_cidr.parse().context("Invalid VNet CIDR")?;
+        let rule = Rule::new(&postrouting)?
+            .snetwork(cidr)?
+            .masquerade();
+        batch.add(&rule, rustables::MsgType::Del);
+
+        batch.send().context("Failed to remove SNAT batch")?;
+        info!("nftables: removed MASQUERADE for CIDR {}", vnet_cidr);
         Ok(())
     }
 
