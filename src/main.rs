@@ -111,6 +111,12 @@ async fn main() -> Result<()> {
     if let Err(e) = crate::netmux::NetMux::ensure_loopback_up() {
         warn!("Failed to bring up loopback: {}", e);
     }
+    if let Err(e) = netmux.init_nftables() {
+        warn!("Failed to init nftables: {} — network enforcement disabled", e);
+    }
+    if let Err(e) = netmux.add_snat(&cfg.pod_cidr) {
+        warn!("Failed to add SNAT: {} — pods may not reach internet", e);
+    }
 
     let supervisor = Arc::new(ProcessSupervisor::new(
         image_manager,

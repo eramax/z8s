@@ -2555,6 +2555,7 @@ dependencies = [
  "chrono",
  "flate2",
  "futures-util",
+ "ipnetwork",
  "k8s-openapi",
  "landlock",
  "nix 0.31.3",

@@ -2,6 +2,7 @@ pub mod pool;
 pub mod veth;
 pub mod routing;
 pub mod netlink;
+pub mod nftables;
 
 use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex};
@@ -9,12 +10,14 @@ use anyhow::{Context, Result};
 use tracing::{info, warn};
 
 use pool::{IpPool, Ipv4Cidr};
+pub use nftables::NftEngine;
 
-/// Unified network engine — one pool, veth management, host routing.
+/// Unified network engine — one pool, veth management, host routing, nftables.
 pub struct NetMux {
     pool: Mutex<IpPool>,
     prefix: u8,
     gateway: Ipv4Addr,
+    pub nft: NftEngine,
 }
 
 impl NetMux {
@@ -22,10 +25,12 @@ impl NetMux {
         let cidr = Ipv4Cidr::parse(pod_cidr)
             .context("Invalid pod CIDR")?;
         let gateway = Self::derive_gateway(&cidr)?;
+        let nft = NftEngine::new();
         Ok(Self {
             pool: Mutex::new(IpPool::new(cidr.clone())),
             prefix: cidr.prefix,
             gateway,
+            nft,
         })
     }
 
@@ -153,6 +158,31 @@ impl NetMux {
         }
 
         Ok(())
+    }
+
+    /// Initialize nftables tables and chains.
+    pub fn init_nftables(&self) -> Result<()> {
+        self.nft.init()
+    }
+
+    /// Add MASQUERADE rule for pod internet access.
+    pub fn add_snat(&self, pod_cidr: &str) -> Result<()> {
+        self.nft.add_snat(pod_cidr)
+    }
+
+    /// Add DNAT rule for ClusterIP.
+    pub fn add_dnat(&self, cluster_ip: Ipv4Addr, port: u16, backends: &[(Ipv4Addr, u16)]) -> Result<()> {
+        self.nft.add_dnat(cluster_ip, port, backends)
+    }
+
+    /// Add forward allow rule between two CIDRs.
+    pub fn add_forward_allow(&self, src_cidr: &str, dst_cidr: &str) -> Result<()> {
+        self.nft.add_forward_allow(src_cidr, dst_cidr)
+    }
+
+    /// Add forward deny rule between two CIDRs.
+    pub fn add_forward_deny(&self, src_cidr: &str, dst_cidr: &str) -> Result<()> {
+        self.nft.add_forward_deny(src_cidr, dst_cidr)
     }
 
     /// Clean up orphaned veths at startup.
