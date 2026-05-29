@@ -262,6 +262,7 @@ impl ProcessSupervisor {
     pub async fn start_pod_from_spec(&self, spec: &crate::cri::spec::ContainerSpec) -> Result<()> {
         let pod_uid = &spec.pod_uid;
         let pod_name = &spec.pod_name;
+        let placeholders: Vec<String> = spec.containers.iter().map(|c| c.container_id.clone()).collect();
 
         crate::cri::volumes::cleanup_emptydir(pod_uid);
 
@@ -298,9 +299,17 @@ impl ProcessSupervisor {
             }
         }
 
+        let placeholders: Vec<String> = spec.containers.iter().map(|c| c.container_id.clone()).collect();
+
         info!("Starting pod {} ({} container(s))", pod_name, spec.containers.len());
 
-        self.cgroup_manager.create_pod_cgroup(pod_uid)?;
+        if let Err(e) = self.cgroup_manager.create_pod_cgroup(pod_uid) {
+            // cgroup_create failed — clean up placeholders so retries aren't blocked
+            let mut r = self.running.lock().await;
+            for cid in &placeholders { r.remove(cid.as_str()); }
+            drop(r);
+            return Err(e);
+        }
 
         for cfg in &spec.containers {
             if let Some(limit) = cfg.memory_limit_bytes {
@@ -330,6 +339,13 @@ impl ProcessSupervisor {
                 String::new()
             } else {
                 self.image_manager.unpack_image(image_ref, &cfg.container_id).await
+                    .map_err(|e| {
+                        // unpack_image failed — clean up placeholders
+                        let mut r = self.running.blocking_lock();
+                        for cid in &placeholders { r.remove(cid.as_str()); }
+                        drop(r);
+                        e
+                    })
                     .context(format!("Failed to prepare image {} for {}", image_ref, cfg.container_name))?
             };
 
@@ -337,6 +353,13 @@ impl ProcessSupervisor {
             let rc = match self.spawn_container_from_config(cfg, &rootfs_path, pod_uid).await {
                 Ok(rc) => rc,
                 Err(e) => {
+                    // Remove placeholder entries so future retries aren't blocked
+                    {
+                        let mut running = self.running.lock().await;
+                        for cfg in &spec.containers {
+                            running.remove(&cfg.container_id);
+                        }
+                    }
                     // Stop any containers we already started (orphan prevention)
                     for (cid, cid_rc) in &prepared {
                         if let Some(pid) = cid_rc.instance.pid {
@@ -429,7 +452,13 @@ impl ProcessSupervisor {
         let oci_env = crate::cri::oci::read_image_config(&rootfs_owned).env.unwrap_or_default();
         let mut env_owned: Vec<(String, String)> = Vec::new();
         let mut seen = std::collections::HashSet::new();
-        // OCI env first (lower priority) — format: ["KEY=VALUE", ...]
+        // Pod env first (higher priority)
+        for (k, v) in env_vars {
+            if seen.insert(k.clone()) {
+                env_owned.push((k.clone(), v.clone()));
+            }
+        }
+        // OCI env second (fills gaps — lower priority)
         for entry in &oci_env {
             if let Some(eq) = entry.find('=') {
                 let key = entry[..eq].to_string();
@@ -437,12 +466,6 @@ impl ProcessSupervisor {
                 if seen.insert(key.clone()) {
                     env_owned.push((key, val));
                 }
-            }
-        }
-        // Pod env second (higher priority — overwrites OCI defaults)
-        for (k, v) in env_vars {
-            if seen.insert(k.clone()) {
-                env_owned.push((k.clone(), v.clone()));
             }
         }
 
@@ -646,6 +669,13 @@ impl ProcessSupervisor {
         let oci_env = crate::cri::oci::read_image_config(&rootfs_owned).env.unwrap_or_default();
         let mut env_owned: Vec<(String, String)> = Vec::new();
         let mut seen = std::collections::HashSet::new();
+        // Pod env first (higher priority)
+        for (k, v) in env_vars {
+            if seen.insert(k.clone()) {
+                env_owned.push((k.clone(), v.clone()));
+            }
+        }
+        // OCI env second (fills gaps — lower priority)
         for entry in &oci_env {
             if let Some(eq) = entry.find('=') {
                 let key = entry[..eq].to_string();
@@ -653,11 +683,6 @@ impl ProcessSupervisor {
                 if seen.insert(key.clone()) {
                     env_owned.push((key, val));
                 }
-            }
-        }
-        for (k, v) in env_vars {
-            if seen.insert(k.clone()) {
-                env_owned.push((k.clone(), v.clone()));
             }
         }
 
