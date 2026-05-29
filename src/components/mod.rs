@@ -34,6 +34,7 @@ pub struct ReconcileContext {
     pub net: Arc<dyn NetworkEngine>,
     pub process_tracker: Arc<ProcessTracker>,
     pub vol: Arc<dyn StorageProvisioner>,
+    pub netmux: Arc<NetMux>,
 }
 
 pub struct ComponentRegistry {

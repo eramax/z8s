@@ -14,6 +14,7 @@ use crate::components::{ComponentRegistry, PipelineBuilder, ReconcileContext};
 use crate::components::compute::deployment::DeploymentResource;
 use crate::components::compute::pod::PodResource;
 use crate::components::network::service::ServiceResource;
+use crate::components::network::crd_component::CrdWatcher;
 use crate::components::storage::configmap::ConfigMapResource;
 use crate::components::storage::pv::PvResource;
 use crate::components::storage::pvc::PvcResource;
@@ -121,7 +122,7 @@ async fn main() -> Result<()> {
     let supervisor = Arc::new(ProcessSupervisor::new(
         image_manager,
         cgroup_manager.clone(),
-        netmux,
+        netmux.clone(),
     ));
 
     let cri = Arc::new(ContainerRuntime::new(
@@ -157,6 +158,7 @@ async fn main() -> Result<()> {
         net: network.clone() as Arc<dyn crate::netmux::network::NetworkEngine>,
         process_tracker: process_tracker.clone(),
         vol: provisioner.clone() as Arc<dyn crate::storage::StorageProvisioner>,
+        netmux: netmux.clone(),
     });
 
     let mut registry = ComponentRegistry::new();
@@ -167,6 +169,10 @@ async fn main() -> Result<()> {
     registry.register(Box::new(SecretResource::new(store.clone())));
     registry.register(Box::new(PvResource::new(store.clone())));
     registry.register(Box::new(PvcResource::new(store.clone())));
+    // Network CRD watchers (VNet, NSG, NetworkPolicy, etc.)
+    for kind in &["VNet", "NSG", "Subnet", "Hub", "Spoke", "RouteTable", "NetworkPolicy", "Ingress"] {
+        registry.register(Box::new(CrdWatcher::new(netmux.clone(), store.clone(), kind)));
+    }
     let registry = Arc::new(registry);
 
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);

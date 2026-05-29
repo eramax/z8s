@@ -331,6 +331,7 @@ mod tests {
         });
         let network = Arc::new(crate::components::network::service::NetworkManager::new(store.clone(), process_tracker.clone()));
         let pipeline = Arc::new(crate::components::ReconciliationPipeline::builder().build());
+        let test_netmux = Arc::new(crate::netmux::NetMux::new("10.42.0.0/16").unwrap());
         let ctx = Arc::new(crate::components::ReconcileContext {
             store: store.clone(),
             pipeline: pipeline.clone(),
@@ -338,6 +339,7 @@ mod tests {
             net: network.clone() as Arc<dyn crate::netmux::network::NetworkEngine>,
             process_tracker: process_tracker.clone(),
             vol: Arc::new(crate::storage::ProvisionerDispatcher::new(store.clone())) as Arc<dyn crate::storage::StorageProvisioner>,
+            netmux: test_netmux.clone(),
         });
         let registry = Arc::new(crate::components::ComponentRegistry::new());
         let state = build_app_state(store, process_tracker, registry, ctx).await;
@@ -360,6 +362,7 @@ mod tests {
         });
         let network = Arc::new(crate::components::network::service::NetworkManager::new(store.clone(), process_tracker.clone()));
         let pipeline = Arc::new(crate::components::ReconciliationPipeline::builder().build());
+        let test_netmux = Arc::new(crate::netmux::NetMux::new("10.42.0.0/16").unwrap());
         let ctx = Arc::new(crate::components::ReconcileContext {
             store: store.clone(),
             pipeline: pipeline.clone(),
@@ -367,6 +370,7 @@ mod tests {
             net: network.clone() as Arc<dyn crate::netmux::network::NetworkEngine>,
             process_tracker: process_tracker.clone(),
             vol: Arc::new(crate::storage::ProvisionerDispatcher::new(store.clone())) as Arc<dyn crate::storage::StorageProvisioner>,
+            netmux: test_netmux.clone(),
         });
         let registry = Arc::new(crate::components::ComponentRegistry::new());
         let state = build_app_state(store.clone(), process_tracker, registry, ctx).await;

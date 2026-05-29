@@ -112,6 +112,7 @@ pub enum AnyResource {
     Spoke(crate::netmux::crds::Spoke),
     RouteTable(crate::netmux::crds::RouteTable),
     Ingress(k8s_openapi::api::networking::v1::Ingress),
+    NetworkPolicy(k8s_openapi::api::networking::v1::NetworkPolicy),
 }
 
 impl AnyResource {
@@ -131,6 +132,7 @@ impl AnyResource {
             AnyResource::Spoke(r) => &r.metadata,
             AnyResource::RouteTable(r) => &r.metadata,
             AnyResource::Ingress(r) => &r.metadata,
+            AnyResource::NetworkPolicy(r) => &r.metadata,
         }
     }
 
@@ -150,6 +152,7 @@ impl AnyResource {
             AnyResource::Spoke(r) => &mut r.metadata,
             AnyResource::RouteTable(r) => &mut r.metadata,
             AnyResource::Ingress(r) => &mut r.metadata,
+            AnyResource::NetworkPolicy(r) => &mut r.metadata,
         }
     }
 
@@ -169,6 +172,7 @@ impl AnyResource {
             AnyResource::Spoke(_) => "Spoke",
             AnyResource::RouteTable(_) => "RouteTable",
             AnyResource::Ingress(_) => "Ingress",
+            AnyResource::NetworkPolicy(_) => "NetworkPolicy",
         }
     }
 
@@ -244,6 +248,9 @@ pub fn parse_manifest_yaml(yaml: &str) -> Result<Vec<AnyResource>> {
             ),
             "Ingress" => AnyResource::Ingress(
                 serde_yaml::from_value(value).context("Failed to parse Ingress")?,
+            ),
+            "NetworkPolicy" => AnyResource::NetworkPolicy(
+                serde_yaml::from_value(value).context("Failed to parse NetworkPolicy")?,
             ),
             _ => anyhow::bail!("Unsupported resource kind: {}", kind),
         };
