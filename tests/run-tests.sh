@@ -71,6 +71,12 @@ wait_pod_phase() {
 }
 
 cleanup() {
+    echo "Cleanup disabled for debugging — state preserved."
+    echo "  veth interfaces: $(ls /sys/class/net/ 2>/dev/null | grep veth | wc -l)"
+    echo "  ClusterIPs on lo: $(ip addr show lo 2>/dev/null | grep '10.96' | wc -l)"
+}
+
+cleanup2() {
     echo ""
     section "Cleanup"
     sub "Deleting all test resources..."
@@ -106,7 +112,7 @@ cleanup() {
     tail -40 "$LOG"
     [[ $FAIL -eq 0 ]] && exit 0 || exit 1
 }
-trap cleanup EXIT
+#trap cleanup EXIT
 
 # ── 0. Server startup ──────────────────────────────────────────────────────────
 section "0. Server startup"
