@@ -369,10 +369,6 @@ fn enter_namespaces_no_user(
     Ok(())
 }
 
-fn is_root() -> bool {
-    rootfs::is_root()
-}
-
 fn read_container_path(pid: u32) -> String {
     if let Ok(data) = std::fs::read(format!("/proc/{pid}/environ")) {
         for var in data.split(|&b| b == 0) {

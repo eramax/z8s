@@ -199,7 +199,6 @@ impl ImageManager {
             .unwrap_or((None, None, None, None));
         let has_ep = image_ep.as_ref().is_some_and(|ep| !ep.is_empty());
         let has_cmd = image_cmd.as_ref().is_some_and(|c| !c.is_empty());
-        let needs_guess = !has_ep && !has_cmd;
         save_image_config(&cache_path, image_ep, image_cmd, image_env, image_wd);
 
         for (i, layer) in layers.iter().enumerate() {
