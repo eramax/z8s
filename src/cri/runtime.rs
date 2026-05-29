@@ -795,8 +795,8 @@ impl ProcessSupervisor {
                     env_vars: env_owned.clone(),
                     published_ports: std::collections::HashMap::new(),
                     isolated_net: isolate_net,
-                    pod_ip: None,
-                    host_veth_ifindex: None,
+                    pod_ip,
+                    host_veth_ifindex,
                 };
                 instance.published_ports = std::collections::HashMap::new();
 

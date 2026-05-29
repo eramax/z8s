@@ -54,11 +54,14 @@ impl IpPool {
         let network = cidr.network_u32();
         let bits = 32u32 - cidr.prefix as u32;
         let mut free = BTreeSet::new();
-        if cidr.prefix == 32 {
-            // /32 pool — single IP
-            free.insert(network + 1);
+        let total = 1u32 << bits;
+        if cidr.prefix >= 31 {
+            // /31 has 2 hosts (no network/broadcast), /32 has 1 host
+            for i in 0..total {
+                free.insert(network + i);
+            }
         } else {
-            for i in 1..((1u32 << bits) - 1) {
+            for i in 1..(total - 1) {
                 free.insert(network + i);
             }
         }
@@ -76,6 +79,27 @@ impl IpPool {
 
     pub fn count_free(&self) -> usize {
         self.free.len()
+    }
+
+    /// Add a new CIDR range to the free set (for VNet expansion).
+    /// Requires the new CIDR to be contiguous and adjacent to the current one.
+    /// Returns an error if the new CIDR overlaps or is not adjacent.
+    pub fn expand(&mut self, new_cidr: &Ipv4Cidr) -> Result<(), String> {
+        let old_network = self.cidr.network_u32();
+        let old_size = 1u32 << (32 - self.cidr.prefix as u32);
+        let new_network = new_cidr.network_u32();
+        let new_size = 1u32 << (32 - new_cidr.prefix as u32);
+
+        // Check contiguity: new CIDR must start right after old CIDR
+        if new_network != old_network + old_size {
+            return Err("New CIDR is not adjacent to current CIDR".to_string());
+        }
+
+        let bits = 32 - new_cidr.prefix as u32;
+        for i in 0..(1u32 << bits) {
+            self.free.insert(new_network + i);
+        }
+        Ok(())
     }
 
     pub fn cidr(&self) -> &Ipv4Cidr {

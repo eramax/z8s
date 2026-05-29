@@ -11,9 +11,10 @@ pub fn veth_name_from_uid(uid: &str) -> String {
     format!("veth-{}", hex)
 }
 
-/// Peer side of veth pair (inside pod netns).
+/// Peer side of veth pair (inside pod netns). Capped at 15 chars (Linux IFNAMSIZ).
 pub fn veth_peer_name(host_name: &str) -> String {
-    format!("{}-peer", host_name)
+    let p = format!("{}-e", host_name);
+    p[..p.len().min(15)].to_string()
 }
 
 /// Create a veth pair for a pod.

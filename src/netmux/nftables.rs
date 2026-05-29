@@ -103,14 +103,41 @@ impl NftEngine {
         if backends.is_empty() {
             return Ok(());
         }
+        let chain_name = format!("svc-{}-{}", cluster_ip, port);
         let _lock = self.writer.lock().unwrap();
         let mut batch = Batch::new();
 
         let nat_table = Table::new(ProtocolFamily::Ipv4).with_name(NAT_TABLE);
         let prerouting = Chain::new(&nat_table).with_name("prerouting");
 
-        for (idx, (backend_ip, backend_port)) in backends.iter().enumerate() {
-            let mut rule = Rule::new(&prerouting)?;
+        // Delete old chain if exists (removes all old rules atomically)
+        let old_chain = Chain::new(&nat_table)
+            .with_name(&chain_name)
+            .with_type(ChainType::Nat);
+        // Plan §6.3: atomically replace entire chain via Batch
+        batch.add(&old_chain, rustables::MsgType::Del);
+
+        // Create new per-service chain (no hook — jumped to, not base)
+        let svc_chain = Chain::new(&nat_table)
+            .with_name(&chain_name)
+            .with_type(ChainType::Nat)
+            .with_policy(ChainPolicy::Accept);
+        batch.add(&svc_chain, rustables::MsgType::Add);
+
+        // Shuffle backends for pseudo-round-robin
+        let mut shuffled: Vec<(Ipv4Addr, u16)> = backends.to_vec();
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let seed = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().subsec_nanos();
+        let mut rng = (seed as u64).wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        for i in (1..shuffled.len()).rev() {
+            let j = (rng >> 33) as usize % (i + 1);
+            shuffled.swap(i, j);
+            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        }
+
+        // Add one DNAT rule per backend into the per-service chain
+        for (backend_ip, backend_port) in &shuffled {
+            let mut rule = Rule::new(&svc_chain)?;
             rule.add_expr(Meta::new(MetaType::NfProto));
             rule.add_expr(Cmp::new(CmpOp::Eq, [libc::NFPROTO_IPV4 as u8]));
             rule.add_expr(
@@ -134,8 +161,43 @@ impl NftEngine {
             batch.add(&rule, rustables::MsgType::Add);
         }
 
+        // Add jump rule in prerouting to this service chain
+        let mut jump_rule = Rule::new(&prerouting)?;
+        jump_rule.add_expr(Meta::new(MetaType::NfProto));
+        jump_rule.add_expr(Cmp::new(CmpOp::Eq, [libc::NFPROTO_IPV4 as u8]));
+        jump_rule.add_expr(
+            HighLevelPayload::Network(NetworkHeaderField::IPv4(IPv4HeaderField::Daddr))
+                .build(),
+        );
+        jump_rule.add_expr(Cmp::new(CmpOp::Eq, cluster_ip.octets()));
+        jump_rule.add_expr(
+            HighLevelPayload::Transport(TransportHeaderField::Tcp(TCPHeaderField::Dport))
+                .build(),
+        );
+        jump_rule.add_expr(Cmp::new(CmpOp::Eq, port.to_be_bytes()));
+        jump_rule.add_expr(Immediate::new_verdict(rustables::expr::VerdictKind::Jump { chain: chain_name.clone() }));
+        batch.add(&jump_rule, rustables::MsgType::Add);
+
         batch.send().context("Failed to send DNAT batch")?;
-        info!("nftables: DNAT {}:{} -> {} backend(s)", cluster_ip, port, backends.len());
+        info!("nftables: DNAT {}:{} -> {} backends (chain {})", cluster_ip, port, backends.len(), chain_name);
+        Ok(())
+    }
+
+    /// Remove DNAT chain and jump rule for a ClusterIP.
+    pub fn remove_dnat(&self, cluster_ip: Ipv4Addr, port: u16) -> Result<()> {
+        let chain_name = format!("svc-{}-{}", cluster_ip, port);
+        let _lock = self.writer.lock().unwrap();
+        let mut batch = Batch::new();
+
+        let nat_table = Table::new(ProtocolFamily::Ipv4).with_name(NAT_TABLE);
+
+        let del_chain = Chain::new(&nat_table)
+            .with_name(&chain_name)
+            .with_type(ChainType::Nat);
+        batch.add(&del_chain, rustables::MsgType::Del);
+
+        batch.send().context("Failed to remove DNAT chain")?;
+        info!("nftables: removed DNAT chain {}", chain_name);
         Ok(())
     }
 

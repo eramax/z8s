@@ -26,6 +26,7 @@ pub struct Config {
     pub manifests_dir: String,
     pub data_dir: Option<String>,
     pub pod_cidr: String,
+    pub vnet_cidr_size: u8,
     pub node_name: String,
     pub node_ip: String,
     pub peers: Vec<(String, String)>,
@@ -72,6 +73,7 @@ impl Config {
             manifests_dir: "/etc/z8s/manifests".to_string(),
             data_dir: None,
             pod_cidr: "10.42.0.0/16".to_string(),
+            vnet_cidr_size: 20,
             node_name: hostname(),
             node_ip: auto_detect_node_ip().unwrap_or_else(|| "127.0.0.1".to_string()),
             peers: Vec::new(),
@@ -169,6 +171,15 @@ impl Config {
                         }
                     }
                 }
+                "--vnet-cidr-size" => {
+                    i += 1;
+                    if let Some(v) = args.get(i) {
+                        cfg.vnet_cidr_size = v.parse().unwrap_or_else(|_| {
+                            eprintln!("Invalid --vnet-cidr-size value: {}", v);
+                            std::process::exit(1);
+                        });
+                    }
+                }
                 other => {
                     eprintln!("Unknown argument: {}", other);
                     eprintln!("{}", HELP);
@@ -235,6 +246,7 @@ OPTIONS:
     --port <PORT>             API server listen port        [default: 6443]
     --service-cidr <CIDR>     ClusterIP allocation CIDR     [default: 10.96.0.0/16]
     --pod-cidr <CIDR>         Pod IP allocation CIDR        [default: 10.42.0.0/16]
+    --vnet-cidr-size <PREFIX> Default VNet CIDR size         [default: 20]
     --cluster-domain <DOMAIN> In-cluster DNS search domain  [default: cluster.local]
     --dns-port <PORT>         Force DNS listen port         [default: auto: try 53, then 5353]
     --manifests-dir <PATH>    Manifests directory to watch  [default: /etc/z8s/manifests]

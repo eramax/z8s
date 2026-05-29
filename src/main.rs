@@ -111,7 +111,7 @@ async fn main() -> Result<()> {
         warn!("Failed to bring up loopback: {}", e);
     }
     if let Err(e) = netmux.init_nftables() {
-        warn!("Failed to init nftables: {} — network enforcement disabled", e);
+        panic!("nftables init failed: {} — nftables is required, refusing to start", e);
     }
     if let Err(e) = netmux.add_snat(&cfg.pod_cidr) {
         warn!("Failed to add SNAT: {} — pods may not reach internet", e);

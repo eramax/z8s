@@ -182,6 +182,16 @@ impl NetMux {
         self.nft.add_dnat(cluster_ip, port, backends)
     }
 
+    /// Remove DNAT chain for a ClusterIP.
+    pub fn remove_dnat(&self, cluster_ip: Ipv4Addr, port: u16) -> Result<()> {
+        self.nft.remove_dnat(cluster_ip, port)
+    }
+
+    /// Update ClusterIP backends (atomically replaces DNAT chain).
+    pub fn update_dnat_backends(&self, cluster_ip: Ipv4Addr, port: u16, backends: &[(Ipv4Addr, u16)]) -> Result<()> {
+        self.nft.add_dnat(cluster_ip, port, backends)
+    }
+
     /// Add forward allow rule between two CIDRs.
     pub fn add_forward_allow(&self, src_cidr: &str, dst_cidr: &str) -> Result<()> {
         self.nft.add_forward_allow(src_cidr, dst_cidr)
