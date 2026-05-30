@@ -494,7 +494,7 @@ impl Component for ServiceResource {
 
     async fn on_apply(&self, _ctx: &ReconcileContext, resource: &AnyResource) -> Result<()> {
         if let AnyResource::Service(svc) = resource {
-            debug!("ServiceResource::on_apply for {}", svc.metadata.name.as_deref().unwrap_or("?"));
+            tracing::info!("ServiceResource::on_apply for {}", svc.metadata.name.as_deref().unwrap_or("?"));
             self.network.sync_service(svc).await;
         }
         Ok(())

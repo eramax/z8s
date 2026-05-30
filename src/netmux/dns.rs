@@ -14,8 +14,8 @@ pub async fn run_dns(store: Arc<ResourceStore>) -> Option<u16> {
         vec![53, 5353]
     };
     for port in ports {
-        if let Ok(sock) = UdpSocket::bind(format!("127.0.0.1:{}", port)).await {
-            info!("DNS server listening on 127.0.0.1:{}", port);
+        if let Ok(sock) = UdpSocket::bind(format!("0.0.0.0:{}", port)).await {
+            info!("DNS server listening on 0.0.0.0:{}", port);
             tokio::spawn(dns_loop(sock, store));
             return Some(port);
         }

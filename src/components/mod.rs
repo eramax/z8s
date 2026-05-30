@@ -78,11 +78,15 @@ impl ComponentRegistry {
 
     pub async fn on_apply(&self, ctx: &ReconcileContext, resource: &AnyResource) {
         let kind = resource.kind();
+        tracing::info!("on_apply dispatch for kind={} uid={}", kind, resource.uid());
 
         if let Some(component) = self.get(kind) {
+            tracing::info!("on_apply found component for {}", kind);
             if let Err(e) = component.on_apply(ctx, resource).await {
                 tracing::error!("on_apply failed for {}: {}", resource.uid(), e);
             }
+        } else {
+            tracing::info!("on_apply no component for {}", kind);
         }
 
         let stage_ctx = StageContext {

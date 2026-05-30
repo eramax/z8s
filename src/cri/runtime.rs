@@ -463,7 +463,7 @@ impl ProcessSupervisor {
             match self.netmux.attach_pod(pod_uid, Some(pid)) {
                 Ok((ip, host_idx, peer_idx)) => {
                     if let Err(e) = self.netmux.configure_pod_netns(pod_uid, &ip, pid, peer_idx) {
-                        warn!("NetMux configure_pod_netns failed: {}", e);
+                        warn!("NetMux configure_pod_netns failed: {:#}", e);
                     }
                     nix::unistd::write(ack_w, b"A").ok();
                     return (Some(ip), Some(host_idx));
@@ -763,7 +763,7 @@ impl ProcessSupervisor {
                     match self.netmux.attach_pod(pod_uid, Some(pid)) {
                         Ok((ip, host_idx, peer_idx)) => {
                             if let Err(e) = self.netmux.configure_pod_netns(pod_uid, &ip, pid, peer_idx) {
-                                warn!("NetMux configure_pod_netns failed: {}", e);
+                        warn!("NetMux configure_pod_netns failed: {:#}", e);
                             }
                             pod_ip = Some(ip);
                             host_veth_ifindex = Some(host_idx);

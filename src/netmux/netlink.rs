@@ -143,7 +143,7 @@ fn check_nl_response(resp: &[u8], context: &str) -> Result<()> {
         if msg_type == NLMSG_ERROR && resp.len() >= 20 {
             let err_code = i32::from_ne_bytes([resp[16], resp[17], resp[18], resp[19]]);
             if err_code != 0 {
-                return Err(anyhow::anyhow!("{}: netlink error {}", context, err_code));
+                return Err(anyhow::anyhow!("{}: netlink error {} ({})", context, err_code, nix::errno::from_i32(err_code)));
             }
         }
     }
@@ -281,7 +281,9 @@ pub fn add_route(dest: &Ipv4Addr, prefix: u8, gateway: Option<&Ipv4Addr>, oif: O
 
     let dest_bytes = dest.octets();
     let mut attrs: Vec<Vec<u8>> = Vec::new();
-    attrs.push(nlattr(RTA_DST, &u32::from_ne_bytes(dest_bytes)));
+    if prefix > 0 {
+        attrs.push(nlattr(RTA_DST, &u32::from_ne_bytes(dest_bytes)));
+    }
 
     if let Some(gw) = gateway {
         let gw_bytes = gw.octets();
@@ -312,7 +314,9 @@ pub fn add_route(dest: &Ipv4Addr, prefix: u8, gateway: Option<&Ipv4Addr>, oif: O
     buf[21] = RTPROT_BOOT;
     buf[22] = scope;
     buf[23] = RTN_UNICAST;
-    buf[24..28].copy_from_slice(&0u32.to_ne_bytes()); // rtm_flags
+    // Set RTNH_F_ONLINK for gateway routes (skip gateway reachability check)
+    let rtm_flags: u32 = if gateway.is_some() { 4 } else { 0 }; // RTNH_F_ONLINK = 4
+    buf[24..28].copy_from_slice(&rtm_flags.to_ne_bytes());
 
     let mut offset = 28;
     for attr in &attrs {
@@ -331,7 +335,9 @@ pub fn del_route(dest: &Ipv4Addr, prefix: u8, gateway: Option<&Ipv4Addr>, oif: O
 
     let dest_bytes = dest.octets();
     let mut attrs: Vec<Vec<u8>> = Vec::new();
-    attrs.push(nlattr(RTA_DST, &u32::from_ne_bytes(dest_bytes)));
+    if prefix > 0 {
+        attrs.push(nlattr(RTA_DST, &u32::from_ne_bytes(dest_bytes)));
+    }
 
     if let Some(gw) = gateway {
         let gw_bytes = gw.octets();

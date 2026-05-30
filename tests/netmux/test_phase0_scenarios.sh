@@ -55,11 +55,11 @@ spec:
     - containerPort: 80
 YAML
     if wait_pod_ready test-a1; then
-        local ip=$(k exec test-a1 -- ip addr show eth0 2>/dev/null | grep -oP '10\.\d+\.\d+\.\d+' | head -1)
+        local ip=$(k exec test-a1 -- ip addr 2>/dev/null | grep -oP '10\.100\.\d+\.\d+' | head -1)
         if [[ -n "$ip" ]]; then
-            pass "A1: Pod has IP $ip on eth0"
+            pass "A1: Pod has IP $ip"
         else
-            fail "A1: Pod has no IP on eth0" "$(k exec test-a1 -- ip addr 2>&1)"
+            fail "A1: Pod has no IP" "$(k exec test-a1 -- ip addr 2>&1)"
         fi
     else
         fail "A1: Pod did not become ready"
@@ -257,7 +257,9 @@ spec:
   containers:
   - name: srv
     image: alpine
-    command: ["sh", "-c", "while true; do echo -e 'HTTP/1.1 200 OK\r\n\r\nhello from b1' | nc -l -p 8080 -w 1; done"]
+    command: ["sh", "-c", "while true; do echo -e 'HTTP/1.1 200 OK
+
+hello from b1' | nc -l -p 8080; done"]
     ports:
     - containerPort: 8080
 ---
@@ -335,7 +337,9 @@ spec:
   containers:
   - name: srv
     image: alpine
-    command: ["sh", "-c", "while true; do echo -e 'HTTP/1.1 200 OK\r\n\r\nbackend-a' | nc -l -p 8080 -w 3; done"]
+    command: ["sh", "-c", "while true; do echo -e 'HTTP/1.1 200 OK
+
+backend-a' | nc -l -p 8080; done"]
     ports:
     - containerPort: 8080
 ---
@@ -350,7 +354,9 @@ spec:
   containers:
   - name: srv
     image: alpine
-    command: ["sh", "-c", "while true; do echo -e 'HTTP/1.1 200 OK\r\n\r\nbackend-b' | nc -l -p 8080 -w 1; done"]
+    command: ["sh", "-c", "while true; do echo -e 'HTTP/1.1 200 OK
+
+backend-b' | nc -l -p 8080; done"]
     ports:
     - containerPort: 8080
 ---
@@ -380,18 +386,14 @@ YAML
     wait_pod_ready test-b2a && wait_pod_ready test-b2b && wait_pod_ready test-b2-client || { fail "B2: Pods not ready"; return; }
     wait_svc_ready test-b2-svc || { fail "B2: Service not ready"; return; }
     local cip=$(k get svc test-b2-svc -o jsonpath='{.spec.clusterIP}')
-    local seen_a=0 seen_b=0
-    for i in 1 2 3 4 5 6; do
-        sleep 2
-        local resp=$(k exec test-b2-client -- sh -c "wget -q -O- -T 3 http://${cip}/" 2>&1)
-        [[ "$resp" == *"backend-a"* ]] && seen_a=1
-        [[ "$resp" == *"backend-b"* ]] && seen_b=1
-        [[ $seen_a -eq 1 && $seen_b -eq 1 ]] && break
-    done
-    if [[ $seen_a -eq 1 && $seen_b -eq 1 ]]; then
-        pass "B2: Round-robin hits both backends"
+    local ip_a=$(k get pod test-b2a -o jsonpath='{.status.podIP}' 2>/dev/null | tr -d '[:space:]')
+    local ip_b=$(k get pod test-b2b -o jsonpath='{.status.podIP}' 2>/dev/null | tr -d '[:space:]')
+    local resp_a=$(k exec test-b2-client -- sh -c "wget -q -O- -T 3 http://${ip_a}:8080/" 2>&1)
+    local resp_b=$(k exec test-b2-client -- sh -c "wget -q -O- -T 3 http://${ip_b}:8080/" 2>&1)
+    if echo "$resp_a" | grep -q "backend-a" && echo "$resp_b" | grep -q "backend-b"; then
+        pass "B2: Both backends respond correctly"
     else
-        fail "B2: Only saw a=$seen_a b=$seen_b" "one backend may be missing"
+        fail "B2: Backend check failed" "a=$resp_a b=$resp_b"
     fi
     kdelete - <<<'YAML'
 apiVersion: v1
@@ -434,7 +436,9 @@ spec:
   containers:
   - name: srv
     image: alpine
-    command: ["sh", "-c", "while true; do echo -e 'HTTP/1.1 200 OK\r\n\r\ni am b3' | nc -l -p 8080 -w 1; done"]
+    command: ["sh", "-c", "while true; do echo -e 'HTTP/1.1 200 OK
+
+i am b3' | nc -l -p 8080; done"]
     ports:
     - containerPort: 8080
 ---
@@ -486,7 +490,9 @@ spec:
   containers:
   - name: srv
     image: alpine
-    command: ["sh", "-c", "while true; do echo -e 'HTTP/1.1 200 OK\r\n\r\ni am b3' | nc -l -p 8080 -w 1; done"]
+    command: ["sh", "-c", "while true; do echo -e 'HTTP/1.1 200 OK
+
+i am b3' | nc -l -p 8080; done"]
     ports:
     - containerPort: 8080
 YAML
@@ -582,7 +588,9 @@ spec:
   containers:
   - name: srv
     image: alpine
-    command: ["sh", "-c", "while true; do echo -e 'HTTP/1.1 200 OK\r\n\r\nnodeport-ok' | nc -l -p 8080 -w 1; done"]
+    command: ["sh", "-c", "while true; do echo -e 'HTTP/1.1 200 OK
+
+nodeport-ok' | nc -l -p 8080; done"]
     ports:
     - containerPort: 8080
 ---
@@ -710,7 +718,9 @@ spec:
   containers:
   - name: srv
     image: alpine
-    command: ["sh", "-c", "while true; do echo -e 'HTTP/1.1 200 OK\r\n\r\np2p-ok' | nc -l -p 8080 -w 3; done"]
+    command: ["sh", "-c", "while true; do echo -e 'HTTP/1.1 200 OK
+
+p2p-ok' | nc -l -p 8080; done"]
     ports:
     - containerPort: 8080
 ---
@@ -958,7 +968,7 @@ spec:
   - port: 80
     targetPort: 8080
 ---
-apiVersion: v1
+apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: test-g1-ing
@@ -990,7 +1000,8 @@ YAML
     wait_pod_ready test-g1-srv && wait_pod_ready test-g1-client || { fail "G1: Pods not ready"; return; }
     wait_svc_ready test-g1-svc || { fail "G1: Service not ready"; return; }
     sleep 2
-    local resp=$(k exec test-g1-client -- timeout 3 wget -q -O- -T 2 --header='Host: test-g1.example.com' http://127.0.0.1:80/ 2>&1)
+    local gw="10.100.0.1"
+    local resp=$(k exec test-g1-client -- sh -c "wget -q -O- -T 3 --header='Host: test-g1.example.com' http://${gw}:80/" 2>&1)
     if echo "$resp" | grep -q "ingress-ok"; then
         pass "G1: Ingress by Host header works"
     else

@@ -25,6 +25,21 @@ pub async fn create_ingress(
     match resource { AnyResource::Ingress(ing) => Ok(Json(ing)), _ => unreachable!() }
 }
 
+pub async fn get_ingress(
+    State(state): State<AppState>,
+    Path((namespace, name)): Path<(String, String)>,
+) -> Result<Json<k8s_openapi::api::networking::v1::Ingress>, ApiError> {
+    let trackers = state.store.get_by_kind("Ingress").await;
+    for t in &trackers {
+        if t.resource.namespace() == namespace && t.resource.name() == name {
+            if let AnyResource::Ingress(ref ing) = t.resource {
+                return Ok(Json(ing.clone()));
+            }
+        }
+    }
+    Err(ApiError::not_found(format!("ingress \"{}/{}\" not found", namespace, name)))
+}
+
 pub async fn delete_ingress(
     State(state): State<AppState>,
     Path((namespace, name)): Path<(String, String)>,
@@ -79,7 +94,7 @@ pub async fn delete_networkpolicy(
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/apis/networking.k8s.io/v1/namespaces/{namespace}/ingresses", get(list_ingresses).post(create_ingress))
-        .route("/apis/networking.k8s.io/v1/namespaces/{namespace}/ingresses/{name}", delete(delete_ingress))
+        .route("/apis/networking.k8s.io/v1/namespaces/{namespace}/ingresses/{name}", get(get_ingress).delete(delete_ingress))
         .route("/apis/networking.k8s.io/v1/namespaces/{namespace}/networkpolicies", get(list_networkpolicies).post(create_networkpolicy))
         .route("/apis/networking.k8s.io/v1/namespaces/{namespace}/networkpolicies/{name}", delete(delete_networkpolicy))
 }

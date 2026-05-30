@@ -278,9 +278,21 @@ pub fn prepare_rootfs(rootfs_path: &str) -> Result<()> {
     }
 
     let resolv_conf = rootfs.join("etc/resolv.conf");
-    let content = if crate::config::dns_port().is_some() {
+    let dns_port = crate::config::dns_port();
+    let dns_server = crate::config::dns_server();
+    tracing::info!(
+        "prepare_rootfs: dns_port={:?} dns_server={:?}",
+        dns_port, dns_server
+    );
+    let content = if let Some(port) = dns_port {
         let domain = &crate::config::get().cluster_domain;
-        format!("nameserver 127.0.0.1\nsearch default.svc.{domain} svc.{domain} {domain}\noptions ndots:5\n")
+        let ns = dns_server.unwrap_or_else(|| {
+            tracing::warn!("dns_server not set, falling back to 127.0.0.1");
+            "127.0.0.1"
+        });
+        let content = format!("nameserver {ns}\nsearch default.svc.{domain} svc.{domain} {domain}\noptions ndots:5\n");
+        tracing::info!("prepare_rootfs WRITING nameserver={} content={:?}", ns, content);
+        content
     } else {
         let host_resolv = std::fs::read_to_string("/etc/resolv.conf").unwrap_or_default();
         if host_resolv.trim().is_empty()

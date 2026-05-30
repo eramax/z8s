@@ -46,8 +46,10 @@ impl NftEngine {
                     if code == 2 || code == 17 || code == 25 || code == 16 {
                         return Ok(());
                     }
+                    tracing::warn!("send_batch: kernel error code={}", code);
+                    anyhow::bail!("nftables kernel error {}: {:?}", code, err);
                 }
-                Err(e.into())
+                anyhow::bail!("send_batch: {:?}", e)
             }
         }
     }
@@ -231,7 +233,7 @@ impl NftEngine {
                 });
                 batch.add(&rule, rustables::MsgType::Add);
             }
-            batch.send()?;
+            Self::send_batch(batch)?;
         }
 
         // Add jump rules to prerouting and output (only on first registration)
@@ -245,7 +247,7 @@ impl NftEngine {
                     let mut rule = Rule::new(&hook_chain).map_err(|e| anyhow::anyhow!("{:?}", e))?;
                     rule.add_expr(Immediate::new_verdict(VerdictKind::Jump { chain: svc.clone() }));
                     batch.add(&rule, rustables::MsgType::Add);
-                    batch.send()?;
+                    Self::send_batch(batch)?;
                 }
             }
         }
@@ -293,7 +295,7 @@ impl NftEngine {
                 });
                 batch.add(&rule, rustables::MsgType::Add);
             }
-            batch.send()?;
+            Self::send_batch(batch)?;
         }
 
         for hook in ["prerouting", "output"] {
@@ -302,7 +304,7 @@ impl NftEngine {
             let mut rule = Rule::new(&hook_chain).map_err(|e| anyhow::anyhow!("{:?}", e))?;
             rule.add_expr(Immediate::new_verdict(VerdictKind::Jump { chain: svc.clone() }));
             batch.add(&rule, rustables::MsgType::Add);
-            batch.send()?;
+            Self::send_batch(batch)?;
         }
 
         debug!("nftables: NodePort {} -> {} backends", node_port, backends.len());

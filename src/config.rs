@@ -227,6 +227,7 @@ fn parse_cidr(s: &str) -> Option<([u8; 4], u8)> {
 }
 
 static DNS_PORT: std::sync::OnceLock<u16> = std::sync::OnceLock::new();
+static DNS_SERVER: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 pub fn set_dns_port(port: u16) {
     DNS_PORT.set(port).ok();
@@ -234,6 +235,14 @@ pub fn set_dns_port(port: u16) {
 
 pub fn dns_port() -> Option<u16> {
     DNS_PORT.get().copied()
+}
+
+pub fn set_dns_server(ip: String) {
+    DNS_SERVER.set(ip).ok();
+}
+
+pub fn dns_server() -> Option<&'static str> {
+    DNS_SERVER.get().map(|s| s.as_str())
 }
 
 const HELP: &str = "\

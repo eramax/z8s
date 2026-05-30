@@ -100,10 +100,9 @@ impl NetMux {
             return Err(e).context("add_pod_host_route");
         }
 
-        // Assign gateway IP to the host side of the veth so the pod's
-        // default route (via gateway) can resolve ARP.
-        if let Err(e) = veth::assign_gateway(&self.gateway, host_idx, self.prefix) {
-            warn!("assign_gateway failed: {} — pod may not have default route", e);
+        // Assign gateway IP to host veth (/32 avoids conflict when multiple veths exist)
+        if let Err(e) = veth::assign_gateway(&self.gateway, host_idx) {
+            warn!("assign_gateway failed: {}", e);
         }
 
         info!(
@@ -163,8 +162,12 @@ impl NetMux {
             }.context("open pod netns")?;
             unsafe { nix::sched::setns(&fd, nix::sched::CloneFlags::CLONE_NEWNET)
                 .context("setns into pod netns")?; }
-            let idx = netlink::get_ifindex("eth0")
-                .context("get_ifindex eth0 in pod netns")?;
+            let peer_name = veth::veth_name_from_uid(pod_uid);
+            let hex: Vec<char> = pod_uid.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+            let start = hex.len().saturating_sub(8);
+            let in_pod_name = format!("zeth-{}", hex[start..].iter().collect::<String>());
+            let idx = netlink::get_ifindex(&in_pod_name)
+                .context("get_ifindex zeth-* in pod netns")?;
             unsafe {
                 let host_fd = nix::fcntl::open(
                     "/proc/1/ns/net",
@@ -194,7 +197,7 @@ impl NetMux {
         }
 
         // Assign IP to peer inside the pod's netns
-        veth::assign_ip(target_ifindex, pod_ip, self.prefix)
+        veth::assign_ip(target_ifindex, pod_ip, 32)
             .context("assign_ip in pod netns")?;
 
         // Bring up peer inside pod netns

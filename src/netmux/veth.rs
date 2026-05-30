@@ -17,14 +17,16 @@ pub fn veth_name_from_uid(uid: &str) -> String {
 
 /// Create a veth pair for a pod.
 /// `peer_pid`: if set, the peer is created directly in the pod's netns
-/// with name "eth0" (no conflict since the pod netns is empty).
+/// with name "zeth-<uid8>" (avoids conflict with existing k3s eth0).
 /// Returns (host_ifname, peer_ifname, host_ifindex, peer_ifindex).
 /// When peer_pid is set, peer_ifindex is 0 (must be resolved inside pod netns).
 pub fn create_pod_veth(pod_uid: &str, peer_pid: Option<u32>) -> Result<(String, String, u32, u32)> {
     let host_name = veth_name_from_uid(pod_uid);
-    let peer_name = "eth0";
+    let hex: Vec<char> = pod_uid.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+    let start = hex.len().saturating_sub(8);
+    let peer_name = format!("zeth-{}", hex[start..].iter().collect::<String>());
 
-    let (host_idx, peer_idx) = netlink::create_veth_pair(&host_name, peer_name, peer_pid)
+    let (host_idx, peer_idx) = netlink::create_veth_pair(&host_name, &peer_name, peer_pid)
         .context("create_veth_pair")?;
     info!("Created veth pair: {} (idx {}) <-> {} (idx {})", host_name, host_idx, peer_name, peer_idx);
 
@@ -37,10 +39,9 @@ pub fn bring_up_veth(ifindex: u32) -> Result<()> {
     Ok(())
 }
 
-/// Assign the gateway IP to the host side of the veth pair.
-/// The pod uses this IP (network+1) as its default route gateway.
-pub fn assign_gateway(gateway: &Ipv4Addr, host_veth_ifindex: u32, prefix: u8) -> Result<()> {
-    netlink::add_addr(host_veth_ifindex, gateway, prefix).context("assign_gateway")
+/// Assign the gateway IP to the host side of the veth (/32 to avoid cross-veth conflicts).
+pub fn assign_gateway(gateway: &Ipv4Addr, host_veth_ifindex: u32) -> Result<()> {
+    netlink::add_addr(host_veth_ifindex, gateway, 32).context("assign_gateway")
 }
 
 /// Add a /32 route on the host for the pod IP via the host veth.
@@ -66,7 +67,7 @@ pub fn assign_ip(ifindex: u32, ip: &Ipv4Addr, prefix: u8) -> Result<()> {
     Ok(())
 }
 
-/// Add default route inside the pod netns (via the peer interface, typically 10.42.x.1).
+/// Add default route inside the pod netns (via the peer interface, to the host).
 pub fn add_default_route(peer_ifindex: u32, gateway: &Ipv4Addr) -> Result<()> {
     netlink::add_route(&Ipv4Addr::UNSPECIFIED, 0, Some(gateway), Some(peer_ifindex))
         .context("add_default_route")?;

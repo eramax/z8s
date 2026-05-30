@@ -105,6 +105,9 @@ async fn main() -> Result<()> {
         panic!("Failed to create NetMux with pod CIDR {}: {}", cfg.pod_cidr, e);
     }));
 
+    // Set DNS server IP for pods to reach the embedded DNS server via the veth gateway
+    crate::config::set_dns_server(netmux.gateway().to_string());
+
     if let Err(e) = crate::netmux::NetMux::enable_ip_forward() {
         warn!("Failed to enable ip_forward: {} — pods may not reach the internet", e);
     }
