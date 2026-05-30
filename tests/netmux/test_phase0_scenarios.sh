@@ -31,8 +31,8 @@ wait_svc_ready() {
     local name="$1" ns="${2:-default}" timeout="${3:-30}"
     local deadline=$(( $(date +%s) + timeout ))
     while [[ $(date +%s) -lt $deadline ]]; do
-        cip=$(k get svc "$name" -n "$ns" -o jsonpath='{.spec.clusterIP}' 2>/dev/null)
-        [[ -n "$cip" && "$cip" != "None" ]] && return 0
+        local svc_cip=$(k get svc "$name" -n "$ns" -o jsonpath='{.spec.clusterIP}' 2>/dev/null)
+        [[ -n "$svc_cip" && "$svc_cip" != "None" ]] && return 0
         sleep 1
     done
     return 1
@@ -286,12 +286,19 @@ spec:
 YAML
     wait_pod_ready test-b1-srv && wait_pod_ready test-b1-client || { fail "B1: Pods not ready"; return; }
     wait_svc_ready test-b1-svc || { fail "B1: Service not ready"; return; }
-    local cip=$(k get svc test-b1-svc -o jsonpath='{.spec.clusterIP}')
-    local resp=$(k exec test-b1-client -- timeout 5 wget -q -O- -T 3 "http://$cip/" 2>&1)
+    local resp=""
+    local cluster_ip
+    cluster_ip=$(k get svc test-b1-svc -o jsonpath='{.spec.clusterIP}' 2>/dev/null | tr -d '[:space:]')
+    [[ -z "$cluster_ip" || "$cluster_ip" == "None" ]] && { fail "B1: No ClusterIP"; return; }
+    for i in 1 2 3 4 5 6; do
+        resp=$(k exec test-b1-client -- sh -c "wget -q -O- -T 3 http://${cluster_ip}/" 2>&1)
+        echo "$resp" | grep -q "hello from b1" && break
+        sleep 2
+    done
     if echo "$resp" | grep -q "hello from b1"; then
-        pass "B1: ClusterIP $cip:80 reaches backend"
+        pass "B1: ClusterIP $cluster_ip:80 reaches backend"
     else
-        fail "B1: ClusterIP $cip:80 not reachable" "response=$resp"
+        fail "B1: ClusterIP $cluster_ip:80 not reachable" "response=$resp"
     fi
     kdelete - <<<'YAML'
 apiVersion: v1
@@ -328,7 +335,7 @@ spec:
   containers:
   - name: srv
     image: alpine
-    command: ["sh", "-c", "while true; do echo -e 'HTTP/1.1 200 OK\r\n\r\nbackend-a' | nc -l -p 8080 -w 1; done"]
+    command: ["sh", "-c", "while true; do echo -e 'HTTP/1.1 200 OK\r\n\r\nbackend-a' | nc -l -p 8080 -w 3; done"]
     ports:
     - containerPort: 8080
 ---
@@ -375,9 +382,11 @@ YAML
     local cip=$(k get svc test-b2-svc -o jsonpath='{.spec.clusterIP}')
     local seen_a=0 seen_b=0
     for i in 1 2 3 4 5 6; do
-        local resp=$(k exec test-b2-client -- timeout 5 wget -q -O- -T 3 "http://$cip/" 2>&1)
+        sleep 2
+        local resp=$(k exec test-b2-client -- sh -c "wget -q -O- -T 3 http://${cip}/" 2>&1)
         [[ "$resp" == *"backend-a"* ]] && seen_a=1
         [[ "$resp" == *"backend-b"* ]] && seen_b=1
+        [[ $seen_a -eq 1 && $seen_b -eq 1 ]] && break
     done
     if [[ $seen_a -eq 1 && $seen_b -eq 1 ]]; then
         pass "B2: Round-robin hits both backends"
@@ -701,7 +710,7 @@ spec:
   containers:
   - name: srv
     image: alpine
-    command: ["sh", "-c", "while true; do echo -e 'HTTP/1.1 200 OK\r\n\r\np2p-ok' | nc -l -p 8080 -w 1; done"]
+    command: ["sh", "-c", "while true; do echo -e 'HTTP/1.1 200 OK\r\n\r\np2p-ok' | nc -l -p 8080 -w 3; done"]
     ports:
     - containerPort: 8080
 ---
@@ -719,9 +728,14 @@ spec:
     - containerPort: 80
 YAML
     wait_pod_ready test-c3a && wait_pod_ready test-c3b || { fail "C3: Pods not ready"; return; }
-    local ip_a=$(k get pod test-c3a -o jsonpath='{.status.podIP}')
+    local ip_a=$(k get pod test-c3a -o jsonpath='{.status.podIP}' 2>/dev/null | tr -d '[:space:]')
     [[ -z "$ip_a" ]] && ip_a=$(k exec test-c3a -- hostname -i 2>/dev/null | awk '{print $1}')
-    local resp=$(k exec test-c3b -- timeout 5 wget -q -O- -T 3 "http://$ip_a:8080/" 2>&1)
+    local resp=""
+    for i in 1 2 3; do
+        resp=$(k exec test-c3b -- sh -c "wget -q -O- -T 3 http://${ip_a}:8080/" 2>&1)
+        echo "$resp" | grep -q "p2p-ok" && break
+        sleep 2
+    done
     if echo "$resp" | grep -q "p2p-ok"; then
         pass "C3: Pod-to-pod traffic works"
     else

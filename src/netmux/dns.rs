@@ -229,9 +229,15 @@ async fn handle_query(
         ServiceResolution::None => {}
     }
 
-    // Not a service name — forward if RD set, else NXDOMAIN
-    if rd && !upstream.is_empty() {
-        forward(query, upstream).await
+    // Not a service name — forward if RD set
+    if rd {
+        if !upstream.is_empty() {
+            forward(query, upstream).await
+        } else {
+            // No upstream configured in /etc/resolv.conf, use defaults
+            let default_upstream: Vec<String> = vec!["1.1.1.1:53".into(), "8.8.8.8:53".into()];
+            forward(query, &default_upstream).await
+        }
     } else {
         Some(make_response(id, rd, question_bytes, &[], 3)) // NXDOMAIN
     }

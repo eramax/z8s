@@ -100,6 +100,12 @@ impl NetMux {
             return Err(e).context("add_pod_host_route");
         }
 
+        // Assign gateway IP to the host side of the veth so the pod's
+        // default route (via gateway) can resolve ARP.
+        if let Err(e) = veth::assign_gateway(&self.gateway, host_idx, self.prefix) {
+            warn!("assign_gateway failed: {} — pod may not have default route", e);
+        }
+
         info!(
             "Attached pod {} -> IP {} via {} (host ifindex {}, peer ifindex {})",
             pod_uid, pod_ip, host_name, host_idx, peer_idx

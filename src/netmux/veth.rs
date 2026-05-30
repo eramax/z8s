@@ -37,6 +37,12 @@ pub fn bring_up_veth(ifindex: u32) -> Result<()> {
     Ok(())
 }
 
+/// Assign the gateway IP to the host side of the veth pair.
+/// The pod uses this IP (network+1) as its default route gateway.
+pub fn assign_gateway(gateway: &Ipv4Addr, host_veth_ifindex: u32, prefix: u8) -> Result<()> {
+    netlink::add_addr(host_veth_ifindex, gateway, prefix).context("assign_gateway")
+}
+
 /// Add a /32 route on the host for the pod IP via the host veth.
 pub fn add_pod_host_route(pod_ip: &Ipv4Addr, host_veth_ifindex: u32) -> Result<()> {
     netlink::add_route(pod_ip, 32, None, Some(host_veth_ifindex))

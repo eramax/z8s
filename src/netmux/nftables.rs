@@ -26,11 +26,15 @@ fn chain_name(ip: Ipv4Addr, port: u16) -> String {
 
 pub struct NftEngine {
     writer: Mutex<()>,
+    jump_track: Mutex<Vec<(Ipv4Addr, u16)>>,
 }
 
 impl NftEngine {
     pub fn new() -> Self {
-        Self { writer: Mutex::new(()) }
+        Self {
+            writer: Mutex::new(()),
+            jump_track: Mutex::new(Vec::new()),
+        }
     }
 
     fn send_batch(batch: Batch) -> Result<()> {
@@ -50,14 +54,6 @@ impl NftEngine {
 
     pub fn init(&self, pod_cidr: &str) -> Result<()> {
         let _lock = self.writer.lock().expect("lock poisoned");
-
-        // Delete stale table (clears all rules from previous runs)
-        {
-            let mut batch = Batch::new();
-            let stale = Table::new(ProtocolFamily::Ipv4).with_name(NAT_TABLE);
-            batch.add(&stale, rustables::MsgType::Del);
-            Self::send_batch(batch)?;
-        }
 
         // Create nat table with baseline chains
         {
@@ -137,6 +133,23 @@ impl NftEngine {
             Self::send_batch(batch)?;
         }
 
+        // Flush stale rules by deleting and recreating the nat chains
+        // (delete with send_batch to handle EBUSY from active conntrack gracefully)
+        for (hook_name, hook_class) in [("prerouting", HookClass::PreRouting), ("output", HookClass::Out), ("postrouting", HookClass::PostRouting)] {
+            let nat_table = Table::new(ProtocolFamily::Ipv4).with_name(NAT_TABLE);
+            let chain = Chain::new(&nat_table)
+                .with_name(hook_name)
+                .with_type(ChainType::Nat)
+                .with_hook(Hook::new(hook_class, HOOK_PRIO_NAT))
+                .with_policy(ChainPolicy::Accept);
+            let mut del = Batch::new();
+            del.add(&chain, rustables::MsgType::Del);
+            Self::send_batch(del)?;
+            let mut add = Batch::new();
+            add.add(&chain, rustables::MsgType::Add);
+            add.send()?;
+        }
+
         info!("nftables: initialized tables and chains");
         Ok(())
     }
@@ -176,9 +189,6 @@ impl NftEngine {
     }
 
     pub fn add_dnat(&self, cluster_ip: Ipv4Addr, port: u16, backends: &[(Ipv4Addr, u16)]) -> Result<()> {
-        if backends.is_empty() {
-            return Ok(());
-        }
         let _lock = self.writer.lock().expect("lock poisoned");
         let svc = chain_name(cluster_ip, port);
         let nat_table = Table::new(ProtocolFamily::Ipv4).with_name(NAT_TABLE);
@@ -224,14 +234,20 @@ impl NftEngine {
             batch.send()?;
         }
 
-        // Add jump rules to prerouting and output (appended, may accumulate)
-        for hook in ["prerouting", "output"] {
-            let mut batch = Batch::new();
-            let hook_chain = Chain::new(&nat_table).with_name(hook);
-            let mut rule = Rule::new(&hook_chain).map_err(|e| anyhow::anyhow!("{:?}", e))?;
-            rule.add_expr(Immediate::new_verdict(VerdictKind::Jump { chain: svc.clone() }));
-            batch.add(&rule, rustables::MsgType::Add);
-            batch.send()?;
+        // Add jump rules to prerouting and output (only on first registration)
+        {
+            let mut tracked = self.jump_track.lock().expect("lock poisoned");
+            if !tracked.iter().any(|(ip, p)| *ip == cluster_ip && *p == port) {
+                tracked.push((cluster_ip, port));
+                for hook in ["prerouting", "output"] {
+                    let mut batch = Batch::new();
+                    let hook_chain = Chain::new(&nat_table).with_name(hook);
+                    let mut rule = Rule::new(&hook_chain).map_err(|e| anyhow::anyhow!("{:?}", e))?;
+                    rule.add_expr(Immediate::new_verdict(VerdictKind::Jump { chain: svc.clone() }));
+                    batch.add(&rule, rustables::MsgType::Add);
+                    batch.send()?;
+                }
+            }
         }
 
         debug!("nftables: DNAT {}:{} -> {} backends", cluster_ip, port, backends.len());

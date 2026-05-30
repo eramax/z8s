@@ -66,6 +66,12 @@ pub async fn api_groups() -> Json<APIGroupList> {
                 server_address_by_client_cidrs: None,
             },
             APIGroup {
+                name: "networking.k8s.io".into(),
+                versions: vec![gvd("networking.k8s.io/v1", "v1")],
+                preferred_version: Some(gvd("networking.k8s.io/v1", "v1")),
+                server_address_by_client_cidrs: None,
+            },
+            APIGroup {
                 name: "storage.k8s.io".into(),
                 versions: vec![gvd("storage.k8s.io/v1", "v1")],
                 preferred_version: Some(gvd("storage.k8s.io/v1", "v1")),
@@ -108,6 +114,16 @@ pub async fn api_discovery_v1_resources() -> Json<APIResourceList> {
         group_version: "discovery.k8s.io/v1".into(),
         resources: vec![
             api_resource("endpointslices", "endpointslice", true, "EndpointSlice", &["get", "list", "watch"], &[], &[]),
+        ],
+    })
+}
+
+pub async fn api_networking_v1_resources() -> Json<APIResourceList> {
+    Json(APIResourceList {
+        group_version: "networking.k8s.io/v1".into(),
+        resources: vec![
+            api_resource("ingresses", "ingress", true, "Ingress", &["get", "list", "watch", "create", "update", "delete"], &["ing"], &["all"]),
+            api_resource("networkpolicies", "networkpolicy", true, "NetworkPolicy", &["get", "list", "watch", "create", "update", "delete"], &["netpol"], &["all"]),
         ],
     })
 }
@@ -191,6 +207,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/v1", get(api_v1_resources))
         .route("/apis", get(api_groups))
         .route("/apis/apps/v1", get(api_apps_v1_resources))
+        .route("/apis/networking.k8s.io/v1", get(api_networking_v1_resources))
         .route("/apis/discovery.k8s.io/v1", get(api_discovery_v1_resources))
         .route("/apis/storage.k8s.io/v1", get(api_storage_v1_resources))
         .route("/apis/authorization.k8s.io/v1", get(api_authz_v1_resources))

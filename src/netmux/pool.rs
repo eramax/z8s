@@ -60,12 +60,10 @@ impl IpPool {
         let mut free = BTreeSet::new();
         let total = 1u32 << bits;
         if cidr.prefix >= 31 {
-            // /31 has 2 hosts (no network/broadcast), /32 has 1 host
             for i in 0..total {
                 free.insert(network + i);
             }
         } else {
-            // Skip first host (network+1 = gateway), start from network+2
             for i in 2..(total - 1) {
                 free.insert(network + i);
             }

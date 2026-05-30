@@ -72,7 +72,7 @@ impl Config {
             dns_port: None,
             manifests_dir: "/etc/z8s/manifests".to_string(),
             data_dir: None,
-            pod_cidr: "10.42.0.0/16".to_string(),
+            pod_cidr: "10.100.0.0/16".to_string(),
             vnet_cidr_size: 20,
             node_name: hostname(),
             node_ip: auto_detect_node_ip().unwrap_or_else(|| "127.0.0.1".to_string()),

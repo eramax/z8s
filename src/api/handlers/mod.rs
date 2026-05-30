@@ -1,4 +1,5 @@
 pub mod configmap;
+pub mod networking;
 pub mod deployment;
 pub mod endpoints;
 pub mod endpointslices;
