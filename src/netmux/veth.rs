@@ -15,23 +15,20 @@ pub fn veth_name_from_uid(uid: &str) -> String {
     format!("veth-{}", name)
 }
 
-/// Peer side of veth pair (inside pod netns). Capped at 15 chars (Linux IFNAMSIZ).
-pub fn veth_peer_name(host_name: &str) -> String {
-    let p = format!("{}-e", host_name);
-    p[..p.len().min(15)].to_string()
-}
-
 /// Create a veth pair for a pod.
+/// `peer_pid`: if set, the peer is created directly in the pod's netns
+/// with name "eth0" (no conflict since the pod netns is empty).
 /// Returns (host_ifname, peer_ifname, host_ifindex, peer_ifindex).
-pub fn create_pod_veth(pod_uid: &str) -> Result<(String, String, u32, u32)> {
+/// When peer_pid is set, peer_ifindex is 0 (must be resolved inside pod netns).
+pub fn create_pod_veth(pod_uid: &str, peer_pid: Option<u32>) -> Result<(String, String, u32, u32)> {
     let host_name = veth_name_from_uid(pod_uid);
-    let peer_name = veth_peer_name(&host_name);
+    let peer_name = "eth0";
 
-    let (host_idx, peer_idx) = netlink::create_veth_pair(&host_name, &peer_name, None)
+    let (host_idx, peer_idx) = netlink::create_veth_pair(&host_name, peer_name, peer_pid)
         .context("create_veth_pair")?;
     info!("Created veth pair: {} (idx {}) <-> {} (idx {})", host_name, host_idx, peer_name, peer_idx);
 
-    Ok((host_name, peer_name, host_idx, peer_idx))
+    Ok((host_name, peer_name.to_string(), host_idx, peer_idx))
 }
 
 /// Bring up the host-side veth interface.

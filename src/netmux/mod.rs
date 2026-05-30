@@ -78,15 +78,16 @@ impl NetMux {
         self.pool.lock().expect("lock poisoned").allocate_subnet(prefix)
     }
 
-    /// Attach a pod to the network: create veth, assign IP, add host route.
+    /// Attach a pod to the network: allocate IP, create veth pair, add host route.
+    /// If `container_pid` is provided, the veth peer is created directly in the
+    /// pod's network namespace with name "eth0".
     /// Returns the allocated pod IP, host veth ifindex, and peer veth ifindex.
-    /// On failure, cleans up any partially-created resources.
-    pub fn attach_pod(&self, pod_uid: &str) -> Result<(Ipv4Addr, u32, u32)> {
+    pub fn attach_pod(&self, pod_uid: &str, container_pid: Option<u32>) -> Result<(Ipv4Addr, u32, u32)> {
         let pod_ip = self.allocate_ip()
             .context("No IPs available in pod CIDR")?;
 
         let (host_name, _peer_name, host_idx, peer_idx) =
-            veth::create_pod_veth(pod_uid)
+            veth::create_pod_veth(pod_uid, container_pid)
                 .context("create_pod_veth")?;
 
         if let Err(e) = veth::bring_up_veth(host_idx) {
@@ -127,6 +128,8 @@ impl NetMux {
 
     /// Move the peer veth into a pod's network namespace and configure it.
     /// Call this after the child has unshared CLONE_NEWNET.
+    /// If `peer_ifindex` is 0, the peer was created directly in the pod's netns
+    /// with name "eth0" via IFLA_NET_NS_PID and we resolve its ifindex there.
     pub fn configure_pod_netns(
         &self,
         pod_uid: &str,
@@ -134,51 +137,77 @@ impl NetMux {
         container_pid: u32,
         peer_ifindex: u32,
     ) -> Result<()> {
-        veth::move_peer_to_netns(peer_ifindex, container_pid)
-            .context("move_peer_to_netns")?;
-
-        // Enter pod netns to assign IP and add default route
         let netns_path = format!("/proc/{}/ns/net", container_pid);
-        // SAFETY: nix::fcntl::open wraps the libc open() safely.
+
+        // If peer was created in host netns, move it to pod's netns first
+        if peer_ifindex != 0 {
+            veth::move_peer_to_netns(peer_ifindex, container_pid)
+                .context("move_peer_to_netns")?;
+        }
+
+        // When peer was created via IFLA_NET_NS_PID, its ifindex is 0.
+        // Resolve it by looking up "eth0" inside the pod netns.
+        let target_ifindex = if peer_ifindex == 0 {
+            let fd = unsafe {
+                nix::fcntl::open(
+                    netns_path.as_str(),
+                    nix::fcntl::OFlag::O_RDONLY | nix::fcntl::OFlag::O_CLOEXEC,
+                    nix::sys::stat::Mode::empty(),
+                )
+            }.context("open pod netns")?;
+            unsafe { nix::sched::setns(&fd, nix::sched::CloneFlags::CLONE_NEWNET)
+                .context("setns into pod netns")?; }
+            let idx = netlink::get_ifindex("eth0")
+                .context("get_ifindex eth0 in pod netns")?;
+            unsafe {
+                let host_fd = nix::fcntl::open(
+                    "/proc/1/ns/net",
+                    nix::fcntl::OFlag::O_RDONLY | nix::fcntl::OFlag::O_CLOEXEC,
+                    nix::sys::stat::Mode::empty(),
+                ).context("open host netns")?;
+                nix::sched::setns(&host_fd, nix::sched::CloneFlags::CLONE_NEWNET)
+                    .context("setns back to host")?;
+            }
+            idx
+        } else {
+            peer_ifindex
+        };
+
+        // Enter pod netns to assign IP and configure networking
         let netns_fd = unsafe {
             nix::fcntl::open(
                 netns_path.as_str(),
                 nix::fcntl::OFlag::O_RDONLY | nix::fcntl::OFlag::O_CLOEXEC,
                 nix::sys::stat::Mode::empty(),
             )
-        }
-        .context("open pod netns")?;
+        }.context("open pod netns")?;
 
-        // SAFETY: nix::sched::setns wraps the libc setns() safely.
         unsafe {
             nix::sched::setns(&netns_fd, nix::sched::CloneFlags::CLONE_NEWNET)
                 .context("setns into pod netns")?;
         }
 
         // Assign IP to peer inside the pod's netns
-        veth::assign_ip(peer_ifindex, pod_ip, self.prefix)
+        veth::assign_ip(target_ifindex, pod_ip, self.prefix)
             .context("assign_ip in pod netns")?;
 
         // Bring up peer inside pod netns
-        netlink::set_link_up(peer_ifindex)
+        netlink::set_link_up(target_ifindex)
             .context("set_link_up peer in pod netns")?;
 
         // Add default route inside pod netns (via gateway)
-        veth::add_default_route(peer_ifindex, &self.gateway)
+        veth::add_default_route(target_ifindex, &self.gateway)
             .context("add_default_route in pod netns")?;
 
         // Enter back to host netns
-        // SAFETY: nix::fcntl::open wraps the libc open() safely.
         let host_netns_fd = unsafe {
             nix::fcntl::open(
                 "/proc/1/ns/net",
                 nix::fcntl::OFlag::O_RDONLY | nix::fcntl::OFlag::O_CLOEXEC,
                 nix::sys::stat::Mode::empty(),
             )
-        }
-        .context("open host netns")?;
+        }.context("open host netns")?;
 
-        // SAFETY: nix::sched::setns wraps the libc setns() safely.
         unsafe {
             nix::sched::setns(&host_netns_fd, nix::sched::CloneFlags::CLONE_NEWNET)
                 .context("setns back to host netns")?;

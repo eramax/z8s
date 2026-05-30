@@ -460,7 +460,7 @@ impl ProcessSupervisor {
         let mut sync_buf = [0u8; 1];
         let n = nix::unistd::read(sync_r, &mut sync_buf).unwrap_or(0);
         if n > 0 && sync_buf[0] == b'S' {
-            match self.netmux.attach_pod(pod_uid) {
+            match self.netmux.attach_pod(pod_uid, Some(pid)) {
                 Ok((ip, host_idx, peer_idx)) => {
                     if let Err(e) = self.netmux.configure_pod_netns(pod_uid, &ip, pid, peer_idx) {
                         warn!("NetMux configure_pod_netns failed: {}", e);
@@ -760,7 +760,7 @@ impl ProcessSupervisor {
 
                 if isolate_net {
                     let pid = child_pid as u32;
-                    match self.netmux.attach_pod(pod_uid) {
+                    match self.netmux.attach_pod(pod_uid, Some(pid)) {
                         Ok((ip, host_idx, peer_idx)) => {
                             if let Err(e) = self.netmux.configure_pod_netns(pod_uid, &ip, pid, peer_idx) {
                                 warn!("NetMux configure_pod_netns failed: {}", e);

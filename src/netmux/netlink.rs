@@ -204,7 +204,10 @@ pub fn create_veth_pair(host_name: &str, peer_name: &str, peer_pid: Option<u32>)
     check_nl_response(&resp, "create_veth")?;
 
     let host_idx = get_ifindex(host_name)?;
-    let peer_idx = get_ifindex(peer_name)?;
+    // Peer ifindex can only be obtained from its own netns when created
+    // with IFLA_NET_NS_PID. We look it up in the host for now and handle
+    // the peer ifindex from inside the pod netns later.
+    let peer_idx = if peer_pid.is_some() { 0 } else { get_ifindex(peer_name)? };
 
     Ok((host_idx, peer_idx))
 }
