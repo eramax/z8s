@@ -1,5 +1,4 @@
 pub mod pool;
-pub mod veth;
 pub mod netlink;
 pub mod nftables;
 pub mod crds;
@@ -141,21 +140,21 @@ impl NetMux {
         };
 
         let (host_name, _peer_name, host_idx, peer_idx) =
-            veth::create_pod_veth(pod_uid, container_pid)
+            create_pod_veth(pod_uid, container_pid)
                 .context("create_pod_veth")?;
 
-        if let Err(e) = veth::bring_up_veth(host_idx) {
+        if let Err(e) = bring_up_veth(host_idx) {
             self.rollback_veth(pod_uid, &pod_ip, host_idx);
             return Err(e).context("bring_up_veth");
         }
 
-        if let Err(e) = veth::add_pod_host_route(&pod_ip, host_idx) {
+        if let Err(e) = add_pod_host_route(&pod_ip, host_idx) {
             self.rollback_veth(pod_uid, &pod_ip, host_idx);
             return Err(e).context("add_pod_host_route");
         }
 
         // Assign gateway IP to host veth (/32 avoids conflict when multiple veths exist)
-        if let Err(e) = veth::assign_gateway(&self.gateway, host_idx) {
+        if let Err(e) = assign_gateway(&self.gateway, host_idx) {
             warn!("assign_gateway failed: {}", e);
         }
 
@@ -169,13 +168,13 @@ impl NetMux {
 
     /// Detach a pod from the network: remove route, delete veth, release IP.
     pub fn detach_pod(&self, pod_uid: &str, pod_ip: &Ipv4Addr, host_ifindex: u32) -> Result<()> {
-        let host_name = veth::veth_name_from_uid(pod_uid);
+        let host_name = veth_name_from_uid(pod_uid);
 
-        if let Err(e) = veth::del_pod_host_route(pod_ip, host_ifindex) {
+        if let Err(e) = del_pod_host_route(pod_ip, host_ifindex) {
             warn!("Failed to delete host route for {}: {}", pod_ip, e);
         }
 
-        if let Err(e) = veth::delete_veth(&host_name) {
+        if let Err(e) = delete_veth(&host_name) {
             warn!("Failed to delete veth {}: {}", host_name, e);
         }
 
@@ -200,7 +199,7 @@ impl NetMux {
 
         // If peer was created in host netns, move it to pod's netns first
         if peer_ifindex != 0 {
-            veth::move_peer_to_netns(peer_ifindex, container_pid)
+            move_peer_to_netns(peer_ifindex, container_pid)
                 .context("move_peer_to_netns")?;
         }
 
@@ -254,7 +253,7 @@ impl NetMux {
         }
 
         // Assign IP to peer inside the pod's netns
-        veth::assign_ip(target_ifindex, pod_ip, 32)
+        assign_ip(target_ifindex, pod_ip, 32)
             .context("assign_ip in pod netns")?;
 
         // Bring up peer inside pod netns
@@ -262,7 +261,7 @@ impl NetMux {
             .context("set_link_up peer in pod netns")?;
 
         // Add default route inside pod netns (via gateway)
-        veth::add_default_route(target_ifindex, &self.gateway)
+        add_default_route(target_ifindex, &self.gateway)
             .context("add_default_route in pod netns")?;
 
         // Guard will restore host netns on drop
@@ -294,7 +293,7 @@ impl NetMux {
 
     /// Clean up orphaned veths at startup.
     pub fn clean_orphan_veths(&self, active_uids: &[String]) -> Result<()> {
-        veth::clean_orphan_veths(active_uids)
+        clean_orphan_veths(active_uids)
     }
 
     pub fn enable_ip_forward() -> Result<()> { netlink::enable_ip_forward() }
@@ -302,12 +301,206 @@ impl NetMux {
 
     /// Rollback partially-created veth resources on failure.
     fn rollback_veth(&self, pod_uid: &str, pod_ip: &Ipv4Addr, host_ifindex: u32) {
-        let host_name = veth::veth_name_from_uid(pod_uid);
-        veth::del_pod_host_route(pod_ip, host_ifindex).ok();
-        veth::delete_veth(&host_name).ok();
+        let host_name = veth_name_from_uid(pod_uid);
+        del_pod_host_route(pod_ip, host_ifindex).ok();
+        delete_veth(&host_name).ok();
         self.release_ip(*pod_ip);
         warn!("Rolled back veth for {}", pod_uid);
     }
 }
 
 
+
+/// Veth naming: `veth-<uid8>` where `<uid8>` = last 8 hex chars of pod UID.
+/// Linux interface name limit is 15 chars.
+/// Uses last 8 hex chars to avoid collisions from common UID prefixes
+/// (e.g., "Pod/default/nginx-deploy-pod-<suffix>").
+pub fn veth_name_from_uid(uid: &str) -> String {
+    let hex: Vec<char> = uid.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+    let start = hex.len().saturating_sub(8);
+    let name: String = hex[start..].iter().collect();
+    format!("veth-{}", name)
+}
+
+/// Create a veth pair for a pod.
+/// `peer_pid`: if set, the peer is created directly in the pod's netns
+/// with name "zeth-<uid8>" (avoids conflict with existing k3s eth0).
+/// Returns (host_ifname, peer_ifname, host_ifindex, peer_ifindex).
+/// When peer_pid is set, peer_ifindex is 0 (must be resolved inside pod netns).
+pub fn create_pod_veth(pod_uid: &str, peer_pid: Option<u32>) -> Result<(String, String, u32, u32)> {
+    let host_name = veth_name_from_uid(pod_uid);
+    let hex: Vec<char> = pod_uid.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+    let start = hex.len().saturating_sub(8);
+    let peer_name = format!("zeth-{}", hex[start..].iter().collect::<String>());
+
+    let (host_idx, peer_idx) = netlink::create_veth_pair(&host_name, &peer_name, peer_pid)
+        .context("create_veth_pair")?;
+    info!("Created veth pair: {} (idx {}) <-> {} (idx {})", host_name, host_idx, peer_name, peer_idx);
+
+    Ok((host_name, peer_name.to_string(), host_idx, peer_idx))
+}
+
+/// Bring up the host-side veth interface.
+pub fn bring_up_veth(ifindex: u32) -> Result<()> {
+    netlink::set_link_up(ifindex).context("set_link_up")?;
+    Ok(())
+}
+
+/// Assign the gateway IP to the host side of the veth (/32 to avoid cross-veth conflicts).
+pub fn assign_gateway(gateway: &Ipv4Addr, host_veth_ifindex: u32) -> Result<()> {
+    netlink::add_addr(host_veth_ifindex, gateway, 32).context("assign_gateway")
+}
+
+/// Add a /32 route on the host for the pod IP via the host veth.
+pub fn add_pod_host_route(pod_ip: &Ipv4Addr, host_veth_ifindex: u32) -> Result<()> {
+    netlink::add_route(pod_ip, 32, None, Some(host_veth_ifindex))
+        .context("add_pod_route")?;
+    info!("Host route: {} -> dev veth (ifindex {})", pod_ip, host_veth_ifindex);
+    Ok(())
+}
+
+/// Delete a /32 route on the host for the pod IP.
+pub fn del_pod_host_route(pod_ip: &Ipv4Addr, host_veth_ifindex: u32) -> Result<()> {
+    netlink::del_route(pod_ip, 32, None, Some(host_veth_ifindex))
+        .context("del_pod_route")?;
+    info!("Host route removed: {} -> dev veth (ifindex {})", pod_ip, host_veth_ifindex);
+    Ok(())
+}
+
+/// Assign an IP address to an interface.
+pub fn assign_ip(ifindex: u32, ip: &Ipv4Addr, prefix: u8) -> Result<()> {
+    netlink::add_addr(ifindex, ip, prefix).context("add_addr")?;
+    info!("Assigned {} to ifindex {}", ip, ifindex);
+    Ok(())
+}
+
+/// Add default route inside the pod netns (via the peer interface, to the host).
+pub fn add_default_route(peer_ifindex: u32, gateway: &Ipv4Addr) -> Result<()> {
+    netlink::add_route(&Ipv4Addr::UNSPECIFIED, 0, Some(gateway), Some(peer_ifindex))
+        .context("add_default_route")?;
+    info!("Default route: 0.0.0.0/0 via {} dev ifindex {}", gateway, peer_ifindex);
+    Ok(())
+}
+
+/// Delete veth pair by host name.
+pub fn delete_veth(host_name: &str) -> Result<()> {
+    match netlink::get_ifindex(host_name) {
+        Ok(idx) => {
+            netlink::del_link(idx).context("del_link")?;
+            info!("Deleted veth {}", host_name);
+        }
+        Err(_) => {
+            warn!("Veth {} not found, skipping delete", host_name);
+        }
+    }
+    Ok(())
+}
+
+/// Bring up loopback inside a network namespace.
+pub fn setup_loopback() -> Result<()> {
+    netlink::ensure_loopback_up().context("ensure_loopback_up")?;
+    Ok(())
+}
+
+/// Move a peer interface into a network namespace (by PID).
+pub fn move_peer_to_netns(peer_ifindex: u32, pid: u32) -> Result<()> {
+    let fd = netlink::netlink_socket()?;
+    let ns_pid_attr = netlink::nlattr_bytes(netlink::IFLA_NET_NS_PID, &pid.to_ne_bytes());
+
+    let total_len = 16 + 16 + ns_pid_attr.len();
+    let mut buf = vec![0u8; total_len];
+
+    buf[0..4].copy_from_slice(&(total_len as u32).to_ne_bytes());
+    buf[4..6].copy_from_slice(&netlink::RTM_NEWLINK.to_ne_bytes());
+    buf[6..8].copy_from_slice(&(netlink::NLM_F_REQUEST | netlink::NLM_F_ACK).to_ne_bytes());
+    buf[8..12].copy_from_slice(&1u32.to_ne_bytes());
+    buf[12..16].copy_from_slice(&0u32.to_ne_bytes());
+
+    buf[16] = netlink::AF_INET as u8;
+    buf[17] = 0;
+    buf[18..20].copy_from_slice(&0u16.to_ne_bytes());
+    buf[20..24].copy_from_slice(&peer_ifindex.to_ne_bytes());
+    buf[24..28].copy_from_slice(&0u32.to_ne_bytes());
+    buf[28..32].copy_from_slice(&0u32.to_ne_bytes());
+
+    let offset = 32;
+    buf[offset..offset+ns_pid_attr.len()].copy_from_slice(&ns_pid_attr);
+
+    netlink::send_nlmsg(&fd, &buf)?;
+    let resp = netlink::recv_nlmsg(&fd)?;
+
+    if resp.len() >= 16 {
+        let msg_type = u16::from_ne_bytes([resp[4], resp[5]]);
+        if msg_type == netlink::NLMSG_ERROR {
+            if resp.len() >= 20 {
+                let err_code = i32::from_ne_bytes([resp[16], resp[17], resp[18], resp[19]]);
+                if err_code != 0 {
+                    return Err(anyhow::anyhow!("move_peer_to_netns: netlink error {}", err_code));
+                }
+            }
+        }
+    }
+    info!("Moved peer ifindex {} to netns pid {}", peer_ifindex, pid);
+    Ok(())
+}
+
+/// List all veth-* interfaces on the host. Returns (name, ifindex) pairs.
+pub fn list_veth_interfaces() -> Result<Vec<(String, u32)>> {
+    let links_dir = std::fs::read_dir("/sys/class/net").context("read /sys/class/net")?;
+    let mut result = Vec::new();
+    for entry in links_dir {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with("veth-") {
+            if let Ok(idx) = get_ifindex_from_sys(&name) {
+                result.push((name, idx));
+            }
+        }
+    }
+    Ok(result)
+}
+
+fn get_ifindex_from_sys(name: &str) -> Result<u32> {
+    let path = format!("/sys/class/net/{}/ifindex", name);
+    let content = std::fs::read_to_string(&path)?;
+    content.trim().parse::<u32>().map_err(|e| anyhow::anyhow!("parse ifindex: {}", e))
+}
+
+/// Clean up orphaned veth-* interfaces (those with no matching pod).
+/// This is called at startup to remove stale veths from crashes.
+pub fn clean_orphan_veths(active_uids: &[String]) -> Result<()> {
+    let veths = list_veth_interfaces()?;
+    let active_names: Vec<String> = active_uids.iter().map(|uid| veth_name_from_uid(uid)).collect();
+
+    for (name, idx) in &veths {
+        if !active_names.contains(name) {
+            info!("Cleaning orphan veth: {} (ifindex {})", name, idx);
+            if let Err(e) = netlink::del_link(*idx) {
+                warn!("Failed to delete orphan veth {}: {}", name, e);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_veth_name_from_uid_15chars() {
+        let name = veth_name_from_uid("a1b2c3d4-e5f6-7890-abcd-ef1234567890");
+        assert_eq!(name, "veth-34567890");
+        assert!(name.len() <= 15, "name {} exceeds 15 chars", name);
+    }
+
+    #[test]
+    fn test_veth_name_same_prefix_unique_suffix() {
+        // Two pods in the same deployment should get different veth names
+        let name1 = veth_name_from_uid("Pod/default/nginx-deploy-pod-bdaf80a2");
+        let name2 = veth_name_from_uid("Pod/default/nginx-deploy-pod-19d6b9c5");
+        assert_ne!(name1, name2, "veth names must not collide");
+        assert_eq!(name1, "veth-bdaf80a2");
+        assert_eq!(name2, "veth-19d6b9c5");
+    }
+}

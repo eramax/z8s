@@ -483,7 +483,7 @@ pub fn child_enter_ns_fork(
     sethostname(hostname).context("Failed to set container hostname")?;
 
     if isolate_net {
-        crate::netmux::veth::setup_loopback().ok();
+        crate::netmux::netlink::ensure_loopback_up().ok();
     }
 
     nix::unistd::write(&sync_w, b"S")
@@ -555,7 +555,7 @@ pub fn child_enter_ns_root(
     sethostname(hostname).context("Failed to set container hostname")?;
 
     if isolate_net {
-        crate::netmux::veth::setup_loopback().ok();
+        crate::netmux::netlink::ensure_loopback_up().ok();
     }
 
     mount(

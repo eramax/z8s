@@ -53,6 +53,25 @@ impl ComponentRegistry {
         self.components.insert(component.kind(), component);
     }
 
+    /// Register a handler-only component for a resource kind.
+    /// Skips `reconcile` (no-op) and `on_delete` (no-op).
+    pub fn register_handler(&mut self, kind: &'static str, cat: ResourceCategory, on_apply: fn(&AnyResource)) {
+        struct Handler {
+            kind: &'static str,
+            cat: ResourceCategory,
+            f: fn(&AnyResource),
+        }
+        #[async_trait]
+        impl Component for Handler {
+            fn kind(&self) -> &'static str { self.kind }
+            fn category(&self) -> ResourceCategory { self.cat }
+            async fn reconcile(&self, _ctx: &ReconcileContext, _t: &ResourceTracker) -> Result<()> { Ok(()) }
+            async fn on_apply(&self, _ctx: &ReconcileContext, r: &AnyResource) -> Result<()> { (self.f)(r); Ok(()) }
+            async fn on_delete(&self, _ctx: &ReconcileContext, _r: &AnyResource) -> Result<()> { Ok(()) }
+        }
+        self.components.insert(kind, Box::new(Handler { kind, cat, f: on_apply }));
+    }
+
     pub fn get(&self, kind: &str) -> Option<&dyn Component> {
         self.components.get(kind).map(|c| c.as_ref())
     }
