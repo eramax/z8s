@@ -283,6 +283,9 @@ impl NetMux {
                 other => tracing::warn!("NSG rule '{}' unknown action '{}'", rule.name, other),
             }
         }
+        // Default deny: any traffic not matching an explicit allow rule is dropped.
+        // This implements whitelist semantics — only explicitly permitted traffic passes.
+        self.nft.add_forward_deny("0.0.0.0/0", "0.0.0.0/0").await?;
         Ok(())
     }
 
