@@ -7,6 +7,10 @@ use std::os::fd::OwnedFd;
 use std::path::Path;
 use tracing::{debug, info, warn};
 
+const DEV_NODES: &[&str] = &[
+    "null", "zero", "full", "random", "urandom", "tty", "console", "ptmx",
+];
+
 pub fn is_root() -> bool {
     Uid::effective().is_root()
 }
@@ -228,8 +232,6 @@ pub fn host_path_in_container_root(host_path: &str, rootfs_path: &str) -> String
         } else {
             format!("/{rest}")
         }
-    } else if host_path.starts_with('/') {
-        host_path.to_string()
     } else {
         host_path.to_string()
     }
@@ -256,6 +258,25 @@ fn busybox_argv(exec_path: &str, entrypoint: &str, args: &[String]) -> Vec<Strin
     }
 }
 
+fn build_resolv_conf() -> String {
+    if let Some(dns_port) = crate::config::dns_port() {
+        let domain = &crate::config::get().cluster_domain;
+        let ns = crate::config::dns_server().unwrap_or("127.0.0.1");
+        tracing::info!("build_resolv_conf: dns_port={:?} using nameserver={}", dns_port, ns);
+        format!("nameserver {ns}\nsearch default.svc.{domain} svc.{domain} {domain}\noptions ndots:5\n")
+    } else {
+        let host_resolv = std::fs::read_to_string("/etc/resolv.conf").unwrap_or_default();
+        if host_resolv.trim().is_empty()
+            || host_resolv.contains("127.0.0.53")
+            || host_resolv.contains("systemd-resolved")
+        {
+            "nameserver 1.1.1.1\nnameserver 8.8.8.8\n".to_string()
+        } else {
+            host_resolv
+        }
+    }
+}
+
 pub fn prepare_rootfs(rootfs_path: &str) -> Result<()> {
     let rootfs = Path::new(rootfs_path);
     if !rootfs.exists() {
@@ -268,42 +289,14 @@ pub fn prepare_rootfs(rootfs_path: &str) -> Result<()> {
     }
 
     use std::os::unix::fs::PermissionsExt;
-    let dev_nodes: &[&str] = &[
-        "null", "zero", "full", "random", "urandom", "tty", "console", "ptmx",
-    ];
-    for name in dev_nodes {
+    for name in DEV_NODES {
         let path = rootfs.join("dev").join(name);
         let _ = std::fs::write(&path, []);
         let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666));
     }
 
     let resolv_conf = rootfs.join("etc/resolv.conf");
-    let dns_port = crate::config::dns_port();
-    let dns_server = crate::config::dns_server();
-    tracing::info!(
-        "prepare_rootfs: dns_port={:?} dns_server={:?}",
-        dns_port, dns_server
-    );
-    let content = if dns_port.is_some() {
-        let domain = &crate::config::get().cluster_domain;
-        let ns = dns_server.unwrap_or_else(|| {
-            tracing::warn!("dns_server not set, falling back to 127.0.0.1");
-            "127.0.0.1"
-        });
-        let content = format!("nameserver {ns}\nsearch default.svc.{domain} svc.{domain} {domain}\noptions ndots:5\n");
-        tracing::info!("prepare_rootfs WRITING nameserver={} content={:?}", ns, content);
-        content
-    } else {
-        let host_resolv = std::fs::read_to_string("/etc/resolv.conf").unwrap_or_default();
-        if host_resolv.trim().is_empty()
-            || host_resolv.contains("127.0.0.53")
-            || host_resolv.contains("systemd-resolved")
-        {
-            "nameserver 1.1.1.1\nnameserver 8.8.8.8\n".to_string()
-        } else {
-            host_resolv
-        }
-    };
+    let content = build_resolv_conf();
     std::fs::write(&resolv_conf, content)
         .context("Failed to write /etc/resolv.conf")?;
 
@@ -515,14 +508,12 @@ pub fn child_enter_ns_fork(
     }
 
     // Non-root user ns: chroot (works if rootfs is bind-mounted inside the user ns)
-    if mount_rootfs_components(rootfs_path, false, volumes).is_ok() {
-        if chroot(rootfs_path).is_ok() {
-            if chdir("/").is_ok() {
-                if mount_filesystems(false).is_ok() {
-                    return Ok(RootfsIsolation::Chroot);
-                }
-            }
-        }
+    if mount_rootfs_components(rootfs_path, false, volumes).is_ok()
+        && chroot(rootfs_path).is_ok()
+        && chdir("/").is_ok()
+        && mount_filesystems(false).is_ok()
+    {
+        return Ok(RootfsIsolation::Chroot);
     }
 
     // Fallback: degraded with a loud warning
@@ -580,7 +571,16 @@ pub fn child_enter_ns_root(
     chroot(rootfs_path).context("Failed to chroot")?;
     chdir("/").context("Failed to chdir to /")?;
 
-    mount_filesystems_root()?;
+    mount_filesystems(true)?;
+    mount(
+        Some("devtmpfs"),
+        "/dev",
+        Some("devtmpfs"),
+        MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
+        None::<&str>,
+    )
+    .context("Failed to mount /dev")?;
+    info!("Container filesystem mounted (root mode)");
     Ok(RootfsIsolation::Chroot)
 }
 
@@ -711,10 +711,7 @@ fn mount_rootfs_components(
     // Bind-mount device nodes from host into rootfs/dev (mknod is blocked in userns)
     let dev = rootfs.join("dev");
     std::fs::create_dir_all(&dev).ok();
-    let dev_nodes: &[&str] = &[
-        "null", "zero", "full", "random", "urandom", "tty", "console", "ptmx",
-    ];
-    for name in dev_nodes {
+    for name in DEV_NODES {
         let src = Path::new("/dev").join(name);
         let dst = dev.join(name);
         if nix::unistd::access(&src, nix::unistd::AccessFlags::R_OK).is_ok() {
@@ -829,56 +826,6 @@ fn mount_filesystems(is_root: bool) -> Result<()> {
     .context("Failed to mount /dev/shm")?;
 
     info!("Container filesystem mounted");
-    Ok(())
-}
-
-fn mount_filesystems_root() -> Result<()> {
-    mount(
-        Some("proc"),
-        "/proc",
-        Some("proc"),
-        MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC | MsFlags::MS_NODEV,
-        None::<&str>,
-    )
-    .context("Failed to mount /proc")?;
-
-    mount(
-        Some("sysfs"),
-        "/sys",
-        Some("sysfs"),
-        MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC | MsFlags::MS_NODEV,
-        None::<&str>,
-    )
-    .context("Failed to mount /sys")?;
-
-    mount(
-        Some("tmpfs"),
-        "/tmp",
-        Some("tmpfs"),
-        MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
-        None::<&str>,
-    )
-    .context("Failed to mount /tmp")?;
-
-    mount(
-        Some("devtmpfs"),
-        "/dev",
-        Some("devtmpfs"),
-        MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
-        None::<&str>,
-    )
-    .context("Failed to mount /dev")?;
-
-    mount(
-        Some("devpts"),
-        "/dev/pts",
-        Some("devpts"),
-        MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC,
-        None::<&str>,
-    )
-    .context("Failed to mount /dev/pts")?;
-
-    info!("Container filesystem mounted (root mode)");
     Ok(())
 }
 
@@ -1002,20 +949,7 @@ pub fn setup_exec_mounts(rootfs: &str) -> Result<()> {
     let etc_path = root_path.join("etc");
     let _ = std::fs::create_dir_all(&etc_path);
     let resolv = etc_path.join("resolv.conf");
-    let content = if crate::config::dns_port().is_some() {
-        let domain = &crate::config::get().cluster_domain;
-        format!("nameserver 127.0.0.1\nsearch default.svc.{domain} svc.{domain} {domain}\noptions ndots:5\n")
-    } else {
-        let host_resolv = std::fs::read_to_string("/etc/resolv.conf").unwrap_or_else(|_| {
-            "nameserver 1.1.1.1\nnameserver 8.8.8.8\n".to_string()
-        });
-        if host_resolv.contains("127.0.0.53") || host_resolv.contains("systemd-resolved") {
-            "nameserver 1.1.1.1\nnameserver 8.8.8.8\n".to_string()
-        } else {
-            host_resolv
-        }
-    };
-    let _ = std::fs::write(&resolv, content);
+    let _ = std::fs::write(&resolv, build_resolv_conf());
 
     Ok(())
 }

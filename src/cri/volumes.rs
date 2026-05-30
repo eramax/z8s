@@ -65,17 +65,13 @@ fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
 /// Mount volumes at their container paths (e.g. `/var/data`) inside the current mount
 /// namespace. Used when pivot_root/chroot failed but CLONE_NEWNS is active.
 /// Writable mount path when host paths like `/var/data` are not creatable (rootless degraded mode).
-fn degraded_mount_path(container_path: &str) -> String {
-    if container_path == "/var/data" {
-        "/tmp/data".to_string()
-    } else {
-        container_path.to_string()
-    }
-}
-
 pub fn bind_mount_volumes_degraded(volumes: &[ResolvedVolume]) {
     for vol in volumes {
-        let dst = degraded_mount_path(&vol.container_path);
+        let dst = if vol.container_path == "/var/data" {
+            "/tmp/data".to_string()
+        } else {
+            vol.container_path.to_string()
+        };
         let src = Path::new(&vol.host_path);
         let dst_path = Path::new(&dst);
 

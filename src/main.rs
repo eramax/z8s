@@ -139,7 +139,6 @@ async fn main() -> Result<()> {
         image_manager,
         cgroup_manager.clone(),
         netmux.clone(),
-        store.clone(),
     ));
 
     let cri = Arc::new(ContainerRuntime::new(

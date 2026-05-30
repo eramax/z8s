@@ -201,31 +201,11 @@ impl ImageManager {
             .as_ref()
             .map(|c| (c.entrypoint.clone(), c.cmd.clone(), c.env.clone(), c.working_dir.clone()))
             .unwrap_or((None, None, None, None));
-        let has_ep = image_ep.as_ref().is_some_and(|ep| !ep.is_empty());
-        let has_cmd = image_cmd.as_ref().is_some_and(|c| !c.is_empty());
         save_image_config(&cache_path, image_ep, image_cmd, image_env, image_wd);
 
         for (i, layer) in layers.iter().enumerate() {
             self.unpack_layer(layer, &cache_path, i)
                 .with_context(|| format!("Failed to unpack layer {}/{} ({})", i + 1, layers.len(), layer.media_type))?;
-        }
-        // Backfill OCI config on the cache (guess if needed)
-        let oci_cfg = Path::new(&cache_path).join(OCI_CONFIG_FILE);
-        let needs_guess = !oci_cfg.exists()
-            || {
-                let cfg = crate::cri::oci::read_image_config(&cache_path);
-                cfg.entrypoint.as_ref().is_none_or(|ep| ep.is_empty())
-                    && cfg.cmd.as_ref().is_none_or(|c| c.is_empty())
-            };
-        if needs_guess {
-            let guessed = crate::cri::oci::guess_image_config(&cache_path);
-            save_image_config(
-                &cache_path,
-                guessed.entrypoint.clone(),
-                guessed.cmd.clone(),
-                guessed.env.clone(),
-                None,
-            );
         }
         std::fs::write(&cache_meta, image_ref)
             .context("Failed to write cache metadata")?;

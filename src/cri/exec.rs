@@ -1,5 +1,4 @@
 use crate::cri::rootfs;
-use anyhow::Context;
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use axum::extract::{Path, State, WebSocketUpgrade};
 use axum::http::request::Parts;
@@ -46,6 +45,10 @@ pub struct ExecParams {
     pub stderr: bool,
 }
 
+fn parse_bool(params: &HashMap<String, Vec<String>>, key: &str, default: bool) -> bool {
+    params.get(key).and_then(|v| v.first()).map(|v| v == "true").unwrap_or(default)
+}
+
 impl<S> axum::extract::FromRequestParts<S> for ExecParams
 where
     S: Send + Sync,
@@ -61,26 +64,10 @@ where
             .cloned()
             .unwrap_or_default();
         let container = params.get("container").and_then(|v| v.first()).cloned();
-        let tty = params
-            .get("tty")
-            .and_then(|v| v.first())
-            .map(|v| v == "true")
-            .unwrap_or(false);
-        let stdin = params
-            .get("stdin")
-            .and_then(|v| v.first())
-            .map(|v| v == "true")
-            .unwrap_or(false);
-        let stdout = params
-            .get("stdout")
-            .and_then(|v| v.first())
-            .map(|v| v == "true")
-            .unwrap_or(true);
-        let stderr = params
-            .get("stderr")
-            .and_then(|v| v.first())
-            .map(|v| v == "true")
-            .unwrap_or(true);
+        let tty = parse_bool(&params, "tty", false);
+        let stdin = parse_bool(&params, "stdin", false);
+        let stdout = parse_bool(&params, "stdout", true);
+        let stderr = parse_bool(&params, "stderr", true);
         Ok(ExecParams {
             command,
             container,
@@ -248,11 +235,7 @@ fn spawn_with_pty(
     unsafe {
         child_cmd.as_std_mut().pre_exec(move || {
             if let Some(ref ns) = ns {
-                // Try full namespace entry; if user-ns setns fails (common in nested
-                // environments), fall back to entering only mnt+net namespaces.
-                if enter_container_namespaces(ns, isolated_net, isolated_net).is_err() {
-                    let _ = enter_namespaces_no_user(ns, isolated_net, isolated_net);
-                }
+                let _ = enter_container_namespaces(ns, isolated_net, isolated_net);
                 let _ = nix::unistd::chdir("/");
             }
             let _ = nix::unistd::setsid();
@@ -322,33 +305,21 @@ fn enter_container_namespaces(
     isolated_net: bool,
     use_mnt_ns: bool,
 ) -> Result<(), std::io::Error> {
+    // Try full namespace entry first (with user namespace).
+    // If user-ns setns fails (common in nested environments), retry without it.
     if let Some(ref user) = ns.user {
-        nix::sched::setns(user, CloneFlags::CLONE_NEWUSER).map_err(|e| {
+        let user_result = nix::sched::setns(user, CloneFlags::CLONE_NEWUSER).map_err(|e| {
             std::io::Error::new(std::io::ErrorKind::Other, format!("setns(CLONE_NEWUSER): {e}"))
-        })?;
-    }
-    if use_mnt_ns {
-        if let Some(ref mnt) = ns.mnt {
-            nix::sched::setns(mnt, CloneFlags::CLONE_NEWNS).map_err(|e| {
-                std::io::Error::new(std::io::ErrorKind::Other, format!("setns(CLONE_NEWNS): {e}"))
-            })?;
+        });
+        if user_result.is_err() {
+            return enter_mnt_net_ns(ns, isolated_net, use_mnt_ns);
         }
     }
-    if isolated_net {
-        if let Some(ref net) = ns.net {
-            nix::sched::setns(net, CloneFlags::CLONE_NEWNET).map_err(|e| {
-                std::io::Error::new(std::io::ErrorKind::Other, format!("setns(CLONE_NEWNET): {e}"))
-            })?;
-        }
-    }
-    Ok(())
+    enter_mnt_net_ns(ns, isolated_net, use_mnt_ns)
 }
 
-/// Enter mnt/net namespaces without the user namespace step.
-/// Used when the user namespace setns is blocked (e.g. nested containers,
-/// AppArmor restrictions, or multi-threaded caller that already has the
-/// container's user-ns caps via the parent process being the namespace owner).
-fn enter_namespaces_no_user(
+/// Enter only mnt/net namespaces (fallback when user namespace setns fails).
+fn enter_mnt_net_ns(
     ns: &NamespaceFds,
     isolated_net: bool,
     use_mnt_ns: bool,
@@ -454,13 +425,10 @@ fn build_command(
             }
         }
 
-        let use_mnt = use_mnt_ns;
         let iso_net = isolated_net;
         unsafe {
             c.as_std_mut().pre_exec(move || {
-                if enter_container_namespaces(&ns, iso_net, use_mnt).is_err() {
-                    let _ = enter_namespaces_no_user(&ns, iso_net, use_mnt);
-                }
+                let _ = enter_container_namespaces(&ns, iso_net, use_mnt_ns);
                 if let Some(g) = c_gid {
                     let _ = nix::unistd::setgid(nix::unistd::Gid::from_raw(g));
                 }
@@ -508,18 +476,14 @@ async fn exec_ws(
     }
 }
 
-fn error_frame(msg: &str) -> Message {
-    let status_json = serde_json::json!({
-        "kind": "Status", "apiVersion": "v1", "metadata": {},
-        "status": "Failure", "message": msg, "code": 500
-    });
-    let mut frame = vec![3u8];
-    frame.extend_from_slice(serde_json::to_string(&status_json).unwrap_or_default().as_bytes());
-    Message::Binary(axum::body::Bytes::from(frame))
-}
-
 async fn send_error_and_close(ws_tx: &mut futures_util::stream::SplitSink<WebSocket, Message>, msg: &str) {
     send_exit_status_msg(ws_tx, 1, Some(msg)).await;
+}
+
+fn ws_frame(tag: u8, payload: &[u8]) -> Message {
+    let mut frame = vec![tag];
+    frame.extend_from_slice(payload);
+    Message::Binary(axum::body::Bytes::from(frame))
 }
 
 async fn exec_ws_tty(socket: WebSocket, cmd: &str, args: &[&str], rootfs_pid: Option<(&str, u32)>, env_vars: &[(String, String)], isolated_net: bool) {
@@ -563,9 +527,7 @@ async fn exec_ws_tty(socket: WebSocket, cmd: &str, args: &[&str], rootfs_pid: Op
                 }) {
                     Ok(Ok(0)) => break,
                     Ok(Ok(n)) => {
-                        let mut frame = vec![1u8];
-                        frame.extend_from_slice(&read_buf[..n]);
-                        if ws_tx.send(Message::Binary(axum::body::Bytes::from(frame))).await.is_err() {
+                        if ws_tx.send(ws_frame(1u8, &read_buf[..n])).await.is_err() {
                             break;
                         }
                     }
@@ -610,7 +572,7 @@ async fn exec_ws_tty(socket: WebSocket, cmd: &str, args: &[&str], rootfs_pid: Op
     }
 
     let exit_code = child.wait().await.ok().and_then(|s| s.code()).unwrap_or(0);
-    send_exit_status(&mut ws_tx, exit_code).await;
+    send_exit_status_msg(&mut ws_tx, exit_code, None).await;
 }
 
 async fn exec_ws_pipes(
@@ -663,9 +625,7 @@ async fn exec_ws_pipes(
                 match stdout.read(&mut buf).await {
                     Ok(0) => break,
                     Ok(n) => {
-                        let mut frame = vec![1u8];
-                        frame.extend_from_slice(&buf[..n]);
-                        if out_tx.send(Message::Binary(axum::body::Bytes::from(frame))).await.is_err() {
+                        if out_tx.send(ws_frame(1u8, &buf[..n])).await.is_err() {
                             break;
                         }
                     }
@@ -684,9 +644,7 @@ async fn exec_ws_pipes(
                 match stderr.read(&mut buf).await {
                     Ok(0) => break,
                     Ok(n) => {
-                        let mut frame = vec![2u8];
-                        frame.extend_from_slice(&buf[..n]);
-                        if out_tx.send(Message::Binary(axum::body::Bytes::from(frame))).await.is_err() {
+                        if out_tx.send(ws_frame(2u8, &buf[..n])).await.is_err() {
                             break;
                         }
                     }
@@ -763,11 +721,7 @@ async fn exec_ws_pipes(
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), forwarder).await;
 
     let mut tx = ws_tx.lock().await;
-    send_exit_status(&mut tx, exit_code).await;
-}
-
-async fn send_exit_status(ws_tx: &mut futures_util::stream::SplitSink<WebSocket, Message>, exit_code: i32) {
-    send_exit_status_msg(ws_tx, exit_code, None).await;
+    send_exit_status_msg(&mut tx, exit_code, None).await;
 }
 
 async fn send_exit_status_msg(
@@ -787,9 +741,7 @@ async fn send_exit_status_msg(
         "status": status_str, "message": message,
         "details": { "exitCode": exit_code }
     });
-    let mut frame = vec![3u8];
-    frame.extend_from_slice(serde_json::to_string(&status_json).unwrap_or_default().as_bytes());
-    let _ = ws_tx.send(Message::Binary(axum::body::Bytes::from(frame))).await;
+    let _ = ws_tx.send(ws_frame(3u8, serde_json::to_string(&status_json).unwrap_or_default().as_bytes())).await;
     let _ = ws_tx
         .send(Message::Close(Some(CloseFrame {
             code: 1000,

@@ -35,8 +35,6 @@ fn raise_nproc_limit() {
 
 
 
-// old attach_port_publish and launch_pasta_for_pid removed (retired to retired/network/)
-
 struct StdPipes {
     stdout_r: std::os::fd::OwnedFd, stdout_w: std::os::fd::OwnedFd,
     stderr_r: std::os::fd::OwnedFd, stderr_w: std::os::fd::OwnedFd,
@@ -68,7 +66,6 @@ struct ContainerSpawnCtx<'a> {
     isolate_net: bool,
     privileged: bool,
     extra_caps: Vec<String>,
-    published_ports: Vec<u16>,
     working_dir: Option<String>,
     probes: Vec<ProbeConfig>,
     subnet: Option<String>,
@@ -109,7 +106,6 @@ pub struct ProcessSupervisor {
     pub cgroup_manager: Arc<CgroupManager>,
     pub restart_counts: Arc<Mutex<HashMap<String, u32>>>,
     pub netmux: Arc<crate::netmux::NetMux>,
-    pub store: Arc<crate::types::ResourceStore>,
 }
 
 
@@ -119,7 +115,6 @@ impl ProcessSupervisor {
         image_manager: Arc<ImageManager>,
         cgroup_manager: Arc<CgroupManager>,
         netmux: Arc<crate::netmux::NetMux>,
-        store: Arc<crate::types::ResourceStore>,
     ) -> Self {
         let base = if rootfs::is_root() {
             "/var/lib/z8s".to_string()
@@ -133,7 +128,6 @@ impl ProcessSupervisor {
             cgroup_manager,
             restart_counts: Arc::new(Mutex::new(HashMap::new())),
             netmux,
-            store,
         }
     }
 
@@ -220,15 +214,14 @@ impl ProcessSupervisor {
                 isolate_net,
                 privileged,
                 extra_caps: extra_caps.clone(),
-                published_ports: published_ports_data.clone(),
                 working_dir: working_dir.clone(),
                 probes: cfg.probes.clone(),
                 subnet,
             };
             if rootfs::is_root() {
-                return self.spawn_root_ns_container(ctx, &published_ports_data).await;
+                return self.spawn_root_ns_container(ctx).await;
             } else {
-                return self.spawn_userns_container(ctx, &published_ports_data).await;
+                return self.spawn_userns_container(ctx).await;
             }
         };
 
@@ -547,12 +540,83 @@ impl ProcessSupervisor {
         }
     }
 
+    fn child_setup_privileges(
+        run_as_group: Option<u32>,
+        run_as_user: Option<u32>,
+        working_dir: &Option<String>,
+        privileged: bool,
+        extra_caps: &[String],
+        isolation: rootfs::RootfsIsolation,
+    ) {
+        if let Some(gid) = run_as_group {
+            if let Err(e) = nix::unistd::setgid(nix::unistd::Gid::from_raw(gid)) {
+                warn!("setgid({}) failed: {}", gid, e);
+            }
+        }
+        if let Some(uid) = run_as_user {
+            if let Err(e) = nix::unistd::setuid(nix::unistd::Uid::from_raw(uid)) {
+                warn!("setuid({}) failed: {}", uid, e);
+            }
+        }
+        if let Some(wd) = working_dir {
+            if let Err(e) = nix::unistd::chdir(std::path::Path::new(wd)) {
+                warn!("chdir({}) failed: {}", wd, e);
+            }
+        }
+        raise_nproc_limit();
+        rootfs::drop_capabilities(privileged, extra_caps);
+        if isolation != rootfs::RootfsIsolation::Degraded {
+            rootfs::apply_landlock();
+        }
+    }
+
+    fn build_container_instance(
+        container_id: &str,
+        container_name: &str,
+        image: &str,
+        pid: u32,
+        rootfs_path: &str,
+        env_vars: Vec<(String, String)>,
+        isolate_net: bool,
+        pod_ip: Option<std::net::Ipv4Addr>,
+        host_veth_ifindex: Option<u32>,
+    ) -> ContainerInstance {
+        ContainerInstance {
+            container_id: container_id.to_string(),
+            container_name: container_name.to_string(),
+            image: image.to_string(),
+            pid: Some(pid),
+            rootfs: rootfs_path.to_string(),
+            started_at: Some(chrono::Utc::now()),
+            env_vars,
+            published_ports: std::collections::HashMap::new(),
+            isolated_net: isolate_net,
+            pod_ip,
+            host_veth_ifindex,
+        }
+    }
+
+    fn build_running_from_instance(
+        instance: ContainerInstance,
+        log_buffer: Arc<Mutex<Vec<String>>>,
+        probes: &[ProbeConfig],
+    ) -> RunningContainer {
+        let (ready, healthy) = Self::spawn_probes(probes, &instance.container_id, &instance.published_ports);
+        RunningContainer {
+            child: None,
+            instance,
+            restart_count: 0,
+            log_buffer,
+            ready,
+            healthy,
+        }
+    }
+
     async fn spawn_root_ns_container(
         &self,
         ctx: ContainerSpawnCtx<'_>,
-        _service_ports: &[u16],
     ) -> Result<RunningContainer> {
-        let ContainerSpawnCtx { entrypoint, cmd_args, env_vars, rootfs_path, container_id, pod_uid, image, container_name, volumes, run_as_user, run_as_group, isolate_net, privileged, extra_caps, published_ports, working_dir, probes, subnet } = ctx;
+        let ContainerSpawnCtx { entrypoint, cmd_args, env_vars, rootfs_path, container_id, pod_uid, image, container_name, volumes, run_as_user, run_as_group, isolate_net, privileged, extra_caps, working_dir, probes, subnet } = ctx;
         let pipes = create_std_pipes()?;
         let StdPipes { stdout_r, stdout_w, stderr_r, stderr_w, sync_r, sync_w, ack_r, ack_w } = pipes;
         let rootfs_owned = rootfs_path.to_string();
@@ -577,29 +641,11 @@ impl ProcessSupervisor {
 
                 let log_buffer = Self::spawn_log_tasks(stdout_r, stderr_r);
 
-                let instance = ContainerInstance {
-                    container_id: container_id.to_string(),
-                    container_name: container_name.to_string(),
-                    image: image.to_string(),
-                    pid: Some(pid),
-                    rootfs: rootfs_path.to_string(),
-                    started_at: Some(chrono::Utc::now()),
-                    env_vars: env_owned,
-                    published_ports: std::collections::HashMap::new(),
-                    isolated_net: isolate_net,
-                    pod_ip,
-                    host_veth_ifindex,
-                };
+                let instance = Self::build_container_instance(
+                    container_id, container_name, image, pid, rootfs_path, env_owned, isolate_net, pod_ip, host_veth_ifindex,
+                );
 
-                let (ready, healthy) = Self::spawn_probes(&probes, container_id, &std::collections::HashMap::new());
-                Ok(RunningContainer {
-                    child: None,
-                    instance,
-                    restart_count: 0,
-                    log_buffer,
-                    ready,
-                    healthy,
-                })
+                Ok(Self::build_running_from_instance(instance, log_buffer, &probes))
             }
             Ok(nix::unistd::ForkResult::Child) => {
                 Self::setup_child_pipes(stdout_r, stderr_r, stdout_w, stderr_w);
@@ -621,27 +667,7 @@ impl ProcessSupervisor {
                 drop(sync_w);
                 drop(ack_r);
 
-                if let Some(gid) = run_as_group {
-                    if let Err(e) = nix::unistd::setgid(nix::unistd::Gid::from_raw(gid)) {
-                        warn!("setgid({}) failed: {}", gid, e);
-                    }
-                }
-                if let Some(uid) = run_as_user {
-                    if let Err(e) = nix::unistd::setuid(nix::unistd::Uid::from_raw(uid)) {
-                        warn!("setuid({}) failed: {}", uid, e);
-                    }
-                }
-                if let Some(wd) = &working_dir {
-                    if let Err(e) = nix::unistd::chdir(std::path::Path::new(wd)) {
-                        warn!("chdir({}) failed: {}", wd, e);
-                    }
-                }
-
-                raise_nproc_limit();
-                rootfs::drop_capabilities(privileged, &extra_caps);
-                if isolation != rootfs::RootfsIsolation::Degraded {
-                    rootfs::apply_landlock();
-                }
+                Self::child_setup_privileges(run_as_group, run_as_user, &working_dir, privileged, &extra_caps, isolation);
 
                 let (exec_path, prog_args) = Self::argv_for_isolation(
                     &entrypoint_owned,
@@ -718,42 +744,15 @@ impl ProcessSupervisor {
     async fn spawn_userns_container(
         &self,
         ctx: ContainerSpawnCtx<'_>,
-        _service_ports: &[u16],
     ) -> Result<RunningContainer> {
-        let ContainerSpawnCtx { entrypoint, cmd_args, env_vars, rootfs_path, container_id, pod_uid, image, container_name, volumes, run_as_user, run_as_group, isolate_net, privileged, extra_caps, published_ports, working_dir, probes, subnet } = ctx;
-        let (stdout_r, stdout_w) = nix::unistd::pipe()
-            .context("Failed to create stdout pipe")?;
-        let (stderr_r, stderr_w) = nix::unistd::pipe()
-            .context("Failed to create stderr pipe")?;
-        let (sync_r, sync_w) = nix::unistd::pipe()
-            .context("Failed to create sync pipe")?;
-        let (ack_r, ack_w) = nix::unistd::pipe()
-            .context("Failed to create ack pipe")?;
+        let ContainerSpawnCtx { entrypoint, cmd_args, env_vars, rootfs_path, container_id, pod_uid, image, container_name, volumes, run_as_user, run_as_group, isolate_net, privileged, extra_caps, working_dir, probes, subnet } = ctx;
+        let pipes = create_std_pipes()?;
+        let StdPipes { stdout_r, stdout_w, stderr_r, stderr_w, sync_r, sync_w, ack_r, ack_w } = pipes;
 
         let rootfs_owned = rootfs_path.to_string();
         let entrypoint_owned = entrypoint.to_string();
         let args_owned: Vec<String> = cmd_args.to_vec();
-
-        // Merge OCI image env into container env (Pod-specified env takes precedence)
-        let oci_env = crate::cri::oci::read_image_config(&rootfs_owned).env.unwrap_or_default();
-        let mut env_owned: Vec<(String, String)> = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        // Pod env first (higher priority)
-        for (k, v) in env_vars {
-            if seen.insert(k.clone()) {
-                env_owned.push((k.clone(), v.clone()));
-            }
-        }
-        // OCI env second (fills gaps — lower priority)
-        for entry in &oci_env {
-            if let Some(eq) = entry.find('=') {
-                let key = entry[..eq].to_string();
-                let val = entry[eq+1..].to_string();
-                if seen.insert(key.clone()) {
-                    env_owned.push((key, val));
-                }
-            }
-        }
+        let env_owned = Self::merge_env(env_vars, &rootfs_owned);
 
         match unsafe { nix::unistd::fork() } {
             Ok(nix::unistd::ForkResult::Parent { child }) => {
@@ -802,71 +801,13 @@ impl ProcessSupervisor {
 
                 self.cgroup_manager.add_pid_to_cgroup(pod_uid, pid)?;
 
-                let log_buffer = Arc::new(Mutex::new(Vec::<String>::new()));
+                let log_buffer = Self::spawn_log_tasks(stdout_r, stderr_r);
 
-                let stdout_file = std::fs::File::from(stdout_r);
-                let stdout_async = tokio::io::BufReader::new(
-                    tokio::fs::File::from_std(stdout_file),
+                let instance = Self::build_container_instance(
+                    container_id, container_name, image, pid, rootfs_path, env_owned, isolate_net, pod_ip, host_veth_ifindex,
                 );
 
-                {
-                    let buf = log_buffer.clone();
-                    tokio::spawn(async move {
-                        let mut lines = stdout_async.lines();
-                        while let Ok(Some(line)) = lines.next_line().await {
-                            let mut log = buf.lock().await;
-                            log.push(format!("[stdout] {}", line));
-                            if log.len() > 1000 {
-                                log.remove(0);
-                            }
-                        }
-                    });
-                }
-
-                let stderr_file = std::fs::File::from(stderr_r);
-                let stderr_async = tokio::io::BufReader::new(
-                    tokio::fs::File::from_std(stderr_file),
-                );
-
-                {
-                    let buf = log_buffer.clone();
-                    tokio::spawn(async move {
-                        let mut lines = stderr_async.lines();
-                        while let Ok(Some(line)) = lines.next_line().await {
-                            let mut log = buf.lock().await;
-                            log.push(format!("[stderr] {}", line));
-                            if log.len() > 1000 {
-                                log.remove(0);
-                            }
-                        }
-                    });
-                }
-
-                let mut instance = ContainerInstance {
-                    container_id: container_id.to_string(),
-                    container_name: container_name.to_string(),
-                    image: image.to_string(),
-                    pid: Some(pid),
-                    rootfs: rootfs_path.to_string(),
-                    started_at: Some(chrono::Utc::now()),
-                    env_vars: env_owned.clone(),
-                    published_ports: std::collections::HashMap::new(),
-                    isolated_net: isolate_net,
-                    pod_ip,
-                    host_veth_ifindex,
-                };
-                instance.published_ports = std::collections::HashMap::new();
-
-                let (ready, healthy) = Self::spawn_probes(&probes, container_id, &instance.published_ports);
-
-                Ok(RunningContainer {
-                    child: None,
-                    instance,
-                    restart_count: 0,
-                    log_buffer,
-                    ready,
-                    healthy,
-                })
+                Ok(Self::build_running_from_instance(instance, log_buffer, &probes))
             }
             Ok(nix::unistd::ForkResult::Child) => {
                 drop(stdout_r);
@@ -909,22 +850,7 @@ impl ProcessSupervisor {
                     let _ = nix::unistd::dup2_stdin(fd);
                 }
 
-                if let Some(gid) = run_as_group {
-                    let _ = nix::unistd::setgid(nix::unistd::Gid::from_raw(gid));
-                }
-                if let Some(uid) = run_as_user {
-                    let _ = nix::unistd::setuid(nix::unistd::Uid::from_raw(uid));
-                }
-
-                if let Some(wd) = &working_dir {
-                    let _ = nix::unistd::chdir(std::path::Path::new(wd));
-                }
-
-                raise_nproc_limit();
-                rootfs::drop_capabilities(privileged, &extra_caps);
-                if isolation != rootfs::RootfsIsolation::Degraded {
-                    rootfs::apply_landlock();
-                }
+                Self::child_setup_privileges(run_as_group, run_as_user, &working_dir, privileged, &extra_caps, isolation);
 
                 let (exec_path, prog_args) = Self::argv_for_isolation(
                     &entrypoint_owned,
@@ -991,31 +917,11 @@ impl ProcessSupervisor {
             });
         }
 
-                let mut instance = ContainerInstance {
-                    container_id: container_id.to_string(),
-                    container_name: container_name.to_string(),
-                    image: image.to_string(),
-                    pid: Some(pid),
-                    rootfs: rootfs_path.to_string(),
-                    started_at: Some(chrono::Utc::now()),
-                    env_vars: env_vars.to_vec(),
-                    published_ports: std::collections::HashMap::new(),
-                    isolated_net: isolate_net,
-                    pod_ip: None,
-                    host_veth_ifindex: None,
-                };
-                instance.published_ports = std::collections::HashMap::new();
+        let instance = Self::build_container_instance(
+            container_id, container_name, image, pid, rootfs_path, env_vars.to_vec(), isolate_net, None, None,
+        );
 
-                let (ready, healthy) = Self::spawn_probes(&probes, container_id, &instance.published_ports);
-
-                Ok(RunningContainer {
-                    child: None,
-                    instance,
-                    restart_count: 0,
-            log_buffer,
-            ready,
-            healthy,
-        })
+        Ok(Self::build_running_from_instance(instance, log_buffer, probes))
     }
 
     /// Port the service proxy should dial on 127.0.0.1 for this pod.
@@ -1056,28 +962,8 @@ impl ProcessSupervisor {
         }
     }
 
-    pub async fn restart_container(&self, container_id: &str) {
-        info!("Restarting container {}", container_id);
-        let spec = {
-            let running = self.running.lock().await;
-            running.get(container_id).map(|rc| {
-                (
-                    rc.instance.image.clone(),
-                    rc.instance.rootfs.clone(),
-                    rc.instance.container_name.clone(),
-                )
-            })
-        };
-        self.stop_container(container_id).await;
-        if let Some((_image, rootfs, _name)) = spec {
-            info!("Container {} stopped; reconcile loop will restart it", container_id);
-            let _ = rootfs;
-        }
-    }
-
     pub async fn stop_pod_from_spec(&self, spec: &crate::cri::spec::ContainerSpec) {
         for cfg in &spec.containers {
-            // Detach netmux networking before stopping the container
             {
                 let running = self.running.lock().await;
                 if let Some(rc) = running.get(&cfg.container_id) {
@@ -1093,11 +979,6 @@ impl ProcessSupervisor {
         }
         self.cgroup_manager.remove_cgroup(&spec.pod_uid).ok();
         crate::cri::volumes::cleanup_emptydir(&spec.pod_uid);
-    }
-
-    pub async fn is_pod_running(&self, pod_name: &str) -> bool {
-        let prefix = format!("{}-", pod_name);
-        self.running.lock().await.keys().any(|cid| cid.starts_with(&prefix))
     }
 
     pub fn is_pid_alive(pid: u32) -> bool {
@@ -1138,10 +1019,6 @@ impl ProcessSupervisor {
             return rc.log_buffer.lock().await.clone();
         }
         Vec::new()
-    }
-
-    pub async fn get_restart_count(&self, container_id: &str) -> u32 {
-        self.restart_counts.lock().await.get(container_id).copied().unwrap_or(0)
     }
 
     /// Returns restart count per container name for a given pod (strips the pod-name prefix).
