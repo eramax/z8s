@@ -190,23 +190,6 @@ impl NftEngine {
         Ok(())
     }
 
-    pub fn remove_snat(&self, vnet_cidr: &str) -> Result<()> {
-        let _lock = self.writer.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() });
-        let mut batch = Batch::new();
-        let nat_table = Table::new(ProtocolFamily::Ipv4).with_name(NAT_TABLE);
-        let postrouting = Chain::new(&nat_table).with_name("postrouting");
-
-        let cidr: IpNetwork = vnet_cidr.parse().context("Invalid VNet CIDR")?;
-        let rule = Rule::new(&postrouting)?
-            .snetwork(cidr)?
-            .masquerade();
-        batch.add(&rule, rustables::MsgType::Del);
-
-        batch.send()?;
-        info!("nftables: removed MASQUERADE for CIDR {}", vnet_cidr);
-        Ok(())
-    }
-
     pub fn add_dnat(&self, cluster_ip: Ipv4Addr, port: u16, backends: &[(Ipv4Addr, u16)]) -> Result<()> {
         let _lock = self.writer.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() });
         let svc = chain_name(cluster_ip, port);

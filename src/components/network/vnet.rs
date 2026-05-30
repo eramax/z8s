@@ -28,8 +28,7 @@ impl Component for VNetResource {
     async fn on_apply(&self, _ctx: &ReconcileContext, resource: &AnyResource) -> Result<()> {
         if let AnyResource::VNet(vnet) = resource {
             let cidr = vnet.spec.cidr.as_deref().unwrap_or("10.42.0.0/20");
-            let vc = crate::netmux::vnet_controller::VNetController::new(self.netmux.clone());
-            vc.apply_vnet(vnet, cidr)?;
+            self.netmux.apply_vnet(vnet, cidr)?;
             if vnet.spec.internet_access {
                 self.netmux.add_snat(vnet.metadata.name.as_deref().unwrap_or("vnet"), cidr)?;
             }

@@ -3,10 +3,8 @@ pub mod veth;
 pub mod netlink;
 pub mod nftables;
 pub mod crds;
-pub mod vnet_controller;
 pub mod np_controller;
 pub mod ingress;
-pub mod cluster;
 pub mod dns;
 pub mod network;
 
@@ -284,14 +282,49 @@ impl NetMux {
         self.nft.reset_nsg_rules()
     }
 
+    pub fn apply_vnet(&self, vnet: &crate::netmux::crds::VNet, cidr: &str) -> Result<()> {
+        let vnet_name = vnet.metadata.name.as_deref().unwrap_or("unknown");
+        if !vnet.spec.internet_access {
+            self.add_forward_deny(cidr, "0.0.0.0/0")?;
+            info!("VNet '{}': internet access denied (spoke)", vnet_name);
+        } else {
+            info!("VNet '{}': internet access allowed (hub), CIDR {}", vnet_name, cidr);
+        }
+        Ok(())
+    }
+
+    pub fn apply_nsg(&self, nsg: &crate::netmux::crds::Nsg) -> Result<()> {
+        self.reset_nsg_rules()?;
+        let mut sorted_rules = nsg.spec.rules.clone();
+        sorted_rules.sort_by_key(|r| r.priority);
+        for rule in &sorted_rules {
+            match rule.action.as_str() {
+                "deny" => {
+                    for src in &rule.src_cidrs {
+                        for dst in &rule.dst_cidrs {
+                            self.add_forward_deny(src, dst)?;
+                        }
+                    }
+                }
+                "allow" => {
+                    for src in &rule.src_cidrs {
+                        for dst in &rule.dst_cidrs {
+                            self.add_forward_allow(src, dst)?;
+                        }
+                    }
+                }
+                other => tracing::warn!("NSG rule '{}' has unknown action '{}', skipping", rule.name, other),
+            }
+            info!("NSG '{}': applied rule '{}' {} -> {} ({})",
+                nsg.metadata.name.as_deref().unwrap_or("?"), rule.name,
+                rule.src_cidrs.join(","), rule.dst_cidrs.join(","), rule.action);
+        }
+        Ok(())
+    }
+
     /// Add MASQUERADE rule for pod internet access (per-VNet).
     pub fn add_snat(&self, vnet_name: &str, vnet_cidr: &str) -> Result<()> {
         self.nft.add_snat(vnet_name, vnet_cidr)
-    }
-
-    /// Remove MASQUERADE rule for a VNet.
-    pub fn remove_snat(&self, vnet_cidr: &str) -> Result<()> {
-        self.nft.remove_snat(vnet_cidr)
     }
 
     /// Add DNAT rule for ClusterIP.
@@ -328,14 +361,6 @@ impl NetMux {
         self.nft.add_forward_deny(src_cidr, dst_cidr)
     }
 
-    /// Add a subnet route via a gateway (for cross-node routing).
-    pub fn add_subnet_route_raw(&self, dest_cidr: &str, gateway: &str) -> Result<()> {
-        let (ip, prefix) = parse_cidr(dest_cidr)?;
-        let gw: Ipv4Addr = gateway.parse().context("Invalid gateway IP")?;
-        netlink::add_route(&ip, prefix, Some(&gw), None)
-            .context("add_subnet_route_raw")
-    }
-
     /// Clean up orphaned veths at startup.
     pub fn clean_orphan_veths(&self, active_uids: &[String]) -> Result<()> {
         veth::clean_orphan_veths(active_uids)
@@ -361,9 +386,4 @@ impl NetMux {
     }
 }
 
-fn parse_cidr(s: &str) -> Result<(Ipv4Addr, u8)> {
-    let (ip_str, prefix_str) = s.split_once('/').context("Missing '/' in CIDR")?;
-    let prefix: u8 = prefix_str.parse().context("Invalid prefix")?;
-    let ip: Ipv4Addr = ip_str.parse().context("Invalid IP")?;
-    Ok((ip, prefix))
-}
+
