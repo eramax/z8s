@@ -163,7 +163,7 @@ async fn main() -> Result<()> {
     let watcher = Arc::new(ManifestWatcher::new(store.clone()));
 
     let pipeline = Arc::new(PipelineBuilder::new()
-        .stage(Box::new(crate::components::network::dns_stage::DnsStage::new()))
+
         .build());
 
     let provisioner = Arc::new(ProvisionerDispatcher::new(store.clone()));
@@ -235,10 +235,9 @@ async fn main() -> Result<()> {
     // L7 ingress HTTP listener
     {
         let netmux = netmux.clone();
-        let store = store.clone();
+        let ing_store = store.clone();
         tokio::spawn(async move {
-            let ctrl = crate::netmux::ingress::IngressController::new(store, netmux.ingress_state.clone());
-            if let Err(e) = ctrl.start_http().await {
+            if let Err(e) = crate::netmux::ingress::start_http(netmux.ingress_state.clone(), ing_store).await {
                 error!("Ingress HTTP listener failed: {}", e);
             }
         });

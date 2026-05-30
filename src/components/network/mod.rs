@@ -1,4 +1,3 @@
-pub mod dns_stage;
 pub mod service;
 pub mod ingress;
 pub mod networkpolicy;
