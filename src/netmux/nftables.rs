@@ -47,11 +47,10 @@ impl NftEngine {
             Err(e) => {
                 if let QueryError::NetlinkError(ref err) = e {
                     let code = err.error.abs();
-                    if code == 2 {
-                        return Ok(()); // ENOENT — expected on delete of non-existent chains
-                    }
-                    if code == 16 || code == 17 || code == 25 {
-                        tracing::warn!("send_batch: non-fatal kernel error {} ({}), continuing", code, Self::describe_nl_error(code));
+                    // ENOENT: expected on delete of non-existent chains
+                    // EEXIST: expected on add when chain already exists (safe to ignore)
+                    // EBUSY:  chain is referenced by a jump, can't delete yet (safe to ignore)
+                    if code == 2 || code == 17 || code == 16 {
                         return Ok(());
                     }
                     anyhow::bail!("nftables kernel error {} ({})", code, Self::describe_nl_error(code));
@@ -71,103 +70,61 @@ impl NftEngine {
         }
     }
 
+    fn init_table(table_name: &str) -> Result<()> {
+        let t = Table::new(ProtocolFamily::Ipv4).with_name(table_name);
+        let mut d = Batch::new(); d.add(&t, rustables::MsgType::Del); Self::send_batch(d)?;
+        let mut a = Batch::new(); a.add(&t, rustables::MsgType::Add); Self::send_batch(a)
+    }
+
+    fn add_nat_chain(batch: &mut Batch, name: &str, hook: HookClass) {
+        let chain = Chain::new(&Table::new(ProtocolFamily::Ipv4).with_name(NAT_TABLE))
+            .with_name(name).with_type(ChainType::Nat).with_hook(Hook::new(hook, HOOK_PRIO_NAT))
+            .with_policy(ChainPolicy::Accept);
+        batch.add(&chain, rustables::MsgType::Add);
+    }
+
+    fn add_filter_chain(batch: &mut Batch, name: &str, hook: HookClass, policy: ChainPolicy) {
+        let chain = Chain::new(&Table::new(ProtocolFamily::Ipv4).with_name(FILTER_TABLE))
+            .with_name(name).with_type(ChainType::Filter).with_hook(Hook::new(hook, HOOK_PRIO_FILTER))
+            .with_policy(policy);
+        batch.add(&chain, rustables::MsgType::Add);
+    }
+
     pub fn init(&self, pod_cidr: &str) -> Result<()> {
         let _lock = self.writer.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() });
 
-        // Delete and recreate tables to flush stale rules from previous runs
-        for table_name in [NAT_TABLE, FILTER_TABLE] {
-            let table = Table::new(ProtocolFamily::Ipv4).with_name(table_name);
-            let mut del = Batch::new();
-            del.add(&table, rustables::MsgType::Del);
-            Self::send_batch(del)?;
-            let mut add = Batch::new();
-            add.add(&table, rustables::MsgType::Add);
-            Self::send_batch(add)?;
-        }
-
-        // Reset jump tracks since all chains are gone
+        // Flush all tables and jump tracks
+        Self::init_table(NAT_TABLE)?; Self::init_table(FILTER_TABLE)?;
         self.jump_track.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() }).clear();
         self.nodeport_jump_track.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() }).clear();
 
-        // Create nat table with baseline chains
-        {
-            let nat_table = Table::new(ProtocolFamily::Ipv4).with_name(NAT_TABLE);
-            let mut batch = Batch::new();
-            // Table already created above, now create baseline chains
+        // Create nat chains
+        let nat_table = Table::new(ProtocolFamily::Ipv4).with_name(NAT_TABLE);
+        let mut nb = Batch::new();
+        Self::add_nat_chain(&mut nb, "prerouting", HookClass::PreRouting);
+        Self::add_nat_chain(&mut nb, "postrouting", HookClass::PostRouting);
+        Self::add_nat_chain(&mut nb, "output", HookClass::Out);
+        Self::send_batch(nb)?;
 
-            let prerouting = Chain::new(&nat_table)
-                .with_name("prerouting")
-                .with_type(ChainType::Nat)
-                .with_hook(Hook::new(HookClass::PreRouting, HOOK_PRIO_NAT))
-                .with_policy(ChainPolicy::Accept);
-            batch.add(&prerouting, rustables::MsgType::Add);
+        // Create filter chains + ct state rule
+        let mut fb = Batch::new();
+        let filter_table = Table::new(ProtocolFamily::Ipv4).with_name(FILTER_TABLE);
+        Self::add_filter_chain(&mut fb, "forward", HookClass::Forward, ChainPolicy::Drop);
+        Self::add_filter_chain(&mut fb, "input", HookClass::In, ChainPolicy::Accept);
+        Self::add_filter_chain(&mut fb, "output", HookClass::Out, ChainPolicy::Accept);
+        let forward = Chain::new(&filter_table).with_name("forward");
+        let ct = Rule::new(&forward)?.established()?.accept();
+        fb.add(&ct, rustables::MsgType::Add);
+        Self::send_batch(fb)?;
 
-            let postrouting = Chain::new(&nat_table)
-                .with_name("postrouting")
-                .with_type(ChainType::Nat)
-                .with_hook(Hook::new(HookClass::PostRouting, HOOK_PRIO_NAT))
-                .with_policy(ChainPolicy::Accept);
-            batch.add(&postrouting, rustables::MsgType::Add);
-
-            let output = Chain::new(&nat_table)
-                .with_name("output")
-                .with_type(ChainType::Nat)
-                .with_hook(Hook::new(HookClass::Out, HOOK_PRIO_NAT))
-                .with_policy(ChainPolicy::Accept);
-            batch.add(&output, rustables::MsgType::Add);
-
-            Self::send_batch(batch)?;
-        }
-
-        // Create filter table with baseline chains
-        {
-            let mut batch = Batch::new();
-            let filter_table = Table::new(ProtocolFamily::Ipv4).with_name(FILTER_TABLE);
-            batch.add(&filter_table, rustables::MsgType::Add);
-
-            let forward = Chain::new(&filter_table)
-                .with_name("forward")
-                .with_type(ChainType::Filter)
-                .with_hook(Hook::new(HookClass::Forward, HOOK_PRIO_FILTER))
-                .with_policy(ChainPolicy::Drop);
-            batch.add(&forward, rustables::MsgType::Add);
-
-            let input = Chain::new(&filter_table)
-                .with_name("input")
-                .with_type(ChainType::Filter)
-                .with_hook(Hook::new(HookClass::In, HOOK_PRIO_FILTER))
-                .with_policy(ChainPolicy::Accept);
-            batch.add(&input, rustables::MsgType::Add);
-
-            let output = Chain::new(&filter_table)
-                .with_name("output")
-                .with_type(ChainType::Filter)
-                .with_hook(Hook::new(HookClass::Out, HOOK_PRIO_FILTER))
-                .with_policy(ChainPolicy::Accept);
-            batch.add(&output, rustables::MsgType::Add);
-
-            let ct_rule = Rule::new(&forward)?
-                .established()?
-                .accept();
-            batch.add(&ct_rule, rustables::MsgType::Add);
-
-            Self::send_batch(batch)?;
-        }
-
-        // Create nsg-rules chain (replaced atomically by apply_nsg)
-        {
-            let filter_table = Table::new(ProtocolFamily::Ipv4).with_name(FILTER_TABLE);
-            let mut batch = Batch::new();
-            let nsg_chain = Chain::new(&filter_table).with_name("nsg-rules");
-            batch.add(&nsg_chain, rustables::MsgType::Add);
-
-            // Add jump to nsg-rules in forward chain (between ct state and catch-all)
-            let forward = Chain::new(&filter_table).with_name("forward");
-            let mut jump = Rule::new(&forward).map_err(|e| anyhow::anyhow!("{:?}", e))?;
-            jump.add_expr(Immediate::new_verdict(VerdictKind::Jump { chain: "nsg-rules".to_string() }));
-            batch.add(&jump, rustables::MsgType::Add);
-            Self::send_batch(batch)?;
-        }
+        // Create nsg-rules chain + jump from forward
+        let mut nsg_batch = Batch::new();
+        let nsg_chain = Chain::new(&filter_table).with_name("nsg-rules");
+        nsg_batch.add(&nsg_chain, rustables::MsgType::Add);
+        let mut jmp = Rule::new(&forward).map_err(|e| anyhow::anyhow!("{:?}", e))?;
+        jmp.add_expr(Immediate::new_verdict(VerdictKind::Jump { chain: "nsg-rules".to_string() }));
+        nsg_batch.add(&jmp, rustables::MsgType::Add);
+        Self::send_batch(nsg_batch)?;
 
         info!("nftables: initialized tables and chains");
         Ok(())

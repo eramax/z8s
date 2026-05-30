@@ -27,7 +27,8 @@ pub async fn run_dns(store: Arc<ResourceStore>) -> Option<u16> {
 async fn dns_loop(sock: UdpSocket, store: Arc<ResourceStore>) {
     let sock = Arc::new(sock);
     let mut buf = [0u8; MAX_UDP];
-    let upstream = read_upstream_dns();
+    // Read upstream DNS config via spawn_blocking to avoid blocking the async runtime
+    let upstream = tokio::task::spawn_blocking(read_upstream_dns).await.unwrap_or_default();
     loop {
         match sock.recv_from(&mut buf).await {
             Ok((n, src)) => {

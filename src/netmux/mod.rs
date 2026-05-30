@@ -98,15 +98,13 @@ impl NetMux {
     }
 
     pub fn release_ip(&self, ip: Ipv4Addr) {
-        // Release to global pool
         self.pool.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() }).release(ip);
-        // Check subnet pools — find which one contains this IP and release it
-        let name: Option<String> = {
-            let pools = self.subnet_pools.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() });
-            pools.iter().find(|(_, p)| p.cidr().contains(&ip)).map(|(n, _)| n.clone())
-        };
-        if let Some(n) = name {
-            self.subnet_pools.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() }).get_mut(&n).map(|p| p.release(ip));
+        let mut pools = self.subnet_pools.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() });
+        for pool in pools.values_mut() {
+            if pool.cidr().contains(&ip) {
+                pool.release(ip);
+                return;
+            }
         }
     }
 
@@ -206,6 +204,10 @@ impl NetMux {
                 .context("move_peer_to_netns")?;
         }
 
+        // NetNsGuard covers all subsequent setns calls — ensures we always
+        // return to host netns even on early returns or panics.
+        let _guard = NetNsGuard::new()?;
+
         // When peer was created via IFLA_NET_NS_PID, its ifindex is 0.
         // Resolve it by looking up the zeth-* name inside the pod netns.
         let target_ifindex = if peer_ifindex == 0 {
@@ -238,8 +240,6 @@ impl NetMux {
         };
 
         // Enter pod netns to assign IP and configure networking.
-        // NetNsGuard ensures we always return to the host netns on scope exit.
-        let _guard = NetNsGuard::new()?;
         let netns_fd = unsafe {
             nix::fcntl::open(
                 netns_path.as_str(),
