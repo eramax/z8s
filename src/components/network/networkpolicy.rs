@@ -33,7 +33,7 @@ impl Component for NetworkPolicyResource {
     async fn on_apply(&self, _ctx: &ReconcileContext, resource: &AnyResource) -> Result<()> {
         if let AnyResource::NetworkPolicy(np) = resource {
             let npc = crate::netmux::np_controller::NetworkPolicyController::new(self.netmux.clone());
-            npc.apply_network_policy(np)?;
+            npc.apply_network_policy(np).await?;
             info!("NetworkPolicy '{}/{}' applied",
                 np.metadata.namespace.as_deref().unwrap_or("default"),
                 np.metadata.name.as_deref().unwrap_or("?"));

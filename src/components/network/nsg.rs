@@ -27,7 +27,7 @@ impl Component for NsgResource {
 
     async fn on_apply(&self, _ctx: &ReconcileContext, resource: &AnyResource) -> Result<()> {
         if let AnyResource::Nsg(nsg) = resource {
-            self.netmux.apply_nsg(nsg)?;
+            self.netmux.apply_nsg(nsg).await?;
             info!("NSG '{}' applied", nsg.metadata.name.as_deref().unwrap_or("?"));
         }
         Ok(())

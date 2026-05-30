@@ -50,7 +50,7 @@ impl Component for PodResource {
                 }
                 if let Some(ip) = ctx.process_tracker.pod_ip(tracker.resource.name()).await {
                     let npc = crate::netmux::np_controller::NetworkPolicyController::new(ctx.netmux.clone());
-                    if let Err(e) = npc.update_pod(ip, &labels, ns) {
+                    if let Err(e) = npc.update_pod(ip, &labels, ns).await {
                         tracing::warn!("NetworkPolicy update_pod failed: {}", e);
                     }
                 }
@@ -74,7 +74,7 @@ impl Component for PodResource {
         if let AnyResource::Pod(pod) = resource {
             if let Some(ip) = ctx.process_tracker.pod_ip(pod.metadata.name.as_deref().unwrap_or("")).await {
                 let npc = crate::netmux::np_controller::NetworkPolicyController::new(ctx.netmux.clone());
-                if let Err(e) = npc.remove_pod(ip) {
+                if let Err(e) = npc.remove_pod(ip).await {
                     tracing::warn!("NetworkPolicy remove_pod failed: {}", e);
                 }
             }

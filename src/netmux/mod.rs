@@ -115,10 +115,6 @@ impl NetMux {
         self.pool.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() }).allocate_subnet(prefix)
     }
 
-    /// Attach a pod to the network: allocate IP, create veth pair, add host route.
-    /// If `container_pid` is provided, the veth peer is created directly in the
-    /// pod's network namespace with name "eth0".
-    /// Returns the allocated pod IP, host veth ifindex, and peer veth ifindex.
     pub fn register_subnet_cidr(&self, name: &str, cidr_str: &str) -> Result<()> {
         let cidr = Ipv4Cidr::parse(cidr_str)
             .context("Invalid subnet CIDR")?;
@@ -268,23 +264,22 @@ impl NetMux {
         Ok(())
     }
 
-    pub fn apply_vnet(&self, vnet: &crate::netmux::crds::VNet, cidr: &str) -> Result<()> {
-        let vnet_name = vnet.metadata.name.as_deref().unwrap_or("unknown");
+    pub async fn apply_vnet(&self, vnet: &crate::netmux::crds::VNet, cidr: &str) -> Result<()> {
         if !vnet.spec.internet_access {
-            self.nft.add_forward_deny(cidr, "0.0.0.0/0")?;
+            self.nft.add_forward_deny(cidr, "0.0.0.0/0").await?;
         }
-        info!("VNet '{}': internet_access={}, CIDR {}", vnet_name, vnet.spec.internet_access, cidr);
+        info!("VNet '{}': internet_access={}, CIDR {}", vnet.metadata.name.as_deref().unwrap_or("?"), vnet.spec.internet_access, cidr);
         Ok(())
     }
 
-    pub fn apply_nsg(&self, nsg: &crate::netmux::crds::Nsg) -> Result<()> {
-        self.nft.reset_nsg_rules()?;
+    pub async fn apply_nsg(&self, nsg: &crate::netmux::crds::Nsg) -> Result<()> {
+        self.nft.reset_nsg_rules().await?;
         let mut sorted = nsg.spec.rules.clone();
         sorted.sort_by_key(|r| r.priority);
         for rule in &sorted {
             match rule.action.as_str() {
-                "deny" => for src in &rule.src_cidrs { for dst in &rule.dst_cidrs { self.nft.add_forward_deny(src, dst)?; } }
-                "allow" => for src in &rule.src_cidrs { for dst in &rule.dst_cidrs { self.nft.add_forward_allow(src, dst)?; } }
+                "deny" => for src in &rule.src_cidrs { for dst in &rule.dst_cidrs { self.nft.add_forward_deny(src, dst).await?; } }
+                "allow" => for src in &rule.src_cidrs { for dst in &rule.dst_cidrs { self.nft.add_forward_allow(src, dst).await?; } }
                 other => tracing::warn!("NSG rule '{}' unknown action '{}'", rule.name, other),
             }
         }

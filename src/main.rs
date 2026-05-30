@@ -120,13 +120,13 @@ async fn main() -> Result<()> {
         warn!("Failed to bring up loopback: {}", e);
     }
     crate::netmux::netlink::harden_sysctl().ok();
-    if let Err(e) = netmux.nft.init(&cfg.pod_cidr) {
+    if let Err(e) = netmux.nft.init(&cfg.pod_cidr).await {
         panic!("nftables init failed: {} — nftables is required, refusing to start", e);
     }
-    if let Err(e) = netmux.nft.add_forward_catchall(&cfg.pod_cidr) {
+    if let Err(e) = netmux.nft.add_forward_catchall(&cfg.pod_cidr).await {
         warn!("Failed to add forward catch-all: {}", e);
     }
-    if let Err(e) = netmux.nft.add_snat("default", &cfg.pod_cidr) {
+    if let Err(e) = netmux.nft.add_snat("default", &cfg.pod_cidr).await {
         warn!("Failed to add SNAT: {} — pods may not reach internet", e);
     }
 

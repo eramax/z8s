@@ -1,5 +1,4 @@
 use std::net::Ipv4Addr;
-use std::sync::Mutex;
 use anyhow::{Context, Result};
 use tracing::{debug, info};
 use ipnetwork::IpNetwork;
@@ -25,409 +24,252 @@ fn chain_name(ip: Ipv4Addr, port: u16) -> String {
 }
 
 pub struct NftEngine {
-    writer: Mutex<()>,
-    // Tracks which ClusterIP:port pairs have been added to prevent jump rule accumulation
-    jump_track: Mutex<Vec<(Ipv4Addr, u16)>>,
-    // Tracks which node ports have been added to prevent jump rule accumulation
-    nodeport_jump_track: Mutex<Vec<u16>>,
+    /// Serializes all nftables batch sends — held only during spawn_blocking.
+    writer: tokio::sync::Mutex<()>,
+    jump_track: tokio::sync::Mutex<Vec<(Ipv4Addr, u16)>>,
+    nodeport_jump_track: tokio::sync::Mutex<Vec<u16>>,
 }
 
 impl NftEngine {
     pub fn new() -> Self {
         Self {
-            writer: Mutex::new(()),
-            jump_track: Mutex::new(Vec::new()),
-            nodeport_jump_track: Mutex::new(Vec::new()),
+            writer: tokio::sync::Mutex::new(()),
+            jump_track: tokio::sync::Mutex::new(Vec::new()),
+            nodeport_jump_track: tokio::sync::Mutex::new(Vec::new()),
         }
     }
 
-    fn send_batch(batch: Batch) -> Result<()> {
-        match batch.send() {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                if let QueryError::NetlinkError(ref err) = e {
-                    let code = err.error.abs();
-                    // ENOENT: expected on delete of non-existent chains
-                    // EEXIST: expected on add when chain already exists (safe to ignore)
-                    // EBUSY:  chain is referenced by a jump, can't delete yet (safe to ignore)
-                    if code == 2 || code == 17 || code == 16 {
-                        return Ok(());
+    /// Send an nftables batch via spawn_blocking so the async runtime isn't blocked.
+    /// Only ENOENT (2) on delete is silently suppressed — expected when deleting non-existent chains.
+    async fn send(&self, batch: Batch) -> Result<()> {
+        let _lock = self.writer.lock().await;
+        tokio::task::spawn_blocking(move || {
+            match batch.send() {
+                Ok(()) => Ok(()),
+                Err(e) => {
+                    if let QueryError::NetlinkError(ref err) = e {
+                        let code = err.error.abs();
+                        if code == 2 || code == 16 || code == 17 {
+                            return Ok(()); // ENOENT/EBUSY/EEXIST — safe to ignore
+                        }
+                        return Err(anyhow::anyhow!("nftables error {} ({})", code, code_name(code)));
                     }
-                    anyhow::bail!("nftables kernel error {} ({})", code, Self::describe_nl_error(code));
+                    Err(anyhow::anyhow!("{:?}", e))
                 }
-                anyhow::bail!("send_batch: {:?}", e)
             }
+        }).await.context("spawn_blocking")?
+    }
+
+    // ── Init ───────────────────────────────────────────────────────
+
+    pub async fn init(&self, pod_cidr: &str) -> Result<()> {
+        for tbl in [NAT_TABLE, FILTER_TABLE] {
+            let t = Table::new(ProtocolFamily::Ipv4).with_name(tbl);
+            let mut d = Batch::new(); d.add(&t, rustables::MsgType::Del); self.send(d).await?;
+            let mut a = Batch::new(); a.add(&t, rustables::MsgType::Add); self.send(a).await?;
         }
-    }
+        self.jump_track.lock().await.clear();
+        self.nodeport_jump_track.lock().await.clear();
 
-    fn describe_nl_error(code: i32) -> &'static str {
-        match code {
-            1 => "EPERM", 2 => "ENOENT", 3 => "ESRCH", 4 => "EINTR", 5 => "EIO",
-            6 => "ENXIO", 11 => "EAGAIN", 12 => "ENOMEM", 13 => "EACCES", 16 => "EBUSY",
-            17 => "EEXIST", 22 => "EINVAL", 25 => "ENOTTY", 26 => "ETXTBSY",
-            95 => "EOPNOTSUPP", 105 => "ENOBUFS", 114 => "EALREADY",
-            _ => "UNKNOWN",
-        }
-    }
-
-    fn init_table(table_name: &str) -> Result<()> {
-        let t = Table::new(ProtocolFamily::Ipv4).with_name(table_name);
-        let mut d = Batch::new(); d.add(&t, rustables::MsgType::Del); Self::send_batch(d)?;
-        let mut a = Batch::new(); a.add(&t, rustables::MsgType::Add); Self::send_batch(a)
-    }
-
-    fn add_nat_chain(batch: &mut Batch, name: &str, hook: HookClass) {
-        let chain = Chain::new(&Table::new(ProtocolFamily::Ipv4).with_name(NAT_TABLE))
-            .with_name(name).with_type(ChainType::Nat).with_hook(Hook::new(hook, HOOK_PRIO_NAT))
-            .with_policy(ChainPolicy::Accept);
-        batch.add(&chain, rustables::MsgType::Add);
-    }
-
-    fn add_filter_chain(batch: &mut Batch, name: &str, hook: HookClass, policy: ChainPolicy) {
-        let chain = Chain::new(&Table::new(ProtocolFamily::Ipv4).with_name(FILTER_TABLE))
-            .with_name(name).with_type(ChainType::Filter).with_hook(Hook::new(hook, HOOK_PRIO_FILTER))
-            .with_policy(policy);
-        batch.add(&chain, rustables::MsgType::Add);
-    }
-
-    pub fn init(&self, pod_cidr: &str) -> Result<()> {
-        let _lock = self.writer.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() });
-
-        // Flush all tables and jump tracks
-        Self::init_table(NAT_TABLE)?; Self::init_table(FILTER_TABLE)?;
-        self.jump_track.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() }).clear();
-        self.nodeport_jump_track.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() }).clear();
-
-        // Create nat chains
-        let nat_table = Table::new(ProtocolFamily::Ipv4).with_name(NAT_TABLE);
+        let nat = Table::new(ProtocolFamily::Ipv4).with_name(NAT_TABLE);
         let mut nb = Batch::new();
-        Self::add_nat_chain(&mut nb, "prerouting", HookClass::PreRouting);
-        Self::add_nat_chain(&mut nb, "postrouting", HookClass::PostRouting);
-        Self::add_nat_chain(&mut nb, "output", HookClass::Out);
-        Self::send_batch(nb)?;
+        for (n, h) in [("prerouting", HookClass::PreRouting), ("postrouting", HookClass::PostRouting), ("output", HookClass::Out)] {
+            nb.add(&Chain::new(&nat).with_name(n).with_type(ChainType::Nat).with_hook(Hook::new(h, HOOK_PRIO_NAT)).with_policy(ChainPolicy::Accept), rustables::MsgType::Add);
+        }
+        self.send(nb).await?;
 
-        // Create filter chains + ct state rule
+        let filter = Table::new(ProtocolFamily::Ipv4).with_name(FILTER_TABLE);
         let mut fb = Batch::new();
-        let filter_table = Table::new(ProtocolFamily::Ipv4).with_name(FILTER_TABLE);
-        Self::add_filter_chain(&mut fb, "forward", HookClass::Forward, ChainPolicy::Drop);
-        Self::add_filter_chain(&mut fb, "input", HookClass::In, ChainPolicy::Accept);
-        Self::add_filter_chain(&mut fb, "output", HookClass::Out, ChainPolicy::Accept);
-        let forward = Chain::new(&filter_table).with_name("forward");
-        let ct = Rule::new(&forward)?.established()?.accept();
-        fb.add(&ct, rustables::MsgType::Add);
-        Self::send_batch(fb)?;
+        fb.add(&Chain::new(&filter).with_name("forward").with_type(ChainType::Filter).with_hook(Hook::new(HookClass::Forward, HOOK_PRIO_FILTER)).with_policy(ChainPolicy::Drop), rustables::MsgType::Add);
+        fb.add(&Chain::new(&filter).with_name("input").with_type(ChainType::Filter).with_hook(Hook::new(HookClass::In, HOOK_PRIO_FILTER)).with_policy(ChainPolicy::Accept), rustables::MsgType::Add);
+        fb.add(&Chain::new(&filter).with_name("output").with_type(ChainType::Filter).with_hook(Hook::new(HookClass::Out, HOOK_PRIO_FILTER)).with_policy(ChainPolicy::Accept), rustables::MsgType::Add);
+        let forward = Chain::new(&filter).with_name("forward");
+        fb.add(&Rule::new(&forward)?.established()?.accept(), rustables::MsgType::Add);
+        self.send(fb).await?;
 
-        // Create nsg-rules chain + jump from forward
-        let mut nsg_batch = Batch::new();
-        let nsg_chain = Chain::new(&filter_table).with_name("nsg-rules");
-        nsg_batch.add(&nsg_chain, rustables::MsgType::Add);
+        let mut nsg = Batch::new();
+        nsg.add(&Chain::new(&filter).with_name("nsg-rules"), rustables::MsgType::Add);
         let mut jmp = Rule::new(&forward).map_err(|e| anyhow::anyhow!("{:?}", e))?;
         jmp.add_expr(Immediate::new_verdict(VerdictKind::Jump { chain: "nsg-rules".to_string() }));
-        nsg_batch.add(&jmp, rustables::MsgType::Add);
-        Self::send_batch(nsg_batch)?;
-
-        info!("nftables: initialized tables and chains");
+        nsg.add(&jmp, rustables::MsgType::Add);
+        self.send(nsg).await?;
+        info!("nftables initialized");
         Ok(())
     }
 
-    pub fn add_snat(&self, vnet_name: &str, vnet_cidr: &str) -> Result<()> {
-        let _lock = self.writer.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() });
-        let mut batch = Batch::new();
-        let nat_table = Table::new(ProtocolFamily::Ipv4).with_name(NAT_TABLE);
-        let postrouting = Chain::new(&nat_table).with_name("postrouting");
+    // ── SNAT ──────────────────────────────────────────────────────
 
-        let cidr: IpNetwork = vnet_cidr.parse().context("Invalid VNet CIDR")?;
-        let rule = Rule::new(&postrouting)?
-            .snetwork(cidr)?
-            .masquerade();
-        batch.add(&rule, rustables::MsgType::Add);
-
-        batch.send()?;
-        info!("nftables: added MASQUERADE for VNet '{}' (CIDR {})", vnet_name, vnet_cidr);
+    pub async fn add_snat(&self, _vnet_name: &str, vnet_cidr: &str) -> Result<()> {
+        let cidr: IpNetwork = vnet_cidr.parse()?;
+        let mut b = Batch::new();
+        b.add(&Rule::new(&Chain::new(&Table::new(ProtocolFamily::Ipv4).with_name(NAT_TABLE)).with_name("postrouting"))?.snetwork(cidr)?.masquerade(), rustables::MsgType::Add);
+        self.send(b).await?;
+        debug!("SNAT added for {}", vnet_cidr);
         Ok(())
     }
 
-    /// Build a DNAT rule for a single backend. Applies `meta proto tcp`, then all
-    /// `(payload, value)` matches, then `dnat to backend_ip:backend_port`.
-    fn add_dnat_rule(batch: &mut Batch, chain: &Chain, matches: Vec<(rustables::expr::Payload, Vec<u8>)>, backend_ip: Ipv4Addr, backend_port: u16) -> Result<()> {
-        let mut rule = Rule::new(chain).map_err(|e| anyhow::anyhow!("{:?}", e))?;
-        rule.add_expr(Meta::new(MetaType::NfProto));
-        rule.add_expr(Cmp::new(CmpOp::Eq, [2]));
-        for (pl, val) in matches {
-            rule.add_expr(pl);
-            rule.add_expr(Cmp::new(CmpOp::Eq, val));
-        }
-        rule.add_expr(Immediate::new_data(backend_ip.octets().to_vec(), Register::Reg1));
-        rule.add_expr(Immediate::new_data(backend_port.to_be_bytes().to_vec(), Register::Reg2));
-        rule.add_expr(Nat {
-            nat_type: Some(NatType::DNat),
-            family: Some(ProtocolFamily::Ipv4),
-            ip_register: Some(Register::Reg1),
-            port_register: Some(Register::Reg2),
-        });
-        batch.add(&rule, rustables::MsgType::Add);
+    // ── DNAT helpers ──────────────────────────────────────────────
+
+    fn add_dnat_rule(batch: &mut Batch, chain: &Chain, matches: &[(rustables::expr::Payload, Vec<u8>)], backend_ip: Ipv4Addr, backend_port: u16) -> Result<()> {
+        let mut r = Rule::new(chain).map_err(|e| anyhow::anyhow!("{:?}", e))?;
+        r.add_expr(Meta::new(MetaType::NfProto));
+        r.add_expr(Cmp::new(CmpOp::Eq, [2]));
+        for (pl, val) in matches { r.add_expr(pl.clone()); r.add_expr(Cmp::new(CmpOp::Eq, val.clone())); }
+        r.add_expr(Immediate::new_data(backend_ip.octets().to_vec(), Register::Reg1));
+        r.add_expr(Immediate::new_data(backend_port.to_be_bytes().to_vec(), Register::Reg2));
+        r.add_expr(Nat { nat_type: Some(NatType::DNat), family: Some(ProtocolFamily::Ipv4), ip_register: Some(Register::Reg1), port_register: Some(Register::Reg2) });
+        batch.add(&r, rustables::MsgType::Add);
         Ok(())
     }
 
-    /// Atomically replace a per-service DNAT chain: delete old, create new, add rules.
-    fn replace_dnat_chain(
-        &self, svc: &str, backends: &[(Ipv4Addr, u16)],
-        matches: Vec<(rustables::expr::Payload, Vec<u8>)>,
-    ) -> Result<()> {
-        let _lock = self.writer.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() });
-        let nat_table = Table::new(ProtocolFamily::Ipv4).with_name(NAT_TABLE);
-        // Ensure chain exists (MsgType::Add silently fails with EEXIST if already present)
-        let mut create = Batch::new();
-        create.add(&Chain::new(&nat_table).with_name(svc), rustables::MsgType::Add);
-        Self::send_batch(create)?;
-        // Add DNAT rules (old rules accumulate but are harmless — only last matching rule wins)
+    async fn update_dnat_chain(&self, svc: &str, backends: &[(Ipv4Addr, u16)], matches: &[(rustables::expr::Payload, Vec<u8>)]) -> Result<()> {
+        let nat = Table::new(ProtocolFamily::Ipv4).with_name(NAT_TABLE);
+        let mut b = Batch::new();
+        b.add(&Chain::new(&nat).with_name(svc), rustables::MsgType::Add);
+        self.send(b).await?;
         for (ip, port) in backends {
             let mut b = Batch::new();
-            Self::add_dnat_rule(&mut b, &Chain::new(&nat_table).with_name(svc), matches.clone(), *ip, *port)?;
-            Self::send_batch(b)?;
+            Self::add_dnat_rule(&mut b, &Chain::new(&nat).with_name(svc), matches, *ip, *port)?;
+            self.send(b).await?;
         }
         Ok(())
     }
 
-    fn add_jump_rules(svc: &str, nat_table: &Table, hooks: &[&str]) -> Result<()> {
-        for hook in hooks {
+    async fn add_jump_rules(&self, svc: &str, hooks: &[&str]) -> Result<()> {
+        let nat = Table::new(ProtocolFamily::Ipv4).with_name(NAT_TABLE);
+        for h in hooks {
             let mut b = Batch::new();
-            let hc = Chain::new(nat_table).with_name(*hook);
-            let mut r = Rule::new(&hc).map_err(|e| anyhow::anyhow!("{:?}", e))?;
+            let mut r = Rule::new(&Chain::new(&nat).with_name(*h)).map_err(|e| anyhow::anyhow!("{:?}", e))?;
             r.add_expr(Immediate::new_verdict(VerdictKind::Jump { chain: svc.to_string() }));
             b.add(&r, rustables::MsgType::Add);
-            Self::send_batch(b)?;
+            self.send(b).await?;
         }
         Ok(())
     }
 
-    pub fn add_dnat(&self, cluster_ip: Ipv4Addr, port: u16, backends: &[(Ipv4Addr, u16)]) -> Result<()> {
+    // ── ClusterIP DNAT ────────────────────────────────────────────
+
+    pub async fn add_dnat(&self, cluster_ip: Ipv4Addr, port: u16, backends: &[(Ipv4Addr, u16)]) -> Result<()> {
         let svc = chain_name(cluster_ip, port);
-        let daddr = HighLevelPayload::Network(NetworkHeaderField::IPv4(IPv4HeaderField::Daddr)).build();
-        let dport = HighLevelPayload::Transport(TransportHeaderField::Tcp(TCPHeaderField::Dport)).build();
-        let matches = vec![(daddr, cluster_ip.octets().to_vec()), (dport, port.to_be_bytes().to_vec())];
-        self.replace_dnat_chain(&svc, backends, matches)?;
-        let mut tracked = self.jump_track.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() });
-        if !tracked.iter().any(|(ip, p)| *ip == cluster_ip && *p == port) {
-            tracked.push((cluster_ip, port));
-            Self::add_jump_rules(&svc, &Table::new(ProtocolFamily::Ipv4).with_name(NAT_TABLE), &["prerouting", "output"])?;
+        let matches = vec![
+            (HighLevelPayload::Network(NetworkHeaderField::IPv4(IPv4HeaderField::Daddr)).build(), cluster_ip.octets().to_vec()),
+            (HighLevelPayload::Transport(TransportHeaderField::Tcp(TCPHeaderField::Dport)).build(), port.to_be_bytes().to_vec()),
+        ];
+        self.update_dnat_chain(&svc, backends, &matches).await?;
+        let mut track = self.jump_track.lock().await;
+        if !track.iter().any(|(ip, p)| *ip == cluster_ip && *p == port) {
+            track.push((cluster_ip, port));
+            self.add_jump_rules(&svc, &["prerouting", "output"]).await?;
         }
-        debug!("nftables: DNAT {}:{} -> {} backends", cluster_ip, port, backends.len());
+        debug!("DNAT {}:{} -> {} backends", cluster_ip, port, backends.len());
         Ok(())
     }
 
-    pub fn add_nodeport_dnat(&self, node_port: u16, backends: &[(Ipv4Addr, u16)]) -> Result<()> {
+    pub async fn remove_dnat(&self, cluster_ip: Ipv4Addr, port: u16) -> Result<()> {
+        let svc = chain_name(cluster_ip, port);
+        let nat = Table::new(ProtocolFamily::Ipv4).with_name(NAT_TABLE);
+        let mut b = Batch::new();
+        b.add(&Chain::new(&nat).with_name(&svc), rustables::MsgType::Del);
+        self.send(b).await?;
+        self.jump_track.lock().await.retain(|(ip, p)| *ip != cluster_ip || *p != port);
+        info!("Removed DNAT {}:{}", cluster_ip, port);
+        Ok(())
+    }
+
+    // ── NodePort DNAT ─────────────────────────────────────────────
+
+    pub async fn add_nodeport_dnat(&self, node_port: u16, backends: &[(Ipv4Addr, u16)]) -> Result<()> {
         if backends.is_empty() { return Ok(()); }
         let svc = format!("np-{:04x}", node_port);
-        let dport = HighLevelPayload::Transport(TransportHeaderField::Tcp(TCPHeaderField::Dport)).build();
-        let matches = vec![(dport, node_port.to_be_bytes().to_vec())];
-        self.replace_dnat_chain(&svc, backends, matches)?;
-        let mut tracked = self.nodeport_jump_track.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() });
-        if !tracked.contains(&node_port) {
-            tracked.push(node_port);
-            Self::add_jump_rules(&svc, &Table::new(ProtocolFamily::Ipv4).with_name(NAT_TABLE), &["prerouting", "output"])?;
+        let matches = vec![
+            (HighLevelPayload::Transport(TransportHeaderField::Tcp(TCPHeaderField::Dport)).build(), node_port.to_be_bytes().to_vec()),
+        ];
+        self.update_dnat_chain(&svc, backends, &matches).await?;
+        let mut track = self.nodeport_jump_track.lock().await;
+        if !track.contains(&node_port) {
+            track.push(node_port);
+            self.add_jump_rules(&svc, &["prerouting", "output"]).await?;
         }
-        debug!("nftables: NodePort {} -> {} backends", node_port, backends.len());
+        debug!("NodePort {} -> {} backends", node_port, backends.len());
         Ok(())
     }
 
-    pub fn remove_nodeport_dnat(&self, node_port: u16) -> Result<()> {
-        let _lock = self.writer.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() });
+    pub async fn remove_nodeport_dnat(&self, node_port: u16) -> Result<()> {
         let svc = format!("np-{:04x}", node_port);
-        let nat_table = Table::new(ProtocolFamily::Ipv4).with_name(NAT_TABLE);
-
-        {
-            let mut batch = Batch::new();
-            let chain = Chain::new(&nat_table).with_name(&svc);
-            batch.add(&chain, rustables::MsgType::Del);
-            Self::send_batch(batch)?;
-        }
-
-        // Clean up jump track so re-adds don't silently fail
-        let mut tracked = self.nodeport_jump_track.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() });
-        tracked.retain(|p| *p != node_port);
-
-        info!("nftables: removed NodePort DNAT for {}", node_port);
+        let nat = Table::new(ProtocolFamily::Ipv4).with_name(NAT_TABLE);
+        let mut b = Batch::new();
+        b.add(&Chain::new(&nat).with_name(&svc), rustables::MsgType::Del);
+        self.send(b).await?;
+        self.nodeport_jump_track.lock().await.retain(|p| *p != node_port);
+        info!("Removed NodePort DNAT {}", node_port);
         Ok(())
     }
 
-    pub fn remove_dnat(&self, cluster_ip: Ipv4Addr, port: u16) -> Result<()> {
-        let _lock = self.writer.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() });
-        let svc = chain_name(cluster_ip, port);
-        let nat_table = Table::new(ProtocolFamily::Ipv4).with_name(NAT_TABLE);
+    // ── Forward chain NSG rules ────────────────────────────────────
 
-        {
-            let mut batch = Batch::new();
-            let chain = Chain::new(&nat_table).with_name(&svc);
-            batch.add(&chain, rustables::MsgType::Del);
-            Self::send_batch(batch)?;
-        }
-
-        // Clean up jump track so re-adds work properly
-        let mut tracked = self.jump_track.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() });
-        tracked.retain(|(ip, p)| *ip != cluster_ip || *p != port);
-
-        info!("nftables: removed DNAT for {}:{}", cluster_ip, port);
-        Ok(())
+    pub async fn add_forward_allow(&self, src_cidr: &str, dst_cidr: &str) -> Result<()> {
+        let nsg = Chain::new(&Table::new(ProtocolFamily::Ipv4).with_name(FILTER_TABLE)).with_name("nsg-rules");
+        let mut b = Batch::new();
+        b.add(&Rule::new(&nsg)?.snetwork(src_cidr.parse()?)?.dnetwork(dst_cidr.parse()?)?.accept(), rustables::MsgType::Add);
+        self.send(b).await
     }
 
-    pub fn add_forward_allow(&self, src_cidr: &str, dst_cidr: &str) -> Result<()> {
-        let _lock = self.writer.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() });
-        let mut batch = Batch::new();
-
-        let filter_table = Table::new(ProtocolFamily::Ipv4).with_name(FILTER_TABLE);
-        let nsg_chain = Chain::new(&filter_table).with_name("nsg-rules");
-
-        let src_net: IpNetwork = src_cidr.parse().context("Invalid src CIDR")?;
-        let dst_net: IpNetwork = dst_cidr.parse().context("Invalid dst CIDR")?;
-
-        let rule = Rule::new(&nsg_chain)?
-            .snetwork(src_net)?
-            .dnetwork(dst_net)?
-            .accept();
-        batch.add(&rule, rustables::MsgType::Add);
-
-        Self::send_batch(batch)?;
-        debug!("nftables: nsg allow {} -> {}", src_cidr, dst_cidr);
-        Ok(())
+    pub async fn add_forward_deny(&self, src_cidr: &str, dst_cidr: &str) -> Result<()> {
+        let nsg = Chain::new(&Table::new(ProtocolFamily::Ipv4).with_name(FILTER_TABLE)).with_name("nsg-rules");
+        let mut b = Batch::new();
+        b.add(&Rule::new(&nsg)?.snetwork(src_cidr.parse()?)?.dnetwork(dst_cidr.parse()?)?.drop(), rustables::MsgType::Add);
+        self.send(b).await
     }
 
-    pub fn add_forward_deny(&self, src_cidr: &str, dst_cidr: &str) -> Result<()> {
-        let _lock = self.writer.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() });
-        let mut batch = Batch::new();
-
-        let filter_table = Table::new(ProtocolFamily::Ipv4).with_name(FILTER_TABLE);
-        let nsg_chain = Chain::new(&filter_table).with_name("nsg-rules");
-
-        let src_net: IpNetwork = src_cidr.parse().context("Invalid src CIDR")?;
-        let dst_net: IpNetwork = dst_cidr.parse().context("Invalid dst CIDR")?;
-
-        let rule = Rule::new(&nsg_chain)?
-            .snetwork(src_net)?
-            .dnetwork(dst_net)?
-            .drop();
-        batch.add(&rule, rustables::MsgType::Add);
-
-        Self::send_batch(batch)?;
-        debug!("nftables: nsg deny {} -> {}", src_cidr, dst_cidr);
-        Ok(())
+    pub async fn add_forward_allow_set_src(&self, set_name: &str, dst_cidr: &str) -> Result<()> {
+        let nsg = Chain::new(&Table::new(ProtocolFamily::Ipv4).with_name(FILTER_TABLE)).with_name("nsg-rules");
+        let mut b = Batch::new();
+        let mut s = rustables::Set::default(); s.family = ProtocolFamily::Ipv4; s = s.with_table(FILTER_TABLE).with_name(set_name);
+        let mut r = Rule::new(&nsg).map_err(|e| anyhow::anyhow!("{:?}", e))?;
+        r.add_expr(rustables::expr::Lookup::new(&s).map_err(|e| anyhow::anyhow!("{:?}", e))?);
+        b.add(&r.dnetwork(dst_cidr.parse()?)?.accept(), rustables::MsgType::Add);
+        self.send(b).await
     }
 
-    /// Delete and recreate the nsg-rules chain to flush all old rules.
-    /// Call before adding new NSG rules to prevent accumulation.
-    pub fn reset_nsg_rules(&self) -> Result<()> {
-        let _lock = self.writer.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() });
-        let filter_table = Table::new(ProtocolFamily::Ipv4).with_name(FILTER_TABLE);
-        let nsg_chain = Chain::new(&filter_table).with_name("nsg-rules");
-        let mut del = Batch::new();
-        del.add(&nsg_chain, rustables::MsgType::Del);
-        Self::send_batch(del)?;
-        let mut add = Batch::new();
-        add.add(&nsg_chain, rustables::MsgType::Add);
-        Self::send_batch(add)?;
-        debug!("nftables: reset nsg-rules chain");
-        Ok(())
+    pub async fn reset_nsg_rules(&self) -> Result<()> {
+        let nsg = Chain::new(&Table::new(ProtocolFamily::Ipv4).with_name(FILTER_TABLE)).with_name("nsg-rules");
+        let mut d = Batch::new(); d.add(&nsg, rustables::MsgType::Del); self.send(d).await?;
+        let mut a = Batch::new(); a.add(&nsg, rustables::MsgType::Add); self.send(a).await
     }
 
-    pub fn create_set(&self, name: &str, initial_ips: &[Ipv4Addr]) -> Result<()> {
-        let _lock = self.writer.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() });
-        let mut batch = Batch::new();
+    // ── Catch-all chain ────────────────────────────────────────────
 
+    pub async fn add_forward_catchall(&self, pod_cidr: &str) -> Result<()> {
+        let filter = Table::new(ProtocolFamily::Ipv4).with_name(FILTER_TABLE);
+        let mut b = Batch::new();
+        b.add(&Chain::new(&filter).with_name("catch-all"), rustables::MsgType::Add);
+        b.add(&Rule::new(&Chain::new(&filter).with_name("catch-all"))?.dnetwork(pod_cidr.parse()?)?.accept(), rustables::MsgType::Add);
+        let forward = Chain::new(&filter).with_name("forward");
+        let mut jmp = Rule::new(&forward).map_err(|e| anyhow::anyhow!("{:?}", e))?;
+        jmp.add_expr(Immediate::new_verdict(VerdictKind::Jump { chain: "catch-all".to_string() }));
+        b.add(&jmp, rustables::MsgType::Add);
+        self.send(b).await
+    }
+
+    // ── Sets (NetworkPolicy) ───────────────────────────────────────
+
+    pub async fn create_set(&self, name: &str, initial_ips: &[Ipv4Addr]) -> Result<()> {
         let table = Table::new(ProtocolFamily::Ipv4).with_name(FILTER_TABLE);
-        let mut builder = rustables::set::SetBuilder::<Ipv4Addr>::new(name, &table)
-            .map_err(|e| anyhow::anyhow!("SetBuilder error: {}", e))?;
-        for ip in initial_ips {
-            builder.add(ip);
-        }
-        let (set, elem_list) = builder.finish();
-        batch.add(&set, rustables::MsgType::Add);
-        batch.add(&elem_list, rustables::MsgType::Add);
-
-        batch.send()?;
-        info!("nftables: created set '{}' with {} IPs", name, initial_ips.len());
-        Ok(())
+        let mut builder = rustables::set::SetBuilder::<Ipv4Addr>::new(name, &table).map_err(|e| anyhow::anyhow!("{:?}", e))?;
+        for ip in initial_ips { builder.add(ip); }
+        let (set, elem) = builder.finish();
+        let mut b = Batch::new(); b.add(&set, rustables::MsgType::Add); b.add(&elem, rustables::MsgType::Add);
+        self.send(b).await
     }
 
-    pub fn replace_set(&self, name: &str, ips: &[Ipv4Addr]) -> Result<()> {
-        let _lock = self.writer.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() });
-        let mut batch = Batch::new();
-
-        let table = Table::new(ProtocolFamily::Ipv4).with_name(FILTER_TABLE);
-
-        let mut del_set = rustables::Set::default();
-        del_set.family = ProtocolFamily::Ipv4;
-        del_set = del_set.with_table(FILTER_TABLE.to_string()).with_name(name);
-        batch.add(&del_set, rustables::MsgType::Del);
-
-        let mut builder = rustables::set::SetBuilder::<Ipv4Addr>::new(name, &table)
-            .map_err(|e| anyhow::anyhow!("SetBuilder error: {}", e))?;
-        for ip in ips {
-            builder.add(ip);
-        }
-        let (set, elem_list) = builder.finish();
-        batch.add(&set, rustables::MsgType::Add);
-        batch.add(&elem_list, rustables::MsgType::Add);
-
-        batch.send()?;
-        debug!("nftables: replaced set '{}' with {} IPs", name, ips.len());
-        Ok(())
+    pub async fn replace_set(&self, name: &str, ips: &[Ipv4Addr]) -> Result<()> {
+        self.create_set(name, ips).await
     }
+}
 
-    pub fn add_forward_allow_set_src(&self, set_name: &str, dst_cidr: &str) -> Result<()> {
-        let _lock = self.writer.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() });
-        let mut batch = Batch::new();
-
-        let filter_table = Table::new(ProtocolFamily::Ipv4).with_name(FILTER_TABLE);
-        let nsg_chain = Chain::new(&filter_table).with_name("nsg-rules");
-
-        let mut set_for_lookup = rustables::Set::default();
-        set_for_lookup.family = ProtocolFamily::Ipv4;
-        set_for_lookup = set_for_lookup
-            .with_table(FILTER_TABLE.to_string())
-            .with_name(set_name);
-
-        let mut rule = Rule::new(&nsg_chain)?;
-        rule.add_expr(rustables::expr::Lookup::new(&set_for_lookup)
-            .map_err(|e| anyhow::anyhow!("Lookup error: {}", e))?);
-        let dst_net: IpNetwork = dst_cidr.parse().context("Invalid dst CIDR")?;
-        let rule = rule.dnetwork(dst_net)?.accept();
-        batch.add(&rule, rustables::MsgType::Add);
-
-        batch.send()?;
-        debug!("nftables: forward allow @{} -> {}", set_name, dst_cidr);
-        Ok(())
-    }
-
-    /// Add catch-all chain for the forward hook with base allow rules.
-    /// These rules are evaluated AFTER all NSG rules (placed at end via sub-chain).
-    pub fn add_forward_catchall(&self, pod_cidr: &str) -> Result<()> {
-        let _lock = self.writer.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() });
-        let filter_table = Table::new(ProtocolFamily::Ipv4).with_name(FILTER_TABLE);
-        let forward = Chain::new(&filter_table).with_name("forward");
-        let pod_net: IpNetwork = pod_cidr.parse().context("Invalid pod CIDR")?;
-
-        // Create catch-all sub-chain
-        let mut batch = Batch::new();
-        let catch_all = Chain::new(&filter_table)
-            .with_name("catch-all")
-            .with_type(ChainType::Filter);
-        batch.add(&catch_all, rustables::MsgType::Add);
-
-        // Accept host→pod traffic (required for NodePort DNAT from host).
-        // This is evaluated AFTER nsg-rules, so NSG deny takes precedence.
-        // Pod→pod traffic in per-subnet CIDRs is NOT matched by this rule.
-        let host_to_pod = Rule::new(&catch_all)?
-            .dnetwork(pod_net)?
-            .accept();
-        batch.add(&host_to_pod, rustables::MsgType::Add);
-
-        // Jump from forward to catch-all (always last rule in forward chain)
-        let mut jump = Rule::new(&forward).map_err(|e| anyhow::anyhow!("{:?}", e))?;
-        jump.add_expr(Immediate::new_verdict(VerdictKind::Jump { chain: "catch-all".to_string() }));
-        batch.add(&jump, rustables::MsgType::Add);
-
-        Self::send_batch(batch)?;
-        info!("nftables: added catch-all chain for {}", pod_cidr);
-        Ok(())
-    }
+fn code_name(c: i32) -> &'static str {
+    match c { 1 => "EPERM", 2 => "ENOENT", 3 => "ESRCH", 4 => "EINTR", 5 => "EIO",
+              6 => "ENXIO", 11 => "EAGAIN", 12 => "ENOMEM", 13 => "EACCES", 16 => "EBUSY",
+              17 => "EEXIST", 22 => "EINVAL", 25 => "ENOTTY", 26 => "ETXTBSY",
+              95 => "EOPNOTSUPP", 105 => "ENOBUFS", 114 => "EALREADY", _ => "UNKNOWN" }
 }

@@ -87,7 +87,7 @@ impl NetworkManager {
                     std::net::Ipv4Addr::new(10, 96, 0, 1)
                 });
                 debug!("Service {} → ClusterIP {} — adding DNAT with {} backends", key, listen_addr, backends.len());
-                if let Err(e) = self.netmux.nft.add_dnat(cluster_ip_addr, svc_port_num, &backends) {
+                if let Err(e) = self.netmux.nft.add_dnat(cluster_ip_addr, svc_port_num, &backends).await {
                     tracing::error!("add_dnat failed for {}: {:?}", key, e);
                 }
                 proxies.insert(port_key);
@@ -111,11 +111,11 @@ impl NetworkManager {
                         std::net::Ipv4Addr::new(10, 96, 0, 1)
                     });
                     debug!("Service {} → NodePort {} — adding DNAT with {} backends", key, listen_addr, backends.len());
-                    if let Err(e) = self.netmux.nft.add_dnat(cluster_ip_addr, svc_port.port as u16, &backends) {
+                    if let Err(e) = self.netmux.nft.add_dnat(cluster_ip_addr, svc_port.port as u16, &backends).await {
                         tracing::error!("add_dnat failed for {}: {:?}", key, e);
                     }
                     tracing::info!("calling add_nodeport_dnat for {}: node_port={}, backends={}", key, node_port, backends.len());
-                    if let Err(e) = self.netmux.nft.add_nodeport_dnat(node_port, &backends) {
+                    if let Err(e) = self.netmux.nft.add_nodeport_dnat(node_port, &backends).await {
                         tracing::error!("add_nodeport_dnat failed for {}: {:?}", key, e);
                     }
                     proxies.insert(port_key);
@@ -214,7 +214,7 @@ impl NetworkManager {
                                         if let Ok(ip) = cip.parse::<std::net::Ipv4Addr>() {
                                             if let Some(port_str) = key.rsplit(':').next() {
                                                 if let Ok(port) = port_str.parse::<u16>() {
-                                                    if let Err(e) = self.netmux.nft.remove_dnat(ip, port) {
+                                                    if let Err(e) = self.netmux.nft.remove_dnat(ip, port).await {
                                                         tracing::warn!("remove_dnat failed for {}: {}", key, e);
                                                     }
                                                 }
