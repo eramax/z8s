@@ -108,8 +108,6 @@ pub enum AnyResource {
     VNet(crate::netmux::crds::VNet),
     Subnet(crate::netmux::crds::Subnet),
     Nsg(crate::netmux::crds::Nsg),
-    Hub(crate::netmux::crds::Hub),
-    Spoke(crate::netmux::crds::Spoke),
     RouteTable(crate::netmux::crds::RouteTable),
     Ingress(k8s_openapi::api::networking::v1::Ingress),
     NetworkPolicy(k8s_openapi::api::networking::v1::NetworkPolicy),
@@ -128,8 +126,6 @@ impl AnyResource {
             AnyResource::VNet(r) => &r.metadata,
             AnyResource::Subnet(r) => &r.metadata,
             AnyResource::Nsg(r) => &r.metadata,
-            AnyResource::Hub(r) => &r.metadata,
-            AnyResource::Spoke(r) => &r.metadata,
             AnyResource::RouteTable(r) => &r.metadata,
             AnyResource::Ingress(r) => &r.metadata,
             AnyResource::NetworkPolicy(r) => &r.metadata,
@@ -148,8 +144,6 @@ impl AnyResource {
             AnyResource::VNet(r) => &mut r.metadata,
             AnyResource::Subnet(r) => &mut r.metadata,
             AnyResource::Nsg(r) => &mut r.metadata,
-            AnyResource::Hub(r) => &mut r.metadata,
-            AnyResource::Spoke(r) => &mut r.metadata,
             AnyResource::RouteTable(r) => &mut r.metadata,
             AnyResource::Ingress(r) => &mut r.metadata,
             AnyResource::NetworkPolicy(r) => &mut r.metadata,
@@ -168,8 +162,6 @@ impl AnyResource {
             AnyResource::VNet(_) => "VNet",
             AnyResource::Subnet(_) => "Subnet",
             AnyResource::Nsg(_) => "NSG",
-            AnyResource::Hub(_) => "Hub",
-            AnyResource::Spoke(_) => "Spoke",
             AnyResource::RouteTable(_) => "RouteTable",
             AnyResource::Ingress(_) => "Ingress",
             AnyResource::NetworkPolicy(_) => "NetworkPolicy",
@@ -236,12 +228,6 @@ pub fn parse_manifest_yaml(yaml: &str) -> Result<Vec<AnyResource>> {
             ),
             "NSG" => AnyResource::Nsg(
                 serde_yaml::from_value(value).context("Failed to parse NSG")?,
-            ),
-            "Hub" => AnyResource::Hub(
-                serde_yaml::from_value(value).context("Failed to parse Hub")?,
-            ),
-            "Spoke" => AnyResource::Spoke(
-                serde_yaml::from_value(value).context("Failed to parse Spoke")?,
             ),
             "RouteTable" => AnyResource::RouteTable(
                 serde_yaml::from_value(value).context("Failed to parse RouteTable")?,

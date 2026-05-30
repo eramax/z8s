@@ -20,7 +20,6 @@ use crate::components::network::vnet::VNetResource;
 use crate::components::network::subnet::SubnetResource;
 use crate::components::network::nsg::NsgResource;
 use crate::components::network::routetable::RouteTableResource;
-use crate::components::network::crd_component::CrdWatcher;
 use crate::components::storage::configmap::ConfigMapResource;
 use crate::components::storage::pv::PvResource;
 use crate::components::storage::pvc::PvcResource;
@@ -193,10 +192,6 @@ async fn main() -> Result<()> {
     registry.register(Box::new(SecretResource::new(store.clone())));
     registry.register(Box::new(PvResource::new(store.clone())));
     registry.register(Box::new(PvcResource::new(store.clone())));
-    // Network CRD watchers (VNet, NSG, NetworkPolicy, etc.)
-    for kind in &["Hub", "Spoke"] {
-        registry.register(Box::new(CrdWatcher::new(netmux.clone(), store.clone(), kind)));
-    }
     let registry = Arc::new(registry);
 
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);

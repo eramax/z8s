@@ -1,6 +1,5 @@
 pub mod pool;
 pub mod veth;
-pub mod routing;
 pub mod netlink;
 pub mod nftables;
 pub mod crds;
@@ -39,10 +38,6 @@ impl NetNsGuard {
         Ok(Self { host_fd: Some(host_fd) })
     }
 
-    #[allow(dead_code)]
-    fn disarm(&mut self) {
-        self.host_fd = None;
-    }
 }
 
 impl Drop for NetNsGuard {
@@ -337,8 +332,8 @@ impl NetMux {
     pub fn add_subnet_route_raw(&self, dest_cidr: &str, gateway: &str) -> Result<()> {
         let (ip, prefix) = parse_cidr(dest_cidr)?;
         let gw: Ipv4Addr = gateway.parse().context("Invalid gateway IP")?;
-        let route = routing::add_subnet_route(&ip, prefix, &gw);
-        route.context("add_subnet_route_raw")
+        netlink::add_route(&ip, prefix, Some(&gw), None)
+            .context("add_subnet_route_raw")
     }
 
     /// Clean up orphaned veths at startup.

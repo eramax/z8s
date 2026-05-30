@@ -92,43 +92,6 @@ pub struct NsgRule {
 fn default_priority() -> u32 { 1000 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Hub {
-    #[serde(default = "default_api_version")]
-    pub api_version: String,
-    #[serde(default = "default_hub_kind")]
-    pub kind: String,
-    pub metadata: ObjectMeta,
-    pub spec: HubSpec,
-}
-
-fn default_hub_kind() -> String { "Hub".to_string() }
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HubSpec {
-    pub vnet: String,
-    #[serde(default)]
-    pub spokes: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Spoke {
-    #[serde(default = "default_api_version")]
-    pub api_version: String,
-    #[serde(default = "default_spoke_kind")]
-    pub kind: String,
-    pub metadata: ObjectMeta,
-    pub spec: SpokeSpec,
-}
-
-fn default_spoke_kind() -> String { "Spoke".to_string() }
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SpokeSpec {
-    pub vnet: String,
-    pub hub: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouteTable {
     #[serde(default = "default_api_version")]
     pub api_version: String,
