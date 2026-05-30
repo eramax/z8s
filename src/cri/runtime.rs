@@ -37,6 +37,21 @@ fn raise_nproc_limit() {
 
 // old attach_port_publish and launch_pasta_for_pid removed (retired to retired/network/)
 
+struct StdPipes {
+    stdout_r: std::os::fd::OwnedFd, stdout_w: std::os::fd::OwnedFd,
+    stderr_r: std::os::fd::OwnedFd, stderr_w: std::os::fd::OwnedFd,
+    sync_r: std::os::fd::OwnedFd, sync_w: std::os::fd::OwnedFd,
+    ack_r: std::os::fd::OwnedFd, ack_w: std::os::fd::OwnedFd,
+}
+
+fn create_std_pipes() -> anyhow::Result<StdPipes> {
+    let p1 = nix::unistd::pipe().context("stdout pipe")?;
+    let p2 = nix::unistd::pipe().context("stderr pipe")?;
+    let p3 = nix::unistd::pipe().context("sync pipe")?;
+    let p4 = nix::unistd::pipe().context("ack pipe")?;
+    Ok(StdPipes { stdout_r: p1.0, stdout_w: p1.1, stderr_r: p2.0, stderr_w: p2.1,
+                  sync_r: p3.0, sync_w: p3.1, ack_r: p4.0, ack_w: p4.1 })
+}
 
 struct ContainerSpawnCtx<'a> {
     entrypoint: &'a str,
@@ -538,11 +553,8 @@ impl ProcessSupervisor {
         _service_ports: &[u16],
     ) -> Result<RunningContainer> {
         let ContainerSpawnCtx { entrypoint, cmd_args, env_vars, rootfs_path, container_id, pod_uid, image, container_name, volumes, run_as_user, run_as_group, isolate_net, privileged, extra_caps, published_ports, working_dir, probes, subnet } = ctx;
-        let (stdout_r, stdout_w) = nix::unistd::pipe().context("Failed to create stdout pipe")?;
-        let (stderr_r, stderr_w) = nix::unistd::pipe().context("Failed to create stderr pipe")?;
-        let (sync_r, sync_w) = nix::unistd::pipe().context("Failed to create sync pipe")?;
-        let (ack_r, ack_w) = nix::unistd::pipe().context("Failed to create ack pipe")?;
-
+        let pipes = create_std_pipes()?;
+        let StdPipes { stdout_r, stdout_w, stderr_r, stderr_w, sync_r, sync_w, ack_r, ack_w } = pipes;
         let rootfs_owned = rootfs_path.to_string();
         let entrypoint_owned = entrypoint.to_string();
         let args_owned = cmd_args.to_vec();
@@ -554,7 +566,6 @@ impl ProcessSupervisor {
                 drop(stderr_w);
                 drop(sync_w);
                 drop(ack_r);
-
                 let pid = child.as_raw() as u32;
                 info!("Container {} started with PID {} (root ns)", container_id, pid);
                 self.cgroup_manager.add_pid_to_cgroup(pod_uid, pid)?;
@@ -631,7 +642,6 @@ impl ProcessSupervisor {
                 if isolation != rootfs::RootfsIsolation::Degraded {
                     rootfs::apply_landlock();
                 }
-                rootfs::apply_seccomp(privileged);
 
                 let (exec_path, prog_args) = Self::argv_for_isolation(
                     &entrypoint_owned,
@@ -915,7 +925,6 @@ impl ProcessSupervisor {
                 if isolation != rootfs::RootfsIsolation::Degraded {
                     rootfs::apply_landlock();
                 }
-                rootfs::apply_seccomp(privileged);
 
                 let (exec_path, prog_args) = Self::argv_for_isolation(
                     &entrypoint_owned,

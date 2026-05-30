@@ -966,16 +966,6 @@ fn try_apply_landlock() -> std::result::Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Placeholder for seccomp BPF filter application.
-/// Full implementation requires the syscallz crate (libseccomp-dev).
-pub fn apply_seccomp(privileged: bool) {
-    if privileged {
-        return;
-    }
-    // TODO: Phase 1.5 — load etc/seccomp/default.json and apply via libseccomp/syscallz
-    debug!("seccomp: filter not yet applied (deferred to Phase 1.5)");
-}
-
 pub fn setup_exec_mounts(rootfs: &str) -> Result<()> {
     let root_path = Path::new(rootfs);
 
