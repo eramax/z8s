@@ -101,28 +101,28 @@ impl NetMux {
 
     pub fn allocate_ip(&self) -> Option<Ipv4Addr> {
         // SAFETY: lock only held briefly, no .await, panic only on poison
-        self.pool.lock().expect("lock poisoned").allocate()
+        self.pool.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() }).allocate()
     }
 
     pub fn release_ip(&self, ip: Ipv4Addr) {
         // Release to global pool
-        self.pool.lock().expect("lock poisoned").release(ip);
+        self.pool.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() }).release(ip);
         // Check subnet pools — find which one contains this IP and release it
         let name: Option<String> = {
-            let pools = self.subnet_pools.lock().expect("lock poisoned");
+            let pools = self.subnet_pools.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() });
             pools.iter().find(|(_, p)| p.cidr().contains(&ip)).map(|(n, _)| n.clone())
         };
         if let Some(n) = name {
-            self.subnet_pools.lock().expect("lock poisoned").get_mut(&n).map(|p| p.release(ip));
+            self.subnet_pools.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() }).get_mut(&n).map(|p| p.release(ip));
         }
     }
 
     pub fn count_free(&self) -> usize {
-        self.pool.lock().expect("lock poisoned").count_free()
+        self.pool.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() }).count_free()
     }
 
     pub fn allocate_subnet(&self, prefix: u8) -> Option<Ipv4Cidr> {
-        self.pool.lock().expect("lock poisoned").allocate_subnet(prefix)
+        self.pool.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() }).allocate_subnet(prefix)
     }
 
     /// Attach a pod to the network: allocate IP, create veth pair, add host route.
@@ -132,7 +132,7 @@ impl NetMux {
     pub fn register_subnet_cidr(&self, name: &str, cidr_str: &str) -> Result<()> {
         let cidr = Ipv4Cidr::parse(cidr_str)
             .context("Invalid subnet CIDR")?;
-        let mut pools = self.subnet_pools.lock().expect("lock poisoned");
+        let mut pools = self.subnet_pools.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() });
         pools.insert(name.to_string(), IpPool::new(cidr));
         info!("Registered subnet '{}' with CIDR {}", name, cidr_str);
         Ok(())
@@ -140,7 +140,7 @@ impl NetMux {
 
     pub fn attach_pod(&self, pod_uid: &str, container_pid: Option<u32>, subnet: Option<&str>) -> Result<(Ipv4Addr, u32, u32)> {
         let pod_ip = if let Some(subnet_name) = subnet {
-            let mut pools = self.subnet_pools.lock().expect("lock poisoned");
+            let mut pools = self.subnet_pools.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() });
             pools.get_mut(subnet_name)
                 .and_then(|p| p.allocate())
                 .context(format!("No IPs available in subnet '{}'", subnet_name))?

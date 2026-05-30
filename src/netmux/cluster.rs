@@ -91,7 +91,7 @@ impl Cluster {
             anyhow::bail!("Invalid join token");
         }
 
-        let mut bitmaps = self.bitmaps.lock().expect("lock poisoned");
+        let mut bitmaps = self.bitmaps.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() });
         let bm = bitmaps.get_mut(vnet).ok_or_else(|| {
             anyhow::anyhow!("VNet '{}' not found in bitmap", vnet)
         })?;
@@ -104,7 +104,7 @@ impl Cluster {
         let block_ip = Ipv4Addr::from(bm.base + (block_idx as u32) * 256);
         let assigned_cidr = format!("{}/24", block_ip);
 
-        let mut peers = self.peers.lock().expect("lock poisoned");
+        let mut peers = self.peers.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() });
         peers.insert(node_name.to_string(), NodeInfo {
             name: node_name.to_string(),
             host_ip: node_ip,
@@ -117,7 +117,7 @@ impl Cluster {
     }
 
     pub async fn announce_to_peers(&self) -> Result<()> {
-        let peers = self.peers.lock().expect("lock poisoned").clone();
+        let peers = self.peers.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() }).clone();
         let body = serde_json::json!({
             "node_name": self.name,
             "node_ip": self.host_ip.to_string(),
@@ -156,7 +156,7 @@ impl Cluster {
             sleep(Duration::from_secs(30)).await;
             let _ = self.announce_to_peers().await;
 
-            let mut peers = self.peers.lock().expect("lock poisoned");
+            let mut peers = self.peers.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() });
             let dead: Vec<String> = peers.iter()
                 .filter(|(_, n)| n.last_seen.elapsed() > Duration::from_secs(90))
                 .map(|(name, _)| name.clone())
@@ -175,7 +175,7 @@ impl Cluster {
 
     /// Install cross-node routes for all known peers.
     pub async fn install_routes(&self, netmux: &NetMux) -> Result<()> {
-        let peers = self.peers.lock().expect("lock poisoned").clone();
+        let peers = self.peers.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() }).clone();
         for (name, peer) in &peers {
             if let Some(ref cidr) = peer.pod_cidr {
                 match netmux.add_subnet_route_raw(cidr, &peer.host_ip.to_string()) {
@@ -188,7 +188,7 @@ impl Cluster {
     }
 
     pub fn update_peer_heartbeat(&self, name: &str) {
-        if let Some(peer) = self.peers.lock().expect("lock poisoned").get_mut(name) {
+        if let Some(peer) = self.peers.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() }).get_mut(name) {
             peer.last_seen = Instant::now();
         }
     }
@@ -197,7 +197,7 @@ impl Cluster {
     pub fn host_ip(&self) -> Ipv4Addr { self.host_ip }
     pub fn assigned_cidr(&self) -> &str { &self.assigned_cidr }
     pub fn join_token(&self) -> &str { &self.join_token }
-    pub fn peers(&self) -> HashMap<String, NodeInfo> { self.peers.lock().expect("lock poisoned").clone() }
+    pub fn peers(&self) -> HashMap<String, NodeInfo> { self.peers.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() }).clone() }
 }
 
 #[cfg(test)]

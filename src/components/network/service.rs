@@ -2,24 +2,19 @@ use crate::types::{AnyResource, ResourceStore};
 use crate::scheduler::process::ProcessTracker;
 use k8s_openapi::api::core::v1::Service;
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tokio::task::JoinHandle;
 use tracing::{debug, info};
 
 use crate::netmux::NetMux;
 
 
-struct RunningProxy {
-    handle: JoinHandle<()>,
-}
-
 pub struct NetworkManager {
     pub store: Arc<ResourceStore>,
     pub process_tracker: Arc<ProcessTracker>,
-    proxies: Mutex<HashMap<String, RunningProxy>>,
+    proxies: Mutex<HashSet<String>>,
     counter: Arc<AtomicUsize>,
     netmux: Arc<NetMux>,
     /// Cache of running pod IPs by namespace: ns → Vec<(pod_name, ip)>.
@@ -33,7 +28,7 @@ impl NetworkManager {
         Self {
             store,
             process_tracker,
-            proxies: Mutex::new(HashMap::new()),
+            proxies: Mutex::new(HashSet::new()),
             counter: Arc::new(AtomicUsize::new(0)),
             netmux,
             pod_ip_cache: std::sync::Mutex::new(HashMap::new()),
@@ -77,9 +72,7 @@ impl NetworkManager {
             // Bind on ClusterIP:servicePort via nftables DNAT
             if !cluster_ip.is_empty() && cluster_ip != "None" {
                 let port_key = format!("{}:clusterip:{}", key, svc_port.port);
-                if let Some(old) = proxies.remove(&port_key) {
-                    old.handle.abort();
-                }
+                proxies.remove(&port_key);
                 let listen_addr = format!("{}:{}", cluster_ip, svc_port.port);
                 let svc_port_num = svc_port.port as u16;
                 // Resolve container port: targetPort can be an integer or a port name
@@ -102,16 +95,14 @@ impl NetworkManager {
                 if let Err(e) = self.netmux.add_dnat(cluster_ip_addr, svc_port_num, &backends) {
                     tracing::error!("add_dnat failed for {}: {:?}", key, e);
                 }
-                proxies.insert(port_key, RunningProxy { handle: tokio::spawn(async { /* DNAT via nftables */ }) });
+                proxies.insert(port_key);
             }
 
             // NodePort via nftables DNAT
             if svc_type == "NodePort" || svc_type == "LoadBalancer"  {
                 if let Some(node_port) = svc_port.node_port.map(|p| p as u16) {
                     let port_key = format!("{}:nodeport:{}", key, node_port);
-                    if let Some(old) = proxies.remove(&port_key) {
-                        old.handle.abort();
-                    }
+                    proxies.remove(&port_key);
                     let listen_addr = format!("0.0.0.0:{}", node_port);
                     let container_port = match &target_port {
                         IntOrString::Int(n) => *n as u16,
@@ -132,7 +123,7 @@ impl NetworkManager {
                     if let Err(e) = self.netmux.add_nodeport_dnat(node_port, &backends) {
                         tracing::error!("add_nodeport_dnat failed for {}: {:?}", key, e);
                     }
-                    proxies.insert(port_key, RunningProxy { handle: tokio::spawn(async { /* DNAT via nftables */ }) });
+                    proxies.insert(port_key);
                 }
             }
         }
@@ -164,7 +155,7 @@ impl NetworkManager {
 
     /// Invalidate the pod IP cache. Called when pods start or stop.
     pub fn invalidate_pod_cache(&self) {
-        self.pod_ip_cache.lock().expect("lock poisoned").clear();
+        self.pod_ip_cache.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() }).clear();
     }
 
     /// Resolve a named port from pod containers to a numeric port.
@@ -215,15 +206,14 @@ impl NetworkManager {
     pub async fn remove_service(&self, ns: &str, name: &str) {
         let prefix = format!("{}/{}", ns, name);
         let mut proxies = self.proxies.lock().await;
-        let keys: Vec<_> = proxies.keys()
+        let keys: Vec<_> = proxies.iter()
             .filter(|k| k.starts_with(&prefix))
             .cloned()
             .collect();
         for key in keys {
-            if let Some(p) = proxies.remove(&key) {
-                p.handle.abort();
-                info!("Stopped service proxy for {}", key);
-                // Extract ClusterIP and port from store
+            proxies.remove(&key);
+            info!("Stopped service proxy for {}", key);
+            // Extract ClusterIP and port from store
                 let store_prefix = format!("{}/{}", ns, name);
                 if key.starts_with(&store_prefix) {
                     let trackers = self.store.get_by_kind("Service").await;
@@ -246,7 +236,6 @@ impl NetworkManager {
                             }
                         }
                     }
-                }
             }
         }
     }

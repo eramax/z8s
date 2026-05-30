@@ -78,14 +78,14 @@ impl IngressController {
                 }
             }
         }
-        let mut routes = self.state.routes.write().expect("lock poisoned");
+        let mut routes = self.state.routes.write().unwrap_or_else(|e| { tracing::warn!("rwlock poisoned"); e.into_inner() });
         routes.insert(uid.to_string(), routes_by_host);
         Ok(())
     }
 
     pub fn remove_ingress(&self, ingress: &Ingress) -> Result<()> {
         let uid = ingress.metadata.uid.as_deref().unwrap_or("");
-        let mut routes = self.state.routes.write().expect("lock poisoned");
+        let mut routes = self.state.routes.write().unwrap_or_else(|e| { tracing::warn!("rwlock poisoned"); e.into_inner() });
         routes.remove(uid);
         info!("Ingress: removed routes for UID {}", uid);
         Ok(())
@@ -105,7 +105,7 @@ async fn handle_connection(
 
     let host = extract_host(&buf[..n]).unwrap_or("");
     let addr = {
-        let routes = state.routes.read().expect("lock poisoned");
+        let routes = state.routes.read().unwrap_or_else(|e| { tracing::warn!("rwlock poisoned"); e.into_inner() });
         // Search across all ingress resources for a matching host
         let mut result = None;
         for (_uid, host_map) in routes.iter() {

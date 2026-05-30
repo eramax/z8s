@@ -59,7 +59,7 @@ impl NftEngine {
     }
 
     pub fn init(&self, pod_cidr: &str) -> Result<()> {
-        let _lock = self.writer.lock().expect("lock poisoned");
+        let _lock = self.writer.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() });
 
         // Delete and recreate tables to flush stale rules from previous runs
         for table_name in [NAT_TABLE, FILTER_TABLE] {
@@ -73,8 +73,8 @@ impl NftEngine {
         }
 
         // Reset jump tracks since all chains are gone
-        self.jump_track.lock().expect("lock poisoned").clear();
-        self.nodeport_jump_track.lock().expect("lock poisoned").clear();
+        self.jump_track.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() }).clear();
+        self.nodeport_jump_track.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() }).clear();
 
         // Create nat table with baseline chains
         {
@@ -203,7 +203,7 @@ impl NftEngine {
     }
 
     pub fn add_snat(&self, vnet_name: &str, vnet_cidr: &str) -> Result<()> {
-        let _lock = self.writer.lock().expect("lock poisoned");
+        let _lock = self.writer.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() });
         let mut batch = Batch::new();
         let nat_table = Table::new(ProtocolFamily::Ipv4).with_name(NAT_TABLE);
         let postrouting = Chain::new(&nat_table).with_name("postrouting");
@@ -220,7 +220,7 @@ impl NftEngine {
     }
 
     pub fn remove_snat(&self, vnet_cidr: &str) -> Result<()> {
-        let _lock = self.writer.lock().expect("lock poisoned");
+        let _lock = self.writer.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() });
         let mut batch = Batch::new();
         let nat_table = Table::new(ProtocolFamily::Ipv4).with_name(NAT_TABLE);
         let postrouting = Chain::new(&nat_table).with_name("postrouting");
@@ -237,7 +237,7 @@ impl NftEngine {
     }
 
     pub fn add_dnat(&self, cluster_ip: Ipv4Addr, port: u16, backends: &[(Ipv4Addr, u16)]) -> Result<()> {
-        let _lock = self.writer.lock().expect("lock poisoned");
+        let _lock = self.writer.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() });
         let svc = chain_name(cluster_ip, port);
         let nat_table = Table::new(ProtocolFamily::Ipv4).with_name(NAT_TABLE);
 
@@ -284,7 +284,7 @@ impl NftEngine {
 
         // Add jump rules to prerouting and output (only on first registration)
         {
-            let mut tracked = self.jump_track.lock().expect("lock poisoned");
+            let mut tracked = self.jump_track.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() });
             if !tracked.iter().any(|(ip, p)| *ip == cluster_ip && *p == port) {
                 tracked.push((cluster_ip, port));
                 for hook in ["prerouting", "output"] {
@@ -306,7 +306,7 @@ impl NftEngine {
         if backends.is_empty() {
             return Ok(());
         }
-        let _lock = self.writer.lock().expect("lock poisoned");
+        let _lock = self.writer.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() });
         let svc = format!("np-{:04x}", node_port);
         let nat_table = Table::new(ProtocolFamily::Ipv4).with_name(NAT_TABLE);
 
@@ -346,7 +346,7 @@ impl NftEngine {
 
         // Add jump rules to prerouting and output (only on first registration)
         {
-            let mut tracked = self.nodeport_jump_track.lock().expect("lock poisoned");
+            let mut tracked = self.nodeport_jump_track.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() });
             if !tracked.contains(&node_port) {
                 tracked.push(node_port);
                 for hook in ["prerouting", "output"] {
@@ -365,7 +365,7 @@ impl NftEngine {
     }
 
     pub fn remove_nodeport_dnat(&self, node_port: u16) -> Result<()> {
-        let _lock = self.writer.lock().expect("lock poisoned");
+        let _lock = self.writer.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() });
         let svc = format!("np-{:04x}", node_port);
         let nat_table = Table::new(ProtocolFamily::Ipv4).with_name(NAT_TABLE);
 
@@ -377,7 +377,7 @@ impl NftEngine {
         }
 
         // Clean up jump track so re-adds don't silently fail
-        let mut tracked = self.nodeport_jump_track.lock().expect("lock poisoned");
+        let mut tracked = self.nodeport_jump_track.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() });
         tracked.retain(|p| *p != node_port);
 
         info!("nftables: removed NodePort DNAT for {}", node_port);
@@ -385,7 +385,7 @@ impl NftEngine {
     }
 
     pub fn remove_dnat(&self, cluster_ip: Ipv4Addr, port: u16) -> Result<()> {
-        let _lock = self.writer.lock().expect("lock poisoned");
+        let _lock = self.writer.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() });
         let svc = chain_name(cluster_ip, port);
         let nat_table = Table::new(ProtocolFamily::Ipv4).with_name(NAT_TABLE);
 
@@ -397,7 +397,7 @@ impl NftEngine {
         }
 
         // Clean up jump track so re-adds work properly
-        let mut tracked = self.jump_track.lock().expect("lock poisoned");
+        let mut tracked = self.jump_track.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() });
         tracked.retain(|(ip, p)| *ip != cluster_ip || *p != port);
 
         info!("nftables: removed DNAT for {}:{}", cluster_ip, port);
@@ -405,7 +405,7 @@ impl NftEngine {
     }
 
     pub fn add_forward_allow(&self, src_cidr: &str, dst_cidr: &str) -> Result<()> {
-        let _lock = self.writer.lock().expect("lock poisoned");
+        let _lock = self.writer.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() });
         let mut batch = Batch::new();
 
         let filter_table = Table::new(ProtocolFamily::Ipv4).with_name(FILTER_TABLE);
@@ -426,7 +426,7 @@ impl NftEngine {
     }
 
     pub fn add_forward_deny(&self, src_cidr: &str, dst_cidr: &str) -> Result<()> {
-        let _lock = self.writer.lock().expect("lock poisoned");
+        let _lock = self.writer.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() });
         let mut batch = Batch::new();
 
         let filter_table = Table::new(ProtocolFamily::Ipv4).with_name(FILTER_TABLE);
@@ -447,7 +447,7 @@ impl NftEngine {
     }
 
     pub fn create_set(&self, name: &str, initial_ips: &[Ipv4Addr]) -> Result<()> {
-        let _lock = self.writer.lock().expect("lock poisoned");
+        let _lock = self.writer.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() });
         let mut batch = Batch::new();
 
         let table = Table::new(ProtocolFamily::Ipv4).with_name(FILTER_TABLE);
@@ -466,7 +466,7 @@ impl NftEngine {
     }
 
     pub fn replace_set(&self, name: &str, ips: &[Ipv4Addr]) -> Result<()> {
-        let _lock = self.writer.lock().expect("lock poisoned");
+        let _lock = self.writer.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() });
         let mut batch = Batch::new();
 
         let table = Table::new(ProtocolFamily::Ipv4).with_name(FILTER_TABLE);
@@ -491,7 +491,7 @@ impl NftEngine {
     }
 
     pub fn add_forward_allow_set_src(&self, set_name: &str, dst_cidr: &str) -> Result<()> {
-        let _lock = self.writer.lock().expect("lock poisoned");
+        let _lock = self.writer.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() });
         let mut batch = Batch::new();
 
         let filter_table = Table::new(ProtocolFamily::Ipv4).with_name(FILTER_TABLE);
@@ -518,7 +518,7 @@ impl NftEngine {
     /// Add catch-all chain for the forward hook with base allow rules.
     /// These rules are evaluated AFTER all NSG rules (placed at end via sub-chain).
     pub fn add_forward_catchall(&self, pod_cidr: &str) -> Result<()> {
-        let _lock = self.writer.lock().expect("lock poisoned");
+        let _lock = self.writer.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() });
         let filter_table = Table::new(ProtocolFamily::Ipv4).with_name(FILTER_TABLE);
         let forward = Chain::new(&filter_table).with_name("forward");
         let pod_net: IpNetwork = pod_cidr.parse().context("Invalid pod CIDR")?;
