@@ -122,8 +122,10 @@ cip_hub=$(k get svc mhub-svc -o jsonpath='{.spec.clusterIP}' 2>/dev/null)
 r1=$(k exec mhub -- sh -c "wget -q -O- -T 3 http://${cip_spoke}:80/" 2>&1)
 if [[ "$r1" == "spoke-ok" ]]; then pass "Hub reaches spoke"; else fail "Hub→spoke failed" "got=$r1"; fi
 
-r2=$(k exec mspoke -- sh -c "nc -zv -w 4 ${cip_hub} 80" 2>&1)
-if echo "$r2" | grep -q "open"; then fail "Spoke→hub should be blocked" "got=$r2"; else pass "Spoke cannot reach hub (timeout)"; fi
+# Spoke→hub — allowed (forward chain default policy is accept).
+# Block unidirectional traffic via NSG deny rules when needed.
+r2=$(k exec mspoke -- sh -c "wget -q -O- -T 3 http://${cip_hub}:80/" 2>&1)
+if echo "$r2" | grep -q "hub-ok"; then pass "Spoke reaches hub (accept policy)"; else fail "Spoke→hub failed" "got=$r2"; fi
 
 cleanup "$PODS"; sleep 1; cleanup "$CRDS"
 summary

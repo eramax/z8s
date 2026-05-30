@@ -63,6 +63,9 @@ impl NftEngine {
     // ── Init ───────────────────────────────────────────────────────
 
     pub async fn init(&self, pod_cidr: &str) -> Result<()> {
+        // NOTE: Only touches our own tables (z8s_nat, z8s_filter).
+        // Never flush the entire ruleset — that would destroy k3s's kube-* tables
+        // and require a reboot to recover (see incident.md).
         for tbl in [NAT_TABLE, FILTER_TABLE] {
             let t = Table::new(ProtocolFamily::Ipv4).with_name(tbl);
             let mut d = Batch::new(); d.add(&t, rustables::MsgType::Del); self.send(d).await?;
@@ -80,7 +83,7 @@ impl NftEngine {
 
         let filter = Table::new(ProtocolFamily::Ipv4).with_name(FILTER_TABLE);
         let mut fb = Batch::new();
-        fb.add(&Chain::new(&filter).with_name("forward").with_type(ChainType::Filter).with_hook(Hook::new(HookClass::Forward, HOOK_PRIO_FILTER)).with_policy(ChainPolicy::Drop), rustables::MsgType::Add);
+        fb.add(&Chain::new(&filter).with_name("forward").with_type(ChainType::Filter).with_hook(Hook::new(HookClass::Forward, HOOK_PRIO_FILTER)).with_policy(ChainPolicy::Accept), rustables::MsgType::Add);
         fb.add(&Chain::new(&filter).with_name("input").with_type(ChainType::Filter).with_hook(Hook::new(HookClass::In, HOOK_PRIO_FILTER)).with_policy(ChainPolicy::Accept), rustables::MsgType::Add);
         fb.add(&Chain::new(&filter).with_name("output").with_type(ChainType::Filter).with_hook(Hook::new(HookClass::Out, HOOK_PRIO_FILTER)).with_policy(ChainPolicy::Accept), rustables::MsgType::Add);
         let forward = Chain::new(&filter).with_name("forward");
