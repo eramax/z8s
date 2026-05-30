@@ -1,6 +1,5 @@
 use async_trait::async_trait;
-use k8s_openapi::api::core::v1::{Endpoints, Service};
-use k8s_openapi::api::discovery::v1::EndpointSlice;
+use k8s_openapi::api::core::v1::Service;
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone)]
@@ -11,13 +10,16 @@ pub struct ServiceEndpoint {
 
 #[async_trait]
 pub trait NetworkEngine: Send + Sync {
-    fn dns_port(&self) -> Option<u16>;
-
+    fn dns_port(&self) -> Option<u16> { crate::config::dns_port() }
     async fn sync_service(&self, svc: &Service) -> anyhow::Result<()>;
     async fn remove_service(&self, ns: &str, name: &str) -> anyhow::Result<()>;
     async fn sync_services_for_labels(&self, ns: &str, labels: &BTreeMap<String, String>) -> anyhow::Result<()>;
-    async fn compute_endpoints(&self, svc: &Service) -> Endpoints;
-    async fn compute_endpointslices(&self, svc: &Service) -> Vec<EndpointSlice>;
+    async fn compute_endpoints(&self, _svc: &Service) -> k8s_openapi::api::core::v1::Endpoints {
+        k8s_openapi::api::core::v1::Endpoints::default()
+    }
+    async fn compute_endpointslices(&self, _svc: &Service) -> Vec<k8s_openapi::api::discovery::v1::EndpointSlice> {
+        vec![]
+    }
 }
 
 #[async_trait]
