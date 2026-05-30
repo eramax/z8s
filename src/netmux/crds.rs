@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VNet {
-    #[serde(default = "default_api_version")]
+    #[serde(rename = "apiVersion", default = "default_api_version")]
     pub api_version: String,
     #[serde(default = "default_vnet_kind")]
     pub kind: String,
@@ -38,7 +38,7 @@ pub struct VNetStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Subnet {
-    #[serde(default = "default_api_version")]
+    #[serde(rename = "apiVersion", default = "default_api_version")]
     pub api_version: String,
     #[serde(default = "default_subnet_kind")]
     pub kind: String,
@@ -56,7 +56,7 @@ pub struct SubnetSpec {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Nsg {
-    #[serde(default = "default_api_version")]
+    #[serde(rename = "apiVersion", default = "default_api_version")]
     pub api_version: String,
     #[serde(default = "default_nsg_kind")]
     pub kind: String,
@@ -93,7 +93,7 @@ fn default_priority() -> u32 { 1000 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouteTable {
-    #[serde(default = "default_api_version")]
+    #[serde(rename = "apiVersion", default = "default_api_version")]
     pub api_version: String,
     #[serde(default = "default_routetable_kind")]
     pub kind: String,
