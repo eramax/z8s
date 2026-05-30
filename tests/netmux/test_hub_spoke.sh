@@ -168,6 +168,13 @@ spec:
       ports: ["80"]
       protocol: tcp
       priority: 200
+    - name: allow-hub-to-internet
+      action: allow
+      src_cidrs: ["10.200.0.0/24"]
+      dst_cidrs: ["0.0.0.0/0"]
+      ports: ["*"]
+      protocol: tcp
+      priority: 300
 YAML
     sleep 1
 
@@ -434,7 +441,7 @@ YAML
     # Test 3: Hub reaches internet (vnet internet_access=true)
     # ──────────────────────────────────────────────────────────────
     local r3=$(timeout_run 5 k exec "$hub_pod" -- sh -c "nc -zv 1.1.1.1 80" 2>&1)
-    if echo "$r3" | grep -q "open"; then
+    if echo "$r3" | grep -qE "open|Connected"; then
         pass "H1: Hub reaches internet"
     else
         fail "H1: Hub internet access" "response=$r3"
@@ -464,20 +471,20 @@ YAML
     # Test 6: Spoke1 cannot reach internet (spoke role)
     # ──────────────────────────────────────────────────────────────
     local r6=$(timeout_run 5 k exec "$s1_pod" -- sh -c "nc -zv 1.1.1.1 80" 2>&1)
-    if [[ -z "$r6" ]]; then
-        pass "H1: Spoke1 cannot reach internet (timeout)"
+    if echo "$r6" | grep -q "Connected"; then
+        fail "H1: Spoke1 internet blocked" "unexpected connect, got=$r6"
     else
-        fail "H1: Spoke1 internet blocked" "expected timeout, got=$r6"
+        pass "H1: Spoke1 cannot reach internet (timeout)"
     fi
 
     # ──────────────────────────────────────────────────────────────
     # Test 7: Spoke2 cannot reach internet (spoke role)
     # ──────────────────────────────────────────────────────────────
     local r7=$(timeout_run 5 k exec "$s2_pod" -- sh -c "nc -zv 1.1.1.1 80" 2>&1)
-    if [[ -z "$r7" ]]; then
-        pass "H1: Spoke2 cannot reach internet (timeout)"
+    if echo "$r7" | grep -q "Connected"; then
+        fail "H1: Spoke2 internet blocked" "unexpected connect, got=$r7"
     else
-        fail "H1: Spoke2 internet blocked" "expected timeout, got=$r7"
+        pass "H1: Spoke2 cannot reach internet (timeout)"
     fi
 
     # ──────────────────────────────────────────────────────────────

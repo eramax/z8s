@@ -536,12 +536,6 @@ impl NftEngine {
             .accept();
         batch.add(&host_to_pod, rustables::MsgType::Add);
 
-        // Pod → any (allows hub internet access, blocked by NSG deny for spokes)
-        let pod_to_any = Rule::new(&catch_all)?
-            .snetwork(pod_net)?
-            .accept();
-        batch.add(&pod_to_any, rustables::MsgType::Add);
-
         // Jump from forward to catch-all (always last rule in forward chain)
         let mut jump = Rule::new(&forward).map_err(|e| anyhow::anyhow!("{:?}", e))?;
         jump.add_expr(Immediate::new_verdict(VerdictKind::Jump { chain: "catch-all".to_string() }));

@@ -4,12 +4,15 @@ use anyhow::Result;
 use tracing::info;
 use crate::types::{AnyResource, ResourceTracker};
 use crate::components::{Component, ReconcileContext, ResourceCategory};
+use crate::netmux::NetMux;
 
-pub struct SubnetResource;
+pub struct SubnetResource {
+    netmux: Arc<NetMux>,
+}
 
 impl SubnetResource {
-    pub fn new() -> Self {
-        Self
+    pub fn new(netmux: Arc<NetMux>) -> Self {
+        Self { netmux }
     }
 }
 
@@ -23,7 +26,11 @@ impl Component for SubnetResource {
     }
 
     async fn on_apply(&self, _ctx: &ReconcileContext, resource: &AnyResource) -> Result<()> {
-        info!("Subnet applied: {} {}", resource.namespace(), resource.name());
+        if let AnyResource::Subnet(subnet) = resource {
+            let name = subnet.metadata.name.as_deref().unwrap_or("unknown");
+            self.netmux.register_subnet_cidr(name, &subnet.spec.cidr)?;
+            info!("Subnet '{}' registered with CIDR {}", name, &subnet.spec.cidr);
+        }
         Ok(())
     }
 

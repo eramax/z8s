@@ -11,6 +11,7 @@ pub mod cluster;
 pub mod dns;
 pub mod network;
 
+use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result};
@@ -60,6 +61,7 @@ pub struct NetMux {
     // CONCURRENCY: std::sync::Mutex used for brief synchronous access only.
     // Lock held only during allocate/release, never across .await points.
     pool: Mutex<IpPool>,
+    subnet_pools: Mutex<HashMap<String, IpPool>>,
     prefix: u8,
     gateway: Ipv4Addr,
     pub nft: NftEngine,
@@ -75,6 +77,7 @@ impl NetMux {
         let ingress_state = Arc::new(crate::netmux::ingress::IngressState::new());
         Ok(Self {
             pool: Mutex::new(IpPool::new(cidr.clone())),
+            subnet_pools: Mutex::new(HashMap::new()),
             prefix: cidr.prefix,
             gateway,
             nft,
@@ -102,7 +105,16 @@ impl NetMux {
     }
 
     pub fn release_ip(&self, ip: Ipv4Addr) {
+        // Release to global pool
         self.pool.lock().expect("lock poisoned").release(ip);
+        // Check subnet pools — find which one contains this IP and release it
+        let name: Option<String> = {
+            let pools = self.subnet_pools.lock().expect("lock poisoned");
+            pools.iter().find(|(_, p)| p.cidr().contains(&ip)).map(|(n, _)| n.clone())
+        };
+        if let Some(n) = name {
+            self.subnet_pools.lock().expect("lock poisoned").get_mut(&n).map(|p| p.release(ip));
+        }
     }
 
     pub fn count_free(&self) -> usize {
@@ -117,9 +129,25 @@ impl NetMux {
     /// If `container_pid` is provided, the veth peer is created directly in the
     /// pod's network namespace with name "eth0".
     /// Returns the allocated pod IP, host veth ifindex, and peer veth ifindex.
-    pub fn attach_pod(&self, pod_uid: &str, container_pid: Option<u32>) -> Result<(Ipv4Addr, u32, u32)> {
-        let pod_ip = self.allocate_ip()
-            .context("No IPs available in pod CIDR")?;
+    pub fn register_subnet_cidr(&self, name: &str, cidr_str: &str) -> Result<()> {
+        let cidr = Ipv4Cidr::parse(cidr_str)
+            .context("Invalid subnet CIDR")?;
+        let mut pools = self.subnet_pools.lock().expect("lock poisoned");
+        pools.insert(name.to_string(), IpPool::new(cidr));
+        info!("Registered subnet '{}' with CIDR {}", name, cidr_str);
+        Ok(())
+    }
+
+    pub fn attach_pod(&self, pod_uid: &str, container_pid: Option<u32>, subnet: Option<&str>) -> Result<(Ipv4Addr, u32, u32)> {
+        let pod_ip = if let Some(subnet_name) = subnet {
+            let mut pools = self.subnet_pools.lock().expect("lock poisoned");
+            pools.get_mut(subnet_name)
+                .and_then(|p| p.allocate())
+                .context(format!("No IPs available in subnet '{}'", subnet_name))?
+        } else {
+            self.allocate_ip()
+                .context("No IPs available in pod CIDR")?
+        };
 
         let (host_name, _peer_name, host_idx, peer_idx) =
             veth::create_pod_veth(pod_uid, container_pid)

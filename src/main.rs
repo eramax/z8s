@@ -186,7 +186,7 @@ async fn main() -> Result<()> {
     registry.register(Box::new(IngressResource::new(store.clone(), netmux.clone())));
     registry.register(Box::new(NetworkPolicyResource::new(netmux.clone())));
     registry.register(Box::new(VNetResource::new(netmux.clone())));
-    registry.register(Box::new(SubnetResource::new()));
+    registry.register(Box::new(SubnetResource::new(netmux.clone())));
     registry.register(Box::new(NsgResource::new(netmux.clone())));
     registry.register(Box::new(RouteTableResource::new()));
     registry.register(Box::new(ConfigMapResource::new(store.clone())));

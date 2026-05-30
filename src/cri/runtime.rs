@@ -56,6 +56,7 @@ struct ContainerSpawnCtx<'a> {
     published_ports: Vec<u16>,
     working_dir: Option<String>,
     probes: Vec<ProbeConfig>,
+    subnet: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -129,6 +130,7 @@ impl ProcessSupervisor {
         cfg: &crate::cri::spec::ContainerConfig,
         rootfs_path: &str,
         pod_uid: &str,
+        subnet: Option<String>,
     ) -> Result<RunningContainer> {
         let oci = if cfg.entrypoint.is_empty() || cfg.working_dir.is_none() {
             crate::cri::oci::read_image_config(rootfs_path)
@@ -206,6 +208,7 @@ impl ProcessSupervisor {
                 published_ports: published_ports_data.clone(),
                 working_dir: working_dir.clone(),
                 probes: cfg.probes.clone(),
+                subnet,
             };
             if rootfs::is_root() {
                 return self.spawn_root_ns_container(ctx, &published_ports_data).await;
@@ -338,7 +341,7 @@ impl ProcessSupervisor {
         let mut prepared: Vec<(String, RunningContainer)> = Vec::new();
         for cfg in &spec.containers {
             let rootfs_path = self.prepare_rootfs(spec, cfg).await?;
-            let rc = match self.spawn_container_from_config(cfg, &rootfs_path, &spec.pod_uid).await {
+            let rc = match self.spawn_container_from_config(cfg, &rootfs_path, &spec.pod_uid, spec.subnet.clone()).await {
                 Ok(rc) => rc,
                 Err(e) => {
                     Self::remove_placeholders(&self.running, placeholders).await;
@@ -453,6 +456,7 @@ impl ProcessSupervisor {
         isolate_net: bool,
         sync_r: &std::os::fd::OwnedFd,
         ack_w: &std::os::fd::OwnedFd,
+        subnet: Option<&str>,
     ) -> (Option<std::net::Ipv4Addr>, Option<u32>) {
         if !isolate_net {
             return (None, None);
@@ -460,7 +464,7 @@ impl ProcessSupervisor {
         let mut sync_buf = [0u8; 1];
         let n = nix::unistd::read(sync_r, &mut sync_buf).unwrap_or(0);
         if n > 0 && sync_buf[0] == b'S' {
-            match self.netmux.attach_pod(pod_uid, Some(pid)) {
+            match self.netmux.attach_pod(pod_uid, Some(pid), subnet) {
                 Ok((ip, host_idx, peer_idx)) => {
                     if let Err(e) = self.netmux.configure_pod_netns(pod_uid, &ip, pid, peer_idx) {
                         warn!("NetMux configure_pod_netns failed: {:#}", e);
@@ -533,7 +537,7 @@ impl ProcessSupervisor {
         ctx: ContainerSpawnCtx<'_>,
         _service_ports: &[u16],
     ) -> Result<RunningContainer> {
-        let ContainerSpawnCtx { entrypoint, cmd_args, env_vars, rootfs_path, container_id, pod_uid, image, container_name, volumes, run_as_user, run_as_group, isolate_net, privileged, extra_caps, published_ports, working_dir, probes } = ctx;
+        let ContainerSpawnCtx { entrypoint, cmd_args, env_vars, rootfs_path, container_id, pod_uid, image, container_name, volumes, run_as_user, run_as_group, isolate_net, privileged, extra_caps, published_ports, working_dir, probes, subnet } = ctx;
         let (stdout_r, stdout_w) = nix::unistd::pipe().context("Failed to create stdout pipe")?;
         let (stderr_r, stderr_w) = nix::unistd::pipe().context("Failed to create stderr pipe")?;
         let (sync_r, sync_w) = nix::unistd::pipe().context("Failed to create sync pipe")?;
@@ -555,7 +559,7 @@ impl ProcessSupervisor {
                 info!("Container {} started with PID {} (root ns)", container_id, pid);
                 self.cgroup_manager.add_pid_to_cgroup(pod_uid, pid)?;
 
-                let (pod_ip, host_veth_ifindex) = self.handle_veth_netns(pod_uid, pid, isolate_net, &sync_r, &ack_w);
+                let (pod_ip, host_veth_ifindex) = self.handle_veth_netns(pod_uid, pid, isolate_net, &sync_r, &ack_w, subnet.as_deref());
 
                 drop(sync_r);
                 drop(ack_w);
@@ -701,7 +705,7 @@ impl ProcessSupervisor {
         ctx: ContainerSpawnCtx<'_>,
         _service_ports: &[u16],
     ) -> Result<RunningContainer> {
-        let ContainerSpawnCtx { entrypoint, cmd_args, env_vars, rootfs_path, container_id, pod_uid, image, container_name, volumes, run_as_user, run_as_group, isolate_net, privileged, extra_caps, published_ports, working_dir, probes } = ctx;
+        let ContainerSpawnCtx { entrypoint, cmd_args, env_vars, rootfs_path, container_id, pod_uid, image, container_name, volumes, run_as_user, run_as_group, isolate_net, privileged, extra_caps, published_ports, working_dir, probes, subnet } = ctx;
         let (stdout_r, stdout_w) = nix::unistd::pipe()
             .context("Failed to create stdout pipe")?;
         let (stderr_r, stderr_w) = nix::unistd::pipe()
@@ -760,7 +764,7 @@ impl ProcessSupervisor {
 
                 if isolate_net {
                     let pid = child_pid as u32;
-                    match self.netmux.attach_pod(pod_uid, Some(pid)) {
+                    match self.netmux.attach_pod(pod_uid, Some(pid), subnet.as_deref()) {
                         Ok((ip, host_idx, peer_idx)) => {
                             if let Err(e) = self.netmux.configure_pod_netns(pod_uid, &ip, pid, peer_idx) {
                         warn!("NetMux configure_pod_netns failed: {:#}", e);

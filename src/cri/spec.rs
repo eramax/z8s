@@ -11,6 +11,7 @@ pub struct ContainerSpec {
     pub containers: Vec<ContainerConfig>,
     pub cgroup_path: String,
     pub labels: BTreeMap<String, String>,
+    pub subnet: Option<String>,
 }
 
 #[derive(Debug, Clone)]

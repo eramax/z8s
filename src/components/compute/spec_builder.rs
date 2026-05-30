@@ -106,6 +106,10 @@ pub async fn build_spec(resource: &AnyResource, store: &ResourceStore) -> Contai
     }
 
     let labels = pod.map(|p| p.metadata.labels.clone().unwrap_or_default()).unwrap_or_default();
+    let subnet = pod.and_then(|p| {
+        p.metadata.annotations.as_ref()
+            .and_then(|a| a.get("z8s.io/subnet").cloned())
+    });
 
     ContainerSpec {
         pod_name,
@@ -115,6 +119,7 @@ pub async fn build_spec(resource: &AnyResource, store: &ResourceStore) -> Contai
         containers: configs,
         cgroup_path: String::new(),
         labels,
+        subnet,
     }
 }
 
