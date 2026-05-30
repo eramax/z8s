@@ -284,7 +284,7 @@ pub fn prepare_rootfs(rootfs_path: &str) -> Result<()> {
         "prepare_rootfs: dns_port={:?} dns_server={:?}",
         dns_port, dns_server
     );
-    let content = if let Some(port) = dns_port {
+    let content = if dns_port.is_some() {
         let domain = &crate::config::get().cluster_domain;
         let ns = dns_server.unwrap_or_else(|| {
             tracing::warn!("dns_server not set, falling back to 127.0.0.1");

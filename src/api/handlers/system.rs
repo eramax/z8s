@@ -118,6 +118,18 @@ pub async fn api_discovery_v1_resources() -> Json<APIResourceList> {
     })
 }
 
+pub async fn api_z8s_v1_resources() -> Json<APIResourceList> {
+    Json(APIResourceList {
+        group_version: "z8s.io/v1".into(),
+        resources: vec![
+            api_resource("vnets", "vnet", false, "VNet", &["get", "list", "create", "delete"], &[], &["all"]),
+            api_resource("subnets", "subnet", false, "Subnet", &["get", "list", "create", "delete"], &[], &["all"]),
+            api_resource("nsgs", "nsg", false, "NSG", &["get", "list", "create", "delete"], &[], &["all"]),
+            api_resource("routetables", "routetable", false, "RouteTable", &["get", "list", "create", "delete"], &[], &["all"]),
+        ],
+    })
+}
+
 pub async fn api_networking_v1_resources() -> Json<APIResourceList> {
     Json(APIResourceList {
         group_version: "networking.k8s.io/v1".into(),
@@ -206,6 +218,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api", get(api_versions))
         .route("/api/v1", get(api_v1_resources))
         .route("/apis", get(api_groups))
+        .route("/apis/z8s.io/v1", get(api_z8s_v1_resources))
         .route("/apis/apps/v1", get(api_apps_v1_resources))
         .route("/apis/networking.k8s.io/v1", get(api_networking_v1_resources))
         .route("/apis/discovery.k8s.io/v1", get(api_discovery_v1_resources))

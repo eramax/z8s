@@ -1,5 +1,10 @@
 pub mod configmap;
-pub mod networking;
+pub mod ingress;
+pub mod networkpolicy;
+pub mod vnet;
+pub mod subnet;
+pub mod nsg;
+pub mod routetable;
 pub mod deployment;
 pub mod endpoints;
 pub mod endpointslices;

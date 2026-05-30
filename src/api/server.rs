@@ -111,7 +111,12 @@ pub fn build_router(state: AppState) -> Router {
         .merge(crate::api::handlers::endpointslices::routes())
         .merge(crate::api::handlers::metrics::routes())
         .merge(crate::api::handlers::storage_class::routes())
-        .merge(crate::api::handlers::networking::routes())
+        .merge(crate::api::handlers::ingress::routes())
+        .merge(crate::api::handlers::networkpolicy::routes())
+        .merge(crate::api::handlers::vnet::routes())
+        .merge(crate::api::handlers::subnet::routes())
+        .merge(crate::api::handlers::nsg::routes())
+        .merge(crate::api::handlers::routetable::routes())
         .fallback(fallback_handler)
         .with_state(state)
 }

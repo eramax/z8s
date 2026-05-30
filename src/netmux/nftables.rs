@@ -26,7 +26,10 @@ fn chain_name(ip: Ipv4Addr, port: u16) -> String {
 
 pub struct NftEngine {
     writer: Mutex<()>,
+    // Tracks which ClusterIP:port pairs have been added to prevent jump rule accumulation
     jump_track: Mutex<Vec<(Ipv4Addr, u16)>>,
+    // Tracks which node ports have been added to prevent jump rule accumulation
+    nodeport_jump_track: Mutex<Vec<u16>>,
 }
 
 impl NftEngine {
@@ -34,6 +37,7 @@ impl NftEngine {
         Self {
             writer: Mutex::new(()),
             jump_track: Mutex::new(Vec::new()),
+            nodeport_jump_track: Mutex::new(Vec::new()),
         }
     }
 
@@ -298,16 +302,43 @@ impl NftEngine {
             Self::send_batch(batch)?;
         }
 
-        for hook in ["prerouting", "output"] {
-            let mut batch = Batch::new();
-            let hook_chain = Chain::new(&nat_table).with_name(hook);
-            let mut rule = Rule::new(&hook_chain).map_err(|e| anyhow::anyhow!("{:?}", e))?;
-            rule.add_expr(Immediate::new_verdict(VerdictKind::Jump { chain: svc.clone() }));
-            batch.add(&rule, rustables::MsgType::Add);
-            Self::send_batch(batch)?;
+        // Add jump rules to prerouting and output (only on first registration)
+        {
+            let mut tracked = self.nodeport_jump_track.lock().expect("lock poisoned");
+            if !tracked.contains(&node_port) {
+                tracked.push(node_port);
+                for hook in ["prerouting", "output"] {
+                    let mut batch = Batch::new();
+                    let hook_chain = Chain::new(&nat_table).with_name(hook);
+                    let mut rule = Rule::new(&hook_chain).map_err(|e| anyhow::anyhow!("{:?}", e))?;
+                    rule.add_expr(Immediate::new_verdict(VerdictKind::Jump { chain: svc.clone() }));
+                    batch.add(&rule, rustables::MsgType::Add);
+                    Self::send_batch(batch)?;
+                }
+            }
         }
 
         debug!("nftables: NodePort {} -> {} backends", node_port, backends.len());
+        Ok(())
+    }
+
+    pub fn remove_nodeport_dnat(&self, node_port: u16) -> Result<()> {
+        let _lock = self.writer.lock().expect("lock poisoned");
+        let svc = format!("np-{:04x}", node_port);
+        let nat_table = Table::new(ProtocolFamily::Ipv4).with_name(NAT_TABLE);
+
+        {
+            let mut batch = Batch::new();
+            let chain = Chain::new(&nat_table).with_name(&svc);
+            batch.add(&chain, rustables::MsgType::Del);
+            Self::send_batch(batch)?;
+        }
+
+        // Clean up jump track so re-adds don't silently fail
+        let mut tracked = self.nodeport_jump_track.lock().expect("lock poisoned");
+        tracked.retain(|p| *p != node_port);
+
+        info!("nftables: removed NodePort DNAT for {}", node_port);
         Ok(())
     }
 
@@ -316,13 +347,16 @@ impl NftEngine {
         let svc = chain_name(cluster_ip, port);
         let nat_table = Table::new(ProtocolFamily::Ipv4).with_name(NAT_TABLE);
 
-        // Delete per-service chain (jump rules to it remain but are harmless)
         {
             let mut batch = Batch::new();
             let chain = Chain::new(&nat_table).with_name(&svc);
             batch.add(&chain, rustables::MsgType::Del);
             Self::send_batch(batch)?;
         }
+
+        // Clean up jump track so re-adds work properly
+        let mut tracked = self.jump_track.lock().expect("lock poisoned");
+        tracked.retain(|(ip, p)| *ip != cluster_ip || *p != port);
 
         info!("nftables: removed DNAT for {}:{}", cluster_ip, port);
         Ok(())

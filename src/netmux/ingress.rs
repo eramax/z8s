@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use anyhow::{Context, Result};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncReadExt;
 use tracing::{info, warn};
 use k8s_openapi::api::networking::v1::Ingress;
 
@@ -13,12 +13,11 @@ use crate::types::{AnyResource, ResourceStore};
 /// and the HTTP listener (start_http). Routes are populated by
 /// CrdWatcher and consumed by handle_connection.
 pub struct IngressState {
-    /// Host -> (service_name, port) routing table
-    pub routes: std::sync::RwLock<HashMap<String, (String, u16)>>,
+    /// Ingress UID -> (Host -> (service_name, port))
+    pub routes: std::sync::RwLock<HashMap<String, HashMap<String, (String, u16)>>>,
 }
 
 impl IngressState {
-    /// Create empty ingress state with no routes.
     pub fn new() -> Self {
         Self { routes: std::sync::RwLock::new(HashMap::new()) }
     }
@@ -55,12 +54,12 @@ impl IngressController {
     }
 
     pub fn apply_ingress(&self, ingress: &Ingress) -> Result<()> {
+        let uid = ingress.metadata.uid.as_deref().unwrap_or("");
         let spec = match ingress.spec.as_ref() {
             Some(s) => s,
             None => return Ok(()),
         };
-        let mut routes = self.state.routes.write().expect("lock poisoned");
-        routes.clear();
+        let mut routes_by_host = HashMap::new();
         if let Some(rules) = &spec.rules {
             for rule in rules {
                 let host = rule.host.as_deref().unwrap_or("*");
@@ -73,12 +72,22 @@ impl IngressController {
                         let service_name = path.backend.service.as_ref()
                             .map(|s| s.name.clone())
                             .unwrap_or_default();
-                        routes.insert(host.to_string(), (service_name.clone(), port));
+                        routes_by_host.insert(host.to_string(), (service_name.clone(), port));
                         info!("Ingress: {} -> {}:{}", host, service_name, port);
                     }
                 }
             }
         }
+        let mut routes = self.state.routes.write().expect("lock poisoned");
+        routes.insert(uid.to_string(), routes_by_host);
+        Ok(())
+    }
+
+    pub fn remove_ingress(&self, ingress: &Ingress) -> Result<()> {
+        let uid = ingress.metadata.uid.as_deref().unwrap_or("");
+        let mut routes = self.state.routes.write().expect("lock poisoned");
+        routes.remove(uid);
+        info!("Ingress: removed routes for UID {}", uid);
         Ok(())
     }
 }
@@ -88,8 +97,7 @@ async fn handle_connection(
     state: &IngressState,
     store: &ResourceStore,
 ) -> Result<()> {
-    // Read first 1KB to extract Host header (enough for most requests)
-    let mut buf = vec![0u8; 1024];
+    let mut buf = vec![0u8; 4096];
     let n = client.peek(&mut buf).await.context("peek")?;
     if n == 0 {
         return Ok(());
@@ -98,13 +106,20 @@ async fn handle_connection(
     let host = extract_host(&buf[..n]).unwrap_or("");
     let addr = {
         let routes = state.routes.read().expect("lock poisoned");
-        routes.get(host).cloned()
-            .or_else(|| routes.get("*").cloned())
+        // Search across all ingress resources for a matching host
+        let mut result = None;
+        for (_uid, host_map) in routes.iter() {
+            if let Some(entry) = host_map.get(host).or_else(|| host_map.get("*")) {
+                result = Some(entry.clone());
+                break;
+            }
+        }
+        result
     };
 
     let (backend_host, backend_port) = match addr {
         Some((ref svc, p)) => resolve_endpoint(store, svc, p).await,
-        None => return Ok(()), // no route
+        None => return Ok(()),
     };
 
     let mut backend = TcpStream::connect(format!("{}:{}", backend_host, backend_port))
@@ -120,7 +135,9 @@ fn extract_host(buf: &[u8]) -> Option<&str> {
     for line in s.lines() {
         if line.to_ascii_lowercase().starts_with("host:") {
             let val = line[5..].trim();
-            return Some(val.split(':').next().unwrap_or(val));
+            // Use rfind(':') to handle IPv6 addresses like [::1]:8080
+            let without_port = val.rfind(':').map(|i| &val[..i]).unwrap_or(val);
+            return Some(without_port);
         }
     }
     None

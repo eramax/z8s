@@ -20,6 +20,41 @@ pub use pool::Ipv4Cidr;
 use pool::IpPool;
 pub use nftables::NftEngine;
 
+/// Drop guard that restores the host network namespace when the current
+/// function scope exits, even on early returns or panics.
+struct NetNsGuard {
+    host_fd: Option<std::os::fd::OwnedFd>,
+}
+
+impl NetNsGuard {
+    fn new() -> Result<Self> {
+        let host_fd = unsafe {
+            nix::fcntl::open(
+                "/proc/1/ns/net",
+                nix::fcntl::OFlag::O_RDONLY | nix::fcntl::OFlag::O_CLOEXEC,
+                nix::sys::stat::Mode::empty(),
+            )
+        }.context("open host netns for guard")?;
+        Ok(Self { host_fd: Some(host_fd) })
+    }
+
+    #[allow(dead_code)]
+    fn disarm(&mut self) {
+        self.host_fd = None;
+    }
+}
+
+impl Drop for NetNsGuard {
+    fn drop(&mut self) {
+        if let Some(ref fd) = self.host_fd {
+            // SAFETY: setns with a valid fd from /proc/1/ns/net. Best-effort:
+            // if it fails the thread remains in the wrong netns, but the old
+            // ns is still open and we already logged the error.
+            let _ = unsafe { nix::sched::setns(fd, nix::sched::CloneFlags::CLONE_NEWNET) };
+        }
+    }
+}
+
 /// Unified network engine — one pool, veth management, host routing, nftables.
 pub struct NetMux {
     // CONCURRENCY: std::sync::Mutex used for brief synchronous access only.
@@ -134,7 +169,7 @@ impl NetMux {
     /// Move the peer veth into a pod's network namespace and configure it.
     /// Call this after the child has unshared CLONE_NEWNET.
     /// If `peer_ifindex` is 0, the peer was created directly in the pod's netns
-    /// with name "eth0" via IFLA_NET_NS_PID and we resolve its ifindex there.
+    /// via IFLA_NET_NS_PID and we resolve its ifindex there.
     pub fn configure_pod_netns(
         &self,
         pod_uid: &str,
@@ -151,7 +186,7 @@ impl NetMux {
         }
 
         // When peer was created via IFLA_NET_NS_PID, its ifindex is 0.
-        // Resolve it by looking up "eth0" inside the pod netns.
+        // Resolve it by looking up the zeth-* name inside the pod netns.
         let target_ifindex = if peer_ifindex == 0 {
             let fd = unsafe {
                 nix::fcntl::open(
@@ -162,7 +197,6 @@ impl NetMux {
             }.context("open pod netns")?;
             unsafe { nix::sched::setns(&fd, nix::sched::CloneFlags::CLONE_NEWNET)
                 .context("setns into pod netns")?; }
-            let peer_name = veth::veth_name_from_uid(pod_uid);
             let hex: Vec<char> = pod_uid.chars().filter(|c| c.is_ascii_hexdigit()).collect();
             let start = hex.len().saturating_sub(8);
             let in_pod_name = format!("zeth-{}", hex[start..].iter().collect::<String>());
@@ -182,7 +216,9 @@ impl NetMux {
             peer_ifindex
         };
 
-        // Enter pod netns to assign IP and configure networking
+        // Enter pod netns to assign IP and configure networking.
+        // NetNsGuard ensures we always return to the host netns on scope exit.
+        let _guard = NetNsGuard::new()?;
         let netns_fd = unsafe {
             nix::fcntl::open(
                 netns_path.as_str(),
@@ -208,20 +244,7 @@ impl NetMux {
         veth::add_default_route(target_ifindex, &self.gateway)
             .context("add_default_route in pod netns")?;
 
-        // Enter back to host netns
-        let host_netns_fd = unsafe {
-            nix::fcntl::open(
-                "/proc/1/ns/net",
-                nix::fcntl::OFlag::O_RDONLY | nix::fcntl::OFlag::O_CLOEXEC,
-                nix::sys::stat::Mode::empty(),
-            )
-        }.context("open host netns")?;
-
-        unsafe {
-            nix::sched::setns(&host_netns_fd, nix::sched::CloneFlags::CLONE_NEWNET)
-                .context("setns back to host netns")?;
-        }
-
+        // Guard will restore host netns on drop
         Ok(())
     }
 
@@ -253,6 +276,10 @@ impl NetMux {
     /// Add NodePort DNAT rule (matches on tcp dport, any dest IP).
     pub fn add_nodeport_dnat(&self, node_port: u16, backends: &[(Ipv4Addr, u16)]) -> Result<()> {
         self.nft.add_nodeport_dnat(node_port, backends)
+    }
+
+    pub fn remove_nodeport_dnat(&self, node_port: u16) -> Result<()> {
+        self.nft.remove_nodeport_dnat(node_port)
     }
 
     /// Add forward allow rule between two CIDRs.

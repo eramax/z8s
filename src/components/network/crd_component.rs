@@ -27,41 +27,8 @@ impl Component for CrdWatcher {
 
     async fn on_apply(&self, _ctx: &ReconcileContext, resource: &AnyResource) -> Result<()> {
         match resource {
-            AnyResource::VNet(vnet) => {
-                let cidr = vnet.spec.cidr.as_deref().unwrap_or("10.42.0.0/20");
-                let vc = crate::netmux::vnet_controller::VNetController::new(self.netmux.clone());
-                vc.apply_vnet(vnet, cidr)?;
-                if vnet.spec.internet_access {
-                    self.netmux.add_snat(vnet.metadata.name.as_deref().unwrap_or("vnet"), cidr)?;
-                }
-                info!("VNet '{}' applied (CIDR {})", vnet.metadata.name.as_deref().unwrap_or("?"), cidr);
-            }
-            AnyResource::Nsg(nsg) => {
-                let vc = crate::netmux::vnet_controller::VNetController::new(self.netmux.clone());
-                vc.apply_nsg(nsg)?;
-                info!("NSG '{}' applied", nsg.metadata.name.as_deref().unwrap_or("?"));
-            }
-            AnyResource::NetworkPolicy(np) => {
-                let npc = crate::netmux::np_controller::NetworkPolicyController::new(self.netmux.clone());
-                npc.apply_network_policy(np)?;
-                info!("NetworkPolicy '{}/{}' applied",
-                    np.metadata.namespace.as_deref().unwrap_or("default"),
-                    np.metadata.name.as_deref().unwrap_or("?"));
-            }
             AnyResource::Hub(_) => info!("Hub applied"),
             AnyResource::Spoke(_) => info!("Spoke applied"),
-            AnyResource::Subnet(_) => info!("Subnet applied"),
-            AnyResource::RouteTable(_) => info!("RouteTable applied"),
-            AnyResource::Ingress(ing) => {
-                let ctrl = crate::netmux::ingress::IngressController::new(
-                    self.store.clone(),
-                    self.netmux.ingress_state.clone(),
-                );
-                ctrl.apply_ingress(ing)?;
-                info!("Ingress '{}/{}' applied",
-                    ing.metadata.namespace.as_deref().unwrap_or("default"),
-                    ing.metadata.name.as_deref().unwrap_or("?"));
-            }
             _ => {}
         }
         Ok(())

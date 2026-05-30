@@ -143,7 +143,7 @@ fn check_nl_response(resp: &[u8], context: &str) -> Result<()> {
         if msg_type == NLMSG_ERROR && resp.len() >= 20 {
             let err_code = i32::from_ne_bytes([resp[16], resp[17], resp[18], resp[19]]);
             if err_code != 0 {
-                return Err(anyhow::anyhow!("{}: netlink error {} ({})", context, err_code, nix::errno::from_i32(err_code)));
+                return Err(anyhow::anyhow!("{}: netlink error {} ({})", context, err_code, nix::errno::Errno::from_raw(err_code as i32)));
             }
         }
     }

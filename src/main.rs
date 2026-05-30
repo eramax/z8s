@@ -14,6 +14,12 @@ use crate::components::{ComponentRegistry, PipelineBuilder, ReconcileContext};
 use crate::components::compute::deployment::DeploymentResource;
 use crate::components::compute::pod::PodResource;
 use crate::components::network::service::ServiceResource;
+use crate::components::network::ingress::IngressResource;
+use crate::components::network::networkpolicy::NetworkPolicyResource;
+use crate::components::network::vnet::VNetResource;
+use crate::components::network::subnet::SubnetResource;
+use crate::components::network::nsg::NsgResource;
+use crate::components::network::routetable::RouteTableResource;
 use crate::components::network::crd_component::CrdWatcher;
 use crate::components::storage::configmap::ConfigMapResource;
 use crate::components::storage::pv::PvResource;
@@ -174,12 +180,18 @@ async fn main() -> Result<()> {
     registry.register(Box::new(PodResource::new()));
     registry.register(Box::new(DeploymentResource::new(store.clone())));
     registry.register(Box::new(ServiceResource::new(store.clone(), network.clone())));
+    registry.register(Box::new(IngressResource::new(store.clone(), netmux.clone())));
+    registry.register(Box::new(NetworkPolicyResource::new(netmux.clone())));
+    registry.register(Box::new(VNetResource::new(netmux.clone())));
+    registry.register(Box::new(SubnetResource::new()));
+    registry.register(Box::new(NsgResource::new(netmux.clone())));
+    registry.register(Box::new(RouteTableResource::new()));
     registry.register(Box::new(ConfigMapResource::new(store.clone())));
     registry.register(Box::new(SecretResource::new(store.clone())));
     registry.register(Box::new(PvResource::new(store.clone())));
     registry.register(Box::new(PvcResource::new(store.clone())));
     // Network CRD watchers (VNet, NSG, NetworkPolicy, etc.)
-    for kind in &["VNet", "NSG", "Subnet", "Hub", "Spoke", "RouteTable", "NetworkPolicy", "Ingress"] {
+    for kind in &["Hub", "Spoke"] {
         registry.register(Box::new(CrdWatcher::new(netmux.clone(), store.clone(), kind)));
     }
     let registry = Arc::new(registry);

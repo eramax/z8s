@@ -54,7 +54,6 @@ impl VNetController {
     pub fn apply_vnet(&self, vnet: &VNet, cidr: &str) -> Result<()> {
             let vnet_name = vnet.metadata.name.as_deref().unwrap_or("unknown");
             if !vnet.spec.internet_access {
-                let gateway = format!("{}/32", self.netmux.gateway());
                 self.netmux.add_forward_deny(cidr, "0.0.0.0/0")?;
                 info!("VNet '{}': internet access denied (spoke)", vnet_name);
             } else {

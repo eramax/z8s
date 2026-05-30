@@ -72,7 +72,11 @@ impl ImageManager {
     /// Preserves permissions and symlinks; skips special files (devices/fifos)
     /// which require root to create and are not needed for container rootfs copies.
     fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
-        std::fs::create_dir_all(dst)?;
+        // If dst is a stale mount (e.g. /proc from a crashed container), skip it
+        if dst.exists() && !dst.is_dir() {
+            return Ok(());
+        }
+        let _ = std::fs::create_dir_all(dst);
         if let Ok(m) = std::fs::symlink_metadata(src) {
             std::fs::set_permissions(dst, m.permissions()).ok();
         }
@@ -95,7 +99,7 @@ impl ImageManager {
             } else if ft.is_dir() {
                 Self::copy_dir(&src_child, &dst_child)?;
             } else if ft.is_file() {
-                std::fs::copy(&src_child, &dst_child)?;
+                let _ = std::fs::copy(&src_child, &dst_child);
                 std::fs::set_permissions(&dst_child, meta.permissions()).ok();
             }
         }
@@ -232,7 +236,9 @@ impl ImageManager {
 
     fn copy_cache_to_container(cache_path: &str, container_rootfs: &str, meta_path: &str, image_ref: &str) -> Result<String> {
         if Path::new(container_rootfs).exists() {
-            std::fs::remove_dir_all(container_rootfs)?;
+            // Attempt to remove stale rootfs (may fail if live mounts from crashed containers).
+            // If removal fails we overwrite in-place via copy_dir.
+            let _ = std::fs::remove_dir_all(container_rootfs);
         }
         Self::copy_dir(Path::new(cache_path), Path::new(container_rootfs))?;
         Self::copy_oci_config(cache_path, container_rootfs);

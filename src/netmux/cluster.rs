@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use tracing::{info, warn, debug};
