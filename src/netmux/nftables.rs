@@ -61,11 +61,26 @@ impl NftEngine {
     pub fn init(&self, pod_cidr: &str) -> Result<()> {
         let _lock = self.writer.lock().expect("lock poisoned");
 
+        // Delete and recreate tables to flush stale rules from previous runs
+        for table_name in [NAT_TABLE, FILTER_TABLE] {
+            let table = Table::new(ProtocolFamily::Ipv4).with_name(table_name);
+            let mut del = Batch::new();
+            del.add(&table, rustables::MsgType::Del);
+            Self::send_batch(del)?;
+            let mut add = Batch::new();
+            add.add(&table, rustables::MsgType::Add);
+            Self::send_batch(add)?;
+        }
+
+        // Reset jump tracks since all chains are gone
+        self.jump_track.lock().expect("lock poisoned").clear();
+        self.nodeport_jump_track.lock().expect("lock poisoned").clear();
+
         // Create nat table with baseline chains
         {
             let nat_table = Table::new(ProtocolFamily::Ipv4).with_name(NAT_TABLE);
             let mut batch = Batch::new();
-            batch.add(&nat_table, rustables::MsgType::Add);
+            // Table already created above, now create baseline chains
 
             let prerouting = Chain::new(&nat_table)
                 .with_name("prerouting")
@@ -123,19 +138,6 @@ impl NftEngine {
                 .accept();
             batch.add(&ct_rule, rustables::MsgType::Add);
 
-            let pod_net: IpNetwork = pod_cidr.parse().context("Invalid pod CIDR in nftables init")?;
-            let inter_pod_rule = Rule::new(&forward)?
-                .snetwork(pod_net)?
-                .dnetwork(pod_net)?
-                .accept();
-            batch.add(&inter_pod_rule, rustables::MsgType::Add);
-
-            // Allow host-to-pod traffic (needed for NodePort DNAT from host)
-            let host_to_pod = Rule::new(&forward)?
-                .dnetwork(pod_net)?
-                .accept();
-            batch.add(&host_to_pod, rustables::MsgType::Add);
-
             Self::send_batch(batch)?;
         }
 
@@ -153,7 +155,47 @@ impl NftEngine {
             Self::send_batch(del)?;
             let mut add = Batch::new();
             add.add(&chain, rustables::MsgType::Add);
-            add.send()?;
+            Self::send_batch(add)?;
+        }
+
+        // Flush stale filter forward chain similarly
+        {
+            let filter_table = Table::new(ProtocolFamily::Ipv4).with_name(FILTER_TABLE);
+            let forward = Chain::new(&filter_table)
+                .with_name("forward")
+                .with_type(ChainType::Filter)
+                .with_hook(Hook::new(HookClass::Forward, HOOK_PRIO_FILTER))
+                .with_policy(ChainPolicy::Drop);
+            let mut del = Batch::new();
+            del.add(&forward, rustables::MsgType::Del);
+            Self::send_batch(del)?;
+            let mut add = Batch::new();
+            add.add(&forward, rustables::MsgType::Add);
+            Self::send_batch(add)?;
+        }
+
+        // Flush catch-all chain too
+        {
+            let filter_table = Table::new(ProtocolFamily::Ipv4).with_name(FILTER_TABLE);
+            let catch_all = Chain::new(&filter_table).with_name("catch-all");
+            let mut del = Batch::new();
+            del.add(&catch_all, rustables::MsgType::Del);
+            Self::send_batch(del)?;
+            let mut add = Batch::new();
+            add.add(&catch_all, rustables::MsgType::Add);
+            Self::send_batch(add)?;
+        }
+
+        // Re-add ct state rule after flush
+        {
+            let filter_table = Table::new(ProtocolFamily::Ipv4).with_name(FILTER_TABLE);
+            let forward = Chain::new(&filter_table).with_name("forward");
+            let mut batch = Batch::new();
+            let ct_rule = Rule::new(&forward)?
+                .established()?
+                .accept();
+            batch.add(&ct_rule, rustables::MsgType::Add);
+            Self::send_batch(batch)?;
         }
 
         info!("nftables: initialized tables and chains");
@@ -470,6 +512,43 @@ impl NftEngine {
 
         batch.send()?;
         debug!("nftables: forward allow @{} -> {}", set_name, dst_cidr);
+        Ok(())
+    }
+
+    /// Add catch-all chain for the forward hook with base allow rules.
+    /// These rules are evaluated AFTER all NSG rules (placed at end via sub-chain).
+    pub fn add_forward_catchall(&self, pod_cidr: &str) -> Result<()> {
+        let _lock = self.writer.lock().expect("lock poisoned");
+        let filter_table = Table::new(ProtocolFamily::Ipv4).with_name(FILTER_TABLE);
+        let forward = Chain::new(&filter_table).with_name("forward");
+        let pod_net: IpNetwork = pod_cidr.parse().context("Invalid pod CIDR")?;
+
+        // Create catch-all sub-chain
+        let mut batch = Batch::new();
+        let catch_all = Chain::new(&filter_table)
+            .with_name("catch-all")
+            .with_type(ChainType::Filter);
+        batch.add(&catch_all, rustables::MsgType::Add);
+
+        // Host → pod (required for NodePort DNAT from host)
+        let host_to_pod = Rule::new(&catch_all)?
+            .dnetwork(pod_net)?
+            .accept();
+        batch.add(&host_to_pod, rustables::MsgType::Add);
+
+        // Pod → any (allows hub internet access, blocked by NSG deny for spokes)
+        let pod_to_any = Rule::new(&catch_all)?
+            .snetwork(pod_net)?
+            .accept();
+        batch.add(&pod_to_any, rustables::MsgType::Add);
+
+        // Jump from forward to catch-all (always last rule in forward chain)
+        let mut jump = Rule::new(&forward).map_err(|e| anyhow::anyhow!("{:?}", e))?;
+        jump.add_expr(Immediate::new_verdict(VerdictKind::Jump { chain: "catch-all".to_string() }));
+        batch.add(&jump, rustables::MsgType::Add);
+
+        Self::send_batch(batch)?;
+        info!("nftables: added catch-all chain for {}", pod_cidr);
         Ok(())
     }
 }

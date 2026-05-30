@@ -23,9 +23,9 @@ impl Component for RouteTableResource {
 
     async fn on_apply(&self, _ctx: &ReconcileContext, resource: &AnyResource) -> Result<()> {
         if let AnyResource::RouteTable(rt) = resource {
-            info!("RouteTable '{}' applied with {} route(s)",
+            info!("RouteTable '{}' applied with {} rule(s)",
                 rt.metadata.name.as_deref().unwrap_or("?"),
-                rt.spec.routes.len());
+                rt.spec.rules.len());
         }
         Ok(())
     }

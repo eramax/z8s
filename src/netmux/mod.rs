@@ -253,6 +253,10 @@ impl NetMux {
         self.nft.init(pod_cidr)
     }
 
+    pub fn add_forward_catchall(&self, pod_cidr: &str) -> Result<()> {
+        self.nft.add_forward_catchall(pod_cidr)
+    }
+
     /// Add MASQUERADE rule for pod internet access (per-VNet).
     pub fn add_snat(&self, vnet_name: &str, vnet_cidr: &str) -> Result<()> {
         self.nft.add_snat(vnet_name, vnet_cidr)

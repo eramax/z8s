@@ -124,6 +124,9 @@ async fn main() -> Result<()> {
     if let Err(e) = netmux.init_nftables(&cfg.pod_cidr) {
         panic!("nftables init failed: {} — nftables is required, refusing to start", e);
     }
+    if let Err(e) = netmux.add_forward_catchall(&cfg.pod_cidr) {
+        warn!("Failed to add forward catch-all: {}", e);
+    }
     if let Err(e) = netmux.add_snat("default", &cfg.pod_cidr) {
         warn!("Failed to add SNAT: {} — pods may not reach internet", e);
     }

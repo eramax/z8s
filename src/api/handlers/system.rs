@@ -77,6 +77,12 @@ pub async fn api_groups() -> Json<APIGroupList> {
                 preferred_version: Some(gvd("storage.k8s.io/v1", "v1")),
                 server_address_by_client_cidrs: None,
             },
+            APIGroup {
+                name: "z8s.io".into(),
+                versions: vec![gvd("z8s.io/v1", "v1")],
+                preferred_version: Some(gvd("z8s.io/v1", "v1")),
+                server_address_by_client_cidrs: None,
+            },
         ],
     })
 }

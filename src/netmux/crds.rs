@@ -143,11 +143,28 @@ fn default_routetable_kind() -> String { "RouteTable".to_string() }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouteTableSpec {
     #[serde(default)]
-    pub routes: Vec<RouteEntry>,
+    pub rules: Vec<RouteRule>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RouteEntry {
-    pub destination: String,
-    pub next_hop: String,
+pub struct RouteRule {
+    pub name: String,
+    #[serde(default)]
+    pub methods: Vec<String>,
+    #[serde(default)]
+    pub paths: Vec<String>,
+    #[serde(default)]
+    pub headers: Vec<HeaderMatch>,
+    pub action: String,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HeaderMatch {
+    pub name: String,
+    #[serde(default)]
+    pub value: String,
+    #[serde(default = "default_header_operator")]
+    pub operator: String,
+}
+
+fn default_header_operator() -> String { "eq".to_string() }
