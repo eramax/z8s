@@ -1,4 +1,6 @@
 use crate::types::{ResourceStore, AnyResource};
+use std::collections::HashMap;
+use std::net::Ipv4Addr;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tracing::{debug, info, warn};
@@ -6,7 +8,14 @@ use tracing::{debug, info, warn};
 const TTL: u32 = 30;
 const MAX_UDP: usize = 4096;
 
-pub async fn run_dns(store: Arc<ResourceStore>) -> Option<u16> {
+/// Custom DNS records (hostname → IP) populated by ingress.
+pub type DnsRecords = Arc<std::sync::RwLock<HashMap<String, Ipv4Addr>>>;
+
+pub fn new_dns_records() -> DnsRecords {
+    Arc::new(std::sync::RwLock::new(HashMap::new()))
+}
+
+pub async fn run_dns(store: Arc<ResourceStore>, dns_records: DnsRecords) -> Option<u16> {
     let cfg = crate::config::get();
     let ports: Vec<u16> = if let Some(p) = cfg.dns_port {
         vec![p]
@@ -16,7 +25,7 @@ pub async fn run_dns(store: Arc<ResourceStore>) -> Option<u16> {
     for port in ports {
         if let Ok(sock) = UdpSocket::bind(format!("0.0.0.0:{}", port)).await {
             info!("DNS server listening on 0.0.0.0:{}", port);
-            tokio::spawn(dns_loop(sock, store));
+            tokio::spawn(dns_loop(sock, store, dns_records));
             return Some(port);
         }
     }
@@ -24,10 +33,9 @@ pub async fn run_dns(store: Arc<ResourceStore>) -> Option<u16> {
     None
 }
 
-async fn dns_loop(sock: UdpSocket, store: Arc<ResourceStore>) {
+async fn dns_loop(sock: UdpSocket, store: Arc<ResourceStore>, dns_records: DnsRecords) {
     let sock = Arc::new(sock);
     let mut buf = [0u8; MAX_UDP];
-    // Read upstream DNS config via spawn_blocking to avoid blocking the async runtime
     let upstream = tokio::task::spawn_blocking(read_upstream_dns).await.unwrap_or_default();
     loop {
         match sock.recv_from(&mut buf).await {
@@ -36,8 +44,9 @@ async fn dns_loop(sock: UdpSocket, store: Arc<ResourceStore>) {
                 let sock = sock.clone();
                 let store = store.clone();
                 let upstream = upstream.clone();
+                let dns_records = dns_records.clone();
                 tokio::spawn(async move {
-                    if let Some(resp) = handle_query(&query, &store, &upstream).await {
+                    if let Some(resp) = handle_query(&query, &store, &upstream, &dns_records).await {
                         sock.send_to(&resp, src).await.ok();
                     }
                 });
@@ -173,6 +182,7 @@ async fn handle_query(
     query: &[u8],
     store: &ResourceStore,
     upstream: &[String],
+    dns_records: &DnsRecords,
 ) -> Option<Vec<u8>> {
     if query.len() < 12 {
         return None;
@@ -204,6 +214,16 @@ async fn handle_query(
     // Only handle IN class (type A=1, AAAA=28, ANY=255)
     if qtype != 1 && qtype != 28 && qtype != 255 {
         return forward(query, upstream).await;
+    }
+
+    // Check custom DNS records (populated by ingress hosts)
+    {
+        let records = dns_records.read().unwrap_or_else(|e| { warn!("dns_records lock poisoned"); e.into_inner() });
+        if let Some(ip) = records.get(name.trim_end_matches('.')) {
+            let ip_bytes = [ip.octets()[0], ip.octets()[1], ip.octets()[2], ip.octets()[3]];
+            let answers = if qtype == 28 { vec![] } else { vec![a_record(&name, ip_bytes)] };
+            return Some(make_response(id, rd, question_bytes, &answers, 0));
+        }
     }
 
     // Try to resolve as a service name

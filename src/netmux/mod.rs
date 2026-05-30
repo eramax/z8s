@@ -55,9 +55,10 @@ pub struct NetMux {
     pool: Mutex<IpPool>,
     subnet_pools: Mutex<HashMap<String, IpPool>>,
     prefix: u8,
-    gateway: Ipv4Addr,
+    pub gateway: Ipv4Addr,
     pub nft: NftEngine,
     pub ingress_state: Arc<crate::netmux::ingress::IngressState>,
+    pub dns_records: crate::netmux::dns::DnsRecords,
 }
 
 impl NetMux {
@@ -67,6 +68,7 @@ impl NetMux {
         let gateway = Self::derive_gateway(&cidr)?;
         let nft = NftEngine::new();
         let ingress_state = Arc::new(crate::netmux::ingress::IngressState::new());
+        let dns_records = crate::netmux::dns::new_dns_records();
         Ok(Self {
             pool: Mutex::new(IpPool::new(cidr.clone())),
             subnet_pools: Mutex::new(HashMap::new()),
@@ -74,6 +76,7 @@ impl NetMux {
             gateway,
             nft,
             ingress_state,
+            dns_records,
         })
     }
 
