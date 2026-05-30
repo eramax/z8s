@@ -1,6 +1,7 @@
 pub mod configmap;
 pub mod ingress;
 pub mod networkpolicy;
+pub mod crd;
 pub mod vnet;
 pub mod subnet;
 pub mod nsg;

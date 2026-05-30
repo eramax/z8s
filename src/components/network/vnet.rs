@@ -30,7 +30,7 @@ impl Component for VNetResource {
             let cidr = vnet.spec.cidr.as_deref().unwrap_or("10.42.0.0/20");
             self.netmux.apply_vnet(vnet, cidr)?;
             if vnet.spec.internet_access {
-                self.netmux.add_snat(vnet.metadata.name.as_deref().unwrap_or("vnet"), cidr)?;
+                self.netmux.nft.add_snat(vnet.metadata.name.as_deref().unwrap_or("vnet"), cidr)?;
             }
             info!("VNet '{}' applied (CIDR {})", vnet.metadata.name.as_deref().unwrap_or("?"), cidr);
         }

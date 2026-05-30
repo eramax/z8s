@@ -269,96 +269,27 @@ impl NetMux {
         Ok(())
     }
 
-    /// Initialize nftables tables and chains.
-    pub fn init_nftables(&self, pod_cidr: &str) -> Result<()> {
-        self.nft.init(pod_cidr)
-    }
-
-    pub fn add_forward_catchall(&self, pod_cidr: &str) -> Result<()> {
-        self.nft.add_forward_catchall(pod_cidr)
-    }
-
-    pub fn reset_nsg_rules(&self) -> Result<()> {
-        self.nft.reset_nsg_rules()
-    }
-
     pub fn apply_vnet(&self, vnet: &crate::netmux::crds::VNet, cidr: &str) -> Result<()> {
         let vnet_name = vnet.metadata.name.as_deref().unwrap_or("unknown");
         if !vnet.spec.internet_access {
-            self.add_forward_deny(cidr, "0.0.0.0/0")?;
-            info!("VNet '{}': internet access denied (spoke)", vnet_name);
-        } else {
-            info!("VNet '{}': internet access allowed (hub), CIDR {}", vnet_name, cidr);
+            self.nft.add_forward_deny(cidr, "0.0.0.0/0")?;
         }
+        info!("VNet '{}': internet_access={}, CIDR {}", vnet_name, vnet.spec.internet_access, cidr);
         Ok(())
     }
 
     pub fn apply_nsg(&self, nsg: &crate::netmux::crds::Nsg) -> Result<()> {
-        self.reset_nsg_rules()?;
-        let mut sorted_rules = nsg.spec.rules.clone();
-        sorted_rules.sort_by_key(|r| r.priority);
-        for rule in &sorted_rules {
+        self.nft.reset_nsg_rules()?;
+        let mut sorted = nsg.spec.rules.clone();
+        sorted.sort_by_key(|r| r.priority);
+        for rule in &sorted {
             match rule.action.as_str() {
-                "deny" => {
-                    for src in &rule.src_cidrs {
-                        for dst in &rule.dst_cidrs {
-                            self.add_forward_deny(src, dst)?;
-                        }
-                    }
-                }
-                "allow" => {
-                    for src in &rule.src_cidrs {
-                        for dst in &rule.dst_cidrs {
-                            self.add_forward_allow(src, dst)?;
-                        }
-                    }
-                }
-                other => tracing::warn!("NSG rule '{}' has unknown action '{}', skipping", rule.name, other),
+                "deny" => for src in &rule.src_cidrs { for dst in &rule.dst_cidrs { self.nft.add_forward_deny(src, dst)?; } }
+                "allow" => for src in &rule.src_cidrs { for dst in &rule.dst_cidrs { self.nft.add_forward_allow(src, dst)?; } }
+                other => tracing::warn!("NSG rule '{}' unknown action '{}'", rule.name, other),
             }
-            info!("NSG '{}': applied rule '{}' {} -> {} ({})",
-                nsg.metadata.name.as_deref().unwrap_or("?"), rule.name,
-                rule.src_cidrs.join(","), rule.dst_cidrs.join(","), rule.action);
         }
         Ok(())
-    }
-
-    /// Add MASQUERADE rule for pod internet access (per-VNet).
-    pub fn add_snat(&self, vnet_name: &str, vnet_cidr: &str) -> Result<()> {
-        self.nft.add_snat(vnet_name, vnet_cidr)
-    }
-
-    /// Add DNAT rule for ClusterIP.
-    pub fn add_dnat(&self, cluster_ip: Ipv4Addr, port: u16, backends: &[(Ipv4Addr, u16)]) -> Result<()> {
-        self.nft.add_dnat(cluster_ip, port, backends)
-    }
-
-    /// Remove DNAT chain for a ClusterIP.
-    pub fn remove_dnat(&self, cluster_ip: Ipv4Addr, port: u16) -> Result<()> {
-        self.nft.remove_dnat(cluster_ip, port)
-    }
-
-    /// Add NodePort DNAT rule (matches on tcp dport, any dest IP).
-    pub fn add_nodeport_dnat(&self, node_port: u16, backends: &[(Ipv4Addr, u16)]) -> Result<()> {
-        self.nft.add_nodeport_dnat(node_port, backends)
-    }
-
-    pub fn remove_nodeport_dnat(&self, node_port: u16) -> Result<()> {
-        self.nft.remove_nodeport_dnat(node_port)
-    }
-
-    /// Add forward allow rule between two CIDRs.
-    pub fn add_forward_allow(&self, src_cidr: &str, dst_cidr: &str) -> Result<()> {
-        self.nft.add_forward_allow(src_cidr, dst_cidr)
-    }
-
-    /// Add forward allow rule matching src IP from a named set.
-    pub fn add_forward_allow_set_src(&self, set_name: &str, dst_cidr: &str) -> Result<()> {
-        self.nft.add_forward_allow_set_src(set_name, dst_cidr)
-    }
-
-    /// Add forward deny rule between two CIDRs.
-    pub fn add_forward_deny(&self, src_cidr: &str, dst_cidr: &str) -> Result<()> {
-        self.nft.add_forward_deny(src_cidr, dst_cidr)
     }
 
     /// Clean up orphaned veths at startup.
@@ -366,15 +297,8 @@ impl NetMux {
         veth::clean_orphan_veths(active_uids)
     }
 
-    /// Enable ip_forward on the host.
-    pub fn enable_ip_forward() -> Result<()> {
-        netlink::enable_ip_forward()
-    }
-
-    /// Ensure loopback is up.
-    pub fn ensure_loopback_up() -> Result<()> {
-        netlink::ensure_loopback_up()
-    }
+    pub fn enable_ip_forward() -> Result<()> { netlink::enable_ip_forward() }
+    pub fn ensure_loopback_up() -> Result<()> { netlink::ensure_loopback_up() }
 
     /// Rollback partially-created veth resources on failure.
     fn rollback_veth(&self, pod_uid: &str, pod_ip: &Ipv4Addr, host_ifindex: u32) {

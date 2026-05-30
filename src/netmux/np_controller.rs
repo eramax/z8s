@@ -54,7 +54,7 @@ impl NetworkPolicyController {
                     if let Some(ps) = &peer.pod_selector {
                         self.create_policy_set(&set_name, ps)?;
                         // Fix Bug #4: use 0.0.0.0/0 as destination (match all dest IPs)
-                        self.netmux.add_forward_allow_set_src(&set_name, "0.0.0.0/0")?;
+                        self.netmux.nft.add_forward_allow_set_src(&set_name, "0.0.0.0/0")?;
 
                         let mut sets = self.sets.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() });
                         sets.entry(set_name).or_insert_with(|| PolicySet {
@@ -69,7 +69,7 @@ impl NetworkPolicyController {
                         // For now, create a set with a placeholder name
                         let ns_set_name = format!("np:ns:{}:{}:{}", ns, name, idx);
                         self.netmux.nft.create_set(&ns_set_name, &[])?;
-                        self.netmux.add_forward_allow_set_src(&ns_set_name, "0.0.0.0/0")?;
+                        self.netmux.nft.add_forward_allow_set_src(&ns_set_name, "0.0.0.0/0")?;
 
                         let mut sets = self.sets.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() });
                         sets.entry(ns_set_name).or_insert_with(|| PolicySet {
@@ -81,9 +81,9 @@ impl NetworkPolicyController {
 
                     if let Some(ip_block) = &peer.ip_block {
                         // ipBlock: allow/deny by CIDR
-                        self.netmux.add_forward_allow(&ip_block.cidr, "0.0.0.0/0")?;
+                        self.netmux.nft.add_forward_allow(&ip_block.cidr, "0.0.0.0/0")?;
                         for except in ip_block.except.as_deref().unwrap_or(&[]) {
-                            self.netmux.add_forward_deny(except, "0.0.0.0/0")?;
+                            self.netmux.nft.add_forward_deny(except, "0.0.0.0/0")?;
                         }
                     }
                 }
