@@ -718,7 +718,9 @@ fn mount_rootfs_components(
         let src = Path::new("/dev").join(name);
         let dst = dev.join(name);
         if nix::unistd::access(&src, nix::unistd::AccessFlags::R_OK).is_ok() {
-            std::fs::create_dir_all(dst.parent().unwrap()).ok();
+            if let Some(parent) = dst.parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
             let _ = mount(
                 Some(&src),
                 &dst,

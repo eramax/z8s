@@ -17,7 +17,11 @@ impl VNetController {
     }
 
     /// Apply an NSG: compile its rules to nftables forward chain rules.
+    /// Resets the nsg-rules sub-chain before adding rules to prevent accumulation.
     pub fn apply_nsg(&self, nsg: &Nsg) -> Result<()> {
+        // Reset the nsg-rules chain to flush stale rules from previous applies
+        self.netmux.reset_nsg_rules()?;
+
         let mut sorted_rules = nsg.spec.rules.clone();
         sorted_rules.sort_by_key(|r| r.priority);
 

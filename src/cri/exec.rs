@@ -1,4 +1,5 @@
 use crate::cri::rootfs;
+use anyhow::Context;
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use axum::extract::{Path, State, WebSocketUpgrade};
 use axum::http::request::Parts;
@@ -543,8 +544,13 @@ async fn exec_ws_tty(socket: WebSocket, cmd: &str, args: &[&str], rootfs_pid: Op
 
     info!("Exec WS TTY: child PID {:?}", child.id());
 
-    let async_master =
-        tokio::io::unix::AsyncFd::new(master).expect("AsyncFd for PTY master");
+    let async_master = match tokio::io::unix::AsyncFd::new(master) {
+            Ok(fd) => fd,
+            Err(e) => {
+                tracing::warn!("AsyncFd for PTY master: {}", e);
+                return;
+            }
+        };
     let mut read_buf = vec![0u8; 4096];
 
     loop {
@@ -573,7 +579,10 @@ async fn exec_ws_tty(socket: WebSocket, cmd: &str, args: &[&str], rootfs_pid: Op
                     Some(Ok(Message::Binary(data))) if !data.is_empty() => {
                         match data[0] {
                             0 if data.len() > 1 => {
-                                let mut guard = async_master.writable().await.unwrap();
+                                let mut guard = match async_master.writable().await {
+                                    Ok(g) => g,
+                                    Err(_) => break,
+                                };
                                 let _ = guard.try_io(|inner| {
                                     nix::unistd::write(inner, &data[1..])
                                         .map(|_| 0usize)

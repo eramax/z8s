@@ -226,7 +226,7 @@ impl ProcessSupervisor {
             .kill_on_drop(true);
 
         let child = child_cmd.spawn().context("Failed to spawn container process")?;
-        let pid = child.id().expect("No PID for spawned process");
+        let pid = child.id().ok_or_else(|| anyhow::anyhow!("Child process exited before PID was read"))?;
         info!("Container {} started with PID {}", container_id, pid);
 
         self.cgroup_manager.add_pid_to_cgroup(pod_uid, pid)?;
@@ -677,21 +677,26 @@ impl ProcessSupervisor {
     ) -> ! {
         let envp: Vec<std::ffi::CString> = env_owned
             .iter()
-            .map(|(k, v)| std::ffi::CString::new(format!("{}={}", k, v)).unwrap())
+            .map(|(k, v)| std::ffi::CString::new(format!("{}={}", k, v))
+                .expect("env keys/values cannot contain null bytes"))
             .collect();
 
         let mut argv: Vec<std::ffi::CString> =
-            vec![std::ffi::CString::new(exec_path).unwrap()];
+            vec![std::ffi::CString::new(exec_path)
+                .expect("exec path cannot contain null bytes")];
         for a in prog_args {
-            argv.push(std::ffi::CString::new(a.as_str()).unwrap());
+            argv.push(std::ffi::CString::new(a.as_str())
+                .expect("arg strings cannot contain null bytes"));
         }
 
         if isolation == rootfs::RootfsIsolation::Degraded {
             let (loader, args) =
                 rootfs::wrap_dynamic_linker(exec_path, prog_args.to_vec(), rootfs_host_path);
-            argv = vec![std::ffi::CString::new(loader).unwrap()];
+            argv = vec![std::ffi::CString::new(loader)
+                .expect("loader path cannot contain null bytes")];
             for a in args {
-                argv.push(std::ffi::CString::new(a).unwrap());
+                argv.push(std::ffi::CString::new(a)
+                    .expect("arg strings cannot contain null bytes"));
             }
         }
 
@@ -946,7 +951,7 @@ impl ProcessSupervisor {
         published_ports: &[u16],
         probes: &[ProbeConfig],
     ) -> Result<RunningContainer> {
-        let pid = child.id().expect("No PID for spawned process");
+        let pid = child.id().ok_or_else(|| anyhow::anyhow!("Child process exited before PID was read"))?;
 
         let log_buffer = Arc::new(Mutex::new(Vec::<String>::new()));
 

@@ -47,14 +47,27 @@ impl NftEngine {
             Err(e) => {
                 if let QueryError::NetlinkError(ref err) = e {
                     let code = err.error.abs();
-                    if code == 2 || code == 17 || code == 25 || code == 16 {
+                    if code == 2 {
+                        return Ok(()); // ENOENT — expected on delete of non-existent chains
+                    }
+                    if code == 16 || code == 17 || code == 25 {
+                        tracing::warn!("send_batch: non-fatal kernel error {} ({}), continuing", code, Self::describe_nl_error(code));
                         return Ok(());
                     }
-                    tracing::warn!("send_batch: kernel error code={}", code);
-                    anyhow::bail!("nftables kernel error {}: {:?}", code, err);
+                    anyhow::bail!("nftables kernel error {} ({})", code, Self::describe_nl_error(code));
                 }
                 anyhow::bail!("send_batch: {:?}", e)
             }
+        }
+    }
+
+    fn describe_nl_error(code: i32) -> &'static str {
+        match code {
+            1 => "EPERM", 2 => "ENOENT", 3 => "ESRCH", 4 => "EINTR", 5 => "EIO",
+            6 => "ENXIO", 11 => "EAGAIN", 12 => "ENOMEM", 13 => "EACCES", 16 => "EBUSY",
+            17 => "EEXIST", 22 => "EINVAL", 25 => "ENOTTY", 26 => "ETXTBSY",
+            95 => "EOPNOTSUPP", 105 => "ENOBUFS", 114 => "EALREADY",
+            _ => "UNKNOWN",
         }
     }
 
@@ -141,60 +154,18 @@ impl NftEngine {
             Self::send_batch(batch)?;
         }
 
-        // Flush stale rules by deleting and recreating the nat chains
-        // (delete with send_batch to handle EBUSY from active conntrack gracefully)
-        for (hook_name, hook_class) in [("prerouting", HookClass::PreRouting), ("output", HookClass::Out), ("postrouting", HookClass::PostRouting)] {
-            let nat_table = Table::new(ProtocolFamily::Ipv4).with_name(NAT_TABLE);
-            let chain = Chain::new(&nat_table)
-                .with_name(hook_name)
-                .with_type(ChainType::Nat)
-                .with_hook(Hook::new(hook_class, HOOK_PRIO_NAT))
-                .with_policy(ChainPolicy::Accept);
-            let mut del = Batch::new();
-            del.add(&chain, rustables::MsgType::Del);
-            Self::send_batch(del)?;
-            let mut add = Batch::new();
-            add.add(&chain, rustables::MsgType::Add);
-            Self::send_batch(add)?;
-        }
-
-        // Flush stale filter forward chain similarly
+        // Create nsg-rules chain (replaced atomically by apply_nsg)
         {
             let filter_table = Table::new(ProtocolFamily::Ipv4).with_name(FILTER_TABLE);
-            let forward = Chain::new(&filter_table)
-                .with_name("forward")
-                .with_type(ChainType::Filter)
-                .with_hook(Hook::new(HookClass::Forward, HOOK_PRIO_FILTER))
-                .with_policy(ChainPolicy::Drop);
-            let mut del = Batch::new();
-            del.add(&forward, rustables::MsgType::Del);
-            Self::send_batch(del)?;
-            let mut add = Batch::new();
-            add.add(&forward, rustables::MsgType::Add);
-            Self::send_batch(add)?;
-        }
-
-        // Flush catch-all chain too
-        {
-            let filter_table = Table::new(ProtocolFamily::Ipv4).with_name(FILTER_TABLE);
-            let catch_all = Chain::new(&filter_table).with_name("catch-all");
-            let mut del = Batch::new();
-            del.add(&catch_all, rustables::MsgType::Del);
-            Self::send_batch(del)?;
-            let mut add = Batch::new();
-            add.add(&catch_all, rustables::MsgType::Add);
-            Self::send_batch(add)?;
-        }
-
-        // Re-add ct state rule after flush
-        {
-            let filter_table = Table::new(ProtocolFamily::Ipv4).with_name(FILTER_TABLE);
-            let forward = Chain::new(&filter_table).with_name("forward");
             let mut batch = Batch::new();
-            let ct_rule = Rule::new(&forward)?
-                .established()?
-                .accept();
-            batch.add(&ct_rule, rustables::MsgType::Add);
+            let nsg_chain = Chain::new(&filter_table).with_name("nsg-rules");
+            batch.add(&nsg_chain, rustables::MsgType::Add);
+
+            // Add jump to nsg-rules in forward chain (between ct state and catch-all)
+            let forward = Chain::new(&filter_table).with_name("forward");
+            let mut jump = Rule::new(&forward).map_err(|e| anyhow::anyhow!("{:?}", e))?;
+            jump.add_expr(Immediate::new_verdict(VerdictKind::Jump { chain: "nsg-rules".to_string() }));
+            batch.add(&jump, rustables::MsgType::Add);
             Self::send_batch(batch)?;
         }
 
@@ -409,19 +380,19 @@ impl NftEngine {
         let mut batch = Batch::new();
 
         let filter_table = Table::new(ProtocolFamily::Ipv4).with_name(FILTER_TABLE);
-        let forward = Chain::new(&filter_table).with_name("forward");
+        let nsg_chain = Chain::new(&filter_table).with_name("nsg-rules");
 
         let src_net: IpNetwork = src_cidr.parse().context("Invalid src CIDR")?;
         let dst_net: IpNetwork = dst_cidr.parse().context("Invalid dst CIDR")?;
 
-        let rule = Rule::new(&forward)?
+        let rule = Rule::new(&nsg_chain)?
             .snetwork(src_net)?
             .dnetwork(dst_net)?
             .accept();
         batch.add(&rule, rustables::MsgType::Add);
 
-        batch.send()?;
-        debug!("nftables: forward allow {} -> {}", src_cidr, dst_cidr);
+        Self::send_batch(batch)?;
+        debug!("nftables: nsg allow {} -> {}", src_cidr, dst_cidr);
         Ok(())
     }
 
@@ -430,19 +401,35 @@ impl NftEngine {
         let mut batch = Batch::new();
 
         let filter_table = Table::new(ProtocolFamily::Ipv4).with_name(FILTER_TABLE);
-        let forward = Chain::new(&filter_table).with_name("forward");
+        let nsg_chain = Chain::new(&filter_table).with_name("nsg-rules");
 
         let src_net: IpNetwork = src_cidr.parse().context("Invalid src CIDR")?;
         let dst_net: IpNetwork = dst_cidr.parse().context("Invalid dst CIDR")?;
 
-        let rule = Rule::new(&forward)?
+        let rule = Rule::new(&nsg_chain)?
             .snetwork(src_net)?
             .dnetwork(dst_net)?
             .drop();
         batch.add(&rule, rustables::MsgType::Add);
 
-        batch.send()?;
-        debug!("nftables: forward deny {} -> {}", src_cidr, dst_cidr);
+        Self::send_batch(batch)?;
+        debug!("nftables: nsg deny {} -> {}", src_cidr, dst_cidr);
+        Ok(())
+    }
+
+    /// Delete and recreate the nsg-rules chain to flush all old rules.
+    /// Call before adding new NSG rules to prevent accumulation.
+    pub fn reset_nsg_rules(&self) -> Result<()> {
+        let _lock = self.writer.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() });
+        let filter_table = Table::new(ProtocolFamily::Ipv4).with_name(FILTER_TABLE);
+        let nsg_chain = Chain::new(&filter_table).with_name("nsg-rules");
+        let mut del = Batch::new();
+        del.add(&nsg_chain, rustables::MsgType::Del);
+        Self::send_batch(del)?;
+        let mut add = Batch::new();
+        add.add(&nsg_chain, rustables::MsgType::Add);
+        Self::send_batch(add)?;
+        debug!("nftables: reset nsg-rules chain");
         Ok(())
     }
 
@@ -495,7 +482,7 @@ impl NftEngine {
         let mut batch = Batch::new();
 
         let filter_table = Table::new(ProtocolFamily::Ipv4).with_name(FILTER_TABLE);
-        let forward = Chain::new(&filter_table).with_name("forward");
+        let nsg_chain = Chain::new(&filter_table).with_name("nsg-rules");
 
         let mut set_for_lookup = rustables::Set::default();
         set_for_lookup.family = ProtocolFamily::Ipv4;
@@ -503,7 +490,7 @@ impl NftEngine {
             .with_table(FILTER_TABLE.to_string())
             .with_name(set_name);
 
-        let mut rule = Rule::new(&forward)?;
+        let mut rule = Rule::new(&nsg_chain)?;
         rule.add_expr(rustables::expr::Lookup::new(&set_for_lookup)
             .map_err(|e| anyhow::anyhow!("Lookup error: {}", e))?);
         let dst_net: IpNetwork = dst_cidr.parse().context("Invalid dst CIDR")?;
@@ -530,7 +517,9 @@ impl NftEngine {
             .with_type(ChainType::Filter);
         batch.add(&catch_all, rustables::MsgType::Add);
 
-        // Host → pod (required for NodePort DNAT from host)
+        // Accept host→pod traffic (required for NodePort DNAT from host).
+        // This is evaluated AFTER nsg-rules, so NSG deny takes precedence.
+        // Pod→pod traffic in per-subnet CIDRs is NOT matched by this rule.
         let host_to_pod = Rule::new(&catch_all)?
             .dnetwork(pod_net)?
             .accept();
