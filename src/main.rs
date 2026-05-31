@@ -249,6 +249,13 @@ async fn main() -> Result<()> {
             tokio::spawn(async move {
                 crate::store::ws::run_gossip_client(n, url, st).await;
             });
+
+            // Anti-entropy per peer
+            let ae_state = state.clone();
+            let ae_name = name.clone();
+            tokio::spawn(async move {
+                crate::store::anti_entropy::run_anti_entropy(ae_name, ae_state).await;
+            });
         }
 
         Some(state)

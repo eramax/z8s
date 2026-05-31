@@ -1,3 +1,4 @@
+pub mod anti_entropy;
 mod backend;
 pub mod db;
 pub mod gossip;
