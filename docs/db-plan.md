@@ -232,27 +232,26 @@ Every scheduler write includes `scheduler_epoch`. Gossip receive path rejects wr
 
 ```
 Active scheduler watches for unscheduled Pods:
-  → Query redb: key prefix "pods/" where assigned_node is None
+  → Query redb: prefix scan "resources/Pod/" where assigned_node == None
   → For each unscheduled Pod:
 
      ① Get node list from "nodes/" table (skip nodes with state != "ready")
      ② For each node, count assigned pods:
-        query prefix "pods/" with assigned_node == node_name
+        prefix scan "resources/Pod/" with assigned_node == node_name
      ③ Pick node with fewest pods (round-robin for equal loads)
-     ④ Write to redb: pods/{ns}/{name}
+     ④ Write to redb: resources/Pod/{ns}/{name}
         → set assigned_node: "node-b"
-        → version: ++
-        → updated_by: scheduler_node
+        → set scheduler_epoch: current_lease.epoch
      ⑤ Gossip propagates to all nodes
-     ⑥ Node B sees assigned_node = self → reads pods/{ns}/{name}
+     ⑥ Node B sees assigned_node = self → reads resources/Pod/{ns}/{name}
      ⑦ Node B creates container via CRI, attaches veth via NetMux
-     ⑧ Node B writes to redb: pod_status/{ns}/{name}
-        → phase: Running, container_id: ..., pod_ip: ...
-        → version: ++
-     ⑨ Node B writes heartbeat: nodes/node-b → pod_count++
+     ⑧ Node B writes to redb: resources/Pod/{ns}/{name}
+        → status.phase: "Running"
+        → status.pod_ip: "10.42.1.5"
+        → scheduler_epoch unchanged (epoch check passes)
 ```
 
-**Separation:** Scheduler writes `pods/`. Worker writes `pod_status/`. No conflict because different tables.
+**No separate tables.** Everything is on the Pod resource itself. Scheduler writes assignment, worker writes status. Epoch checks prevent stale writers.
 
 ### Node Health & Load Tracking
 
@@ -293,64 +292,63 @@ Node B heartbeat stops (last_seen not updated >30s)
 
 ## DB Key Design for Multi-Node
 
-Keys are designed so each record has **exactly one writer class** — no two actors ever write the same key:
+Keys are designed so each record has **exactly one writer class**:
 
-| Table | Key format | Written by | Conflict risk |
-|---|---|---|---|
-| `apps/pods` | `{ns}/{name}` | Scheduler only (assigns + spec) | None |
-| `runtime/pod_status` | `{ns}/{name}` | Worker that runs the pod | None (each pod runs on one node) |
-| `apps/services` | `{ns}/{name}` | Scheduler only | None |
-| `runtime/service_backends` | `{ns}/{name}` | Scheduler only | None |
-| `cluster/nodes` | `{node_name}` | **Only that node** (heartbeat) | Zero |
-| `cluster/leases` | `scheduler` | Active scheduler only | Low (race prevented by backoff) |
-| `network/routes` | `{peer_node}` | Route controller on each node | Low (same data from all nodes) |
-| `audit/events` | `{kind}/{name}/{uid}` | Any actor (append-only) | Zero (UIDs unique) |
-| `meta/seq` | `{node_id}` | **Only that node** | Zero |
+| Table | Key format | Value | Written by | Owner class |
+|---|---|---|---|---|
+| `resources` | `{kind}/{ns}/{name}` | bincode(StoredResource) | API (create), scheduler (assign), worker (status) | Varies by field |
+| `nodes` | `{node_name}` | bincode(NodeRecord) | **Only that node** | Node |
+| `leases` | `scheduler` | bincode(LeaseRecord) | **Active scheduler only** | Scheduler |
+| `routes` | `{peer_node}` | bincode(RouteRecord) | Route controller (derived) | Controller |
+| `events` | `{kind}/{uid}` | bincode(EventRecord) | Any actor (append-only) | Append-only |
+| `meta` | schema_version | `u64` | System startup | System |
 
-### Why this split
+### Why a single `resources` table
 
-The key design principle: **don't let every node write the same object type**.
+Instead of separate `pods/`, `services/`, `configmaps/` tables, everything lives in one `resources` table keyed by `{kind}/{ns}/{name}`:
 
-- **`apps/pods`** contains the desired state (image, command, labels, `assigned_to`). Only the scheduler writes this. Workers never touch it. No conflict possible.
-- **`runtime/pod_status`** contains live state (phase, container_id, ready, restarts). Only the worker that runs the pod writes this. The scheduler reads it to make decisions, but never writes it.
-- **`cluster/nodes`** each node only ever writes its own key. Heartbeat + load metrics. Zero conflict.
-- **`cluster/leases`** only the active scheduler writes. Race prevented by randomized backoff.
-
-This separation matters because it prevents workers from fighting the scheduler over the same record, and prevents two schedulers from accidentally updating the same pod assignment.
-
-### Record Layout Examples
-
-```yaml
-apps/pods/default/my-pod:
-  spec:
-    image: nginx
-    command: [...]
-    labels: { app: web }
-    assigned_to: node-b
-  meta:
-    owner_kind: scheduler
-    version: { node_id: "node-a", seq: 42 }
-
-runtime/pod_status/default/my-pod:
-  node: node-b
-  phase: Running
-  container_id: abc123
-  pod_ip: 10.42.1.5
-  ready: true
-  restarts: 0
-  last_heartbeat: 2026-05-31T12:00:00Z
-
-cluster/nodes/node-b:
-  ip: 10.0.0.2
-  cidr: 10.42.1.0/24
-  state: ready
-  pod_count: 3
-  last_seen: 2026-05-31T12:00:00Z
+```
+resources/Pod/default/my-nginx
+resources/Service/default/my-svc
+resources/ConfigMap/default/my-config
+resources/Secret/default/my-secret
+...
 ```
 
-### Versioning Strategy
+This preserves the existing `get_by_kind("Pod")` pattern via prefix scan (`"Pod/"`). The `StoredResource` enum wraps all types — same as the current `AnyResource` but with our own type definitions instead of k8s-openapi.
 
-Each write carries a version `(node_id, seq)`. Comparison: higher `seq` wins; tiebreaker = higher `node_id`. This is a Lamport-style clock — per-key, not global. Simpler than HLC, sufficient for last-writer-wins.
+### Write ownership by field group
+
+Within a single `resources` entry, different fields have different writers:
+
+| Field | Written by | Enforced by |
+|---|---|---|
+| `.metadata`, `.spec.*` | API server (create/update) | API creates the entry |
+| `.assigned_node`, `.scheduler_epoch` | **Scheduler only** | Epoch check on write |
+| `.status.phase`, `.status.pod_ip` | **Worker only** (if assigned) | Assigned node match + epoch check |
+| `.status.container_statuses` | **Worker only** | Same |
+
+This is enforced in the gossip receive path: a write to `resources/Pod/default/my-nginx` from a non-scheduler that modifies `assigned_node` is rejected. A write to `.status` from a node that isn't `assigned_node` is rejected. The epoch check prevents stale writers from overwriting.
+
+### Example record
+
+```yaml
+resources/Pod/default/my-nginx:
+  metadata: { name: my-nginx, namespace: default, ... }
+  spec:
+    containers:
+      - name: nginx
+        image: nginx:latest
+        ports: [{ container_port: 80 }]
+  status:
+    phase: Running
+    pod_ip: 10.42.1.5
+    container_statuses:
+      - name: nginx
+        ready: true
+  assigned_node: node-b
+  scheduler_epoch: 3
+```
 
 ## Multi-Node Test Scenarios
 
@@ -456,7 +454,156 @@ z8s --port 8443 --data-dir /tmp/z8s-c \
 | Anti-entropy | Not needed (raft log) | Needed (30s checksum) |
 | Code to write | RaftStorage + RaftNetwork + snapshot | WS broadcast + checksum diff |
 
-## Redb Tables — Canonical Schema
+## Redb Tables — Canonical Schema (Our Own Types, No k8s-openapi)
+
+We define our own minimal types in `src/store/types.rs`. Only the ~90 fields we actually use. No `k8s-openapi` dependency. Each type has scheduler fields natively (no separate `pod_status` table needed).
+
+### Type Strategy
+
+Replace the `k8s-openapi` crate with hand-written structs in `src/store/types.rs`:
+
+```rust
+// src/store/types.rs — our own types, no k8s-openapi
+
+pub struct ObjectMeta {
+    pub name: String,
+    pub namespace: String,
+    pub uid: Option<String>,
+    pub creation_timestamp: Option<String>,  // RFC3339
+    pub resource_version: Option<String>,
+    pub labels: Option<BTreeMap<String, String>>,
+    pub annotations: Option<BTreeMap<String, String>>,
+    pub owner_references: Option<Vec<OwnerReference>>,
+}
+
+pub struct Pod {
+    pub metadata: ObjectMeta,
+    pub spec: PodSpec,
+    pub status: PodStatus,
+    pub assigned_node: Option<String>,      // set by scheduler
+    pub scheduler_epoch: u64,                // lease epoch when assigned
+}
+
+pub struct PodSpec {
+    pub containers: Vec<Container>,
+    pub init_containers: Vec<Container>,
+    pub volumes: Vec<Volume>,
+    pub restart_policy: Option<String>,
+    pub node_selector: Option<BTreeMap<String, String>>,
+}
+
+pub struct PodStatus {
+    pub phase: String,                      // "Pending" | "Running" | "Succeeded" | "Failed"
+    pub host_ip: Option<String>,
+    pub pod_ip: Option<String>,
+    pub start_time: Option<String>,
+    pub conditions: Vec<PodCondition>,
+    pub container_statuses: Vec<ContainerStatus>,
+}
+
+pub struct Service {
+    pub metadata: ObjectMeta,
+    pub spec: ServiceSpec,
+}
+
+pub struct ServiceSpec {
+    pub selector: Option<BTreeMap<String, String>>,
+    pub ports: Vec<ServicePort>,
+    pub cluster_ip: Option<String>,
+    pub type_: Option<String>,
+    pub external_name: Option<String>,
+}
+```
+
+...and so on for Deployment, ConfigMap, Secret, PersistentVolume, PersistentVolumeClaim, Ingress, NetworkPolicy, and all the container/probe/volume sub-types.
+
+**Total: ~600 lines of struct definitions** replaces the entire `k8s-openapi` crate.
+
+### Table Layout (redb)
+
+All data goes into a single `resources` table as serialized blobs:
+
+| Table | Key | Value | Writer | Owner class |
+|---|---|---|---|---|
+| `resources` | `{kind}/{ns}/{name}` | `bincode(StoredResource)` | API server (create), scheduler (assign), worker (status) | Varies |
+| `nodes` | `{node_name}` | `bincode(NodeRecord)` | **Only that node** | Node |
+| `leases` | `leases/scheduler` | `bincode(LeaseRecord)` | **Active scheduler only** | Scheduler |
+| `routes` | `{peer_node}` | `bincode(RouteRecord)` | Route controller (derived) | Controller |
+| `events` | `{kind}/{uid}` | `bincode(EventRecord)` | Any actor (append-only) | Append-only |
+| `meta` | schema_version, cluster_id, local_node_id | `u64` / string | System | System |
+
+`pods/` and `services/` are not separate tables — they go into the `resources` table alongside ConfigMaps, Secrets, PVs, PVCs, Deployments, etc. The scheduler assignment fields (`assigned_node`, `scheduler_epoch`) live on the Pod struct itself.
+
+`StoredResource` is a wrapper enum:
+
+```rust
+#[derive(Serialize, Deserialize)]
+pub enum StoredResource {
+    Pod(Pod),
+    Deployment(Deployment),
+    Service(Service),
+    ConfigMap(ConfigMap),
+    Secret(Secret),
+    PersistentVolume(PersistentVolume),
+    PersistentVolumeClaim(PersistentVolumeClaim),
+    Ingress(Ingress),
+    NetworkPolicy(NetworkPolicy),
+    // Custom CRDs
+    VNet(crate::netmux::crds::VNet),
+    Subnet(crate::netmux::crds::Subnet),
+    Nsg(crate::netmux::crds::Nsg),
+    RouteTable(crate::netmux::crds::RouteTable),
+}
+```
+
+This replaces the current `AnyResource` enum. The scheduler reads `Pod` from the `resources` table, sets `assigned_node`, and writes it back. The worker reads the same `Pod`, sees `assigned_node == self`, and executes. Status is written directly on `Pod.status.phase` and `Pod.status.pod_ip`.
+
+## Store Module (`src/store/`)
+
+All DB, gossip, and sync code lives under `src/store/`:
+
+```
+src/store/
+├── mod.rs          # StoreBackend trait, re-exports
+├── types.rs        # Our own Pod, Service, ObjectMeta, etc. (replaces k8s-openapi)
+├── db.rs           # redb wrapper (tables, read/write, transactions)
+├── gossip.rs       # Gossip protocol (broadcast, dedup, ordering)
+├── ws.rs           # WebSocket server + client
+├── anti_entropy.rs # Periodic checksum + diff sync
+├── events.rs       # Event table with retention
+└── scheduler.rs    # Lease acquisition, scheduling logic
+```
+
+### StoreBackend Trait
+
+To allow incremental migration, a `StoreBackend` trait abstracts over both the in-memory and redb stores:
+
+```rust
+#[async_trait]
+pub trait StoreBackend: Send + Sync {
+    async fn apply(&self, resource: StoredResource);
+    async fn delete(&self, kind: &str, ns: &str, name: &str);
+    async fn get(&self, kind: &str, ns: &str, name: &str) -> Option<StoredResource>;
+    async fn list(&self, kind: &str) -> Vec<StoredResource>;
+    async fn list_by_prefix(&self, prefix: &str) -> Vec<StoredResource>;
+}
+```
+
+Start with `MemoryBackend` (refactored from current `ResourceStore`), then add `RedbBackend`. API handlers work against the trait — they don't care which backend is active.
+
+### StoredResource Enum — replaces AnyResource
+
+```rust
+// src/store/types.rs
+#[derive(Serialize, Deserialize)]
+pub enum StoredResource {
+    Pod(Pod),
+    Deployment(Deployment),
+    // ... all other types ...
+}
+```
+
+`resources` table key format: `"{kind}/{ns}/{name}"` (e.g., `"Pod/default/my-nginx"`)
 
 ### Table Definitions
 
@@ -496,51 +643,12 @@ struct LeaseRecord {
     version: u64,
 }
 
-// ── Apps (scheduler writes) ──────────────────────────────
-struct PodRecord {
-    namespace: String,
-    name: String,
-    uid: String,
-    spec: PodSpec,
-    assigned_node: Option<String>,
-    phase: String,                    // "Pending" | "Running" | ... 
-    scheduler_epoch: u64,             // lease epoch when this was assigned
-    version: u64,
-    updated_by: String,
-}
-
-struct ServiceRecord {
-    namespace: String,
-    name: String,
-    uid: String,
-    selector: BTreeMap<String, String>,
-    ports: Vec<ServicePort>,
-    cluster_ip: Option<String>,
-    version: u64,
-}
-
-struct BackendSetRecord {
-    namespace: String,
-    name: String,
-    service_uid: String,
-    backends: Vec<BackendRef>,
-    version: u64,
-}
-
-// ── Runtime (worker writes) ──────────────────────────────
-struct PodStatusRecord {
-    namespace: String,
-    name: String,
-    node: String,
-    phase: String,
-    container_id: Option<String>,
-    pod_ip: Option<String>,
-    ready: bool,
-    restarts: u32,
-    last_heartbeat_ms: u64,
-    owner_epoch: u64,                 // must match PodRecord.scheduler_epoch
-    version: u64,
-}
+// ── Resources (our own types, not k8s-openapi) ──────────
+// Pod has assigned_node + scheduler_epoch natively.
+// Service has cluster_ip, selector, ports natively.
+// No separate pod_status/backend_set tables needed.
+// See the "Redb Tables — Canonical Schema" section above
+// for the full type definitions.
 
 // ── Network (derived — always rebuildable) ───────────────
 struct RouteRecord {
@@ -633,13 +741,16 @@ z8s join ws://10.0.0.1:9876
 
 ## Phases
 
-| Phase | What | Files |
+| Phase | What | Key Files |
 |---|---|---|
-| **1** | redb local: 6 tables, replace ResourceStore | `Cargo.toml`, `src/store/db.rs`, `src/types.rs` |
-| **2** | WS gossip: broadcast + receive + dedup | `src/store/gossip.rs`, `src/store/ws.rs` |
-| **3** | Anti-entropy: periodic checksum + diff | `src/store/anti_entropy.rs` |
-| **4** | Scheduler lease + scheduling logic | `src/scheduler/mod.rs` |
-| **5** | `z8s join` CLI + worker auth (token) | `src/cli/join.rs`, `Cargo.toml` |
-| **6** | Stats + events tables (with retention) | `src/store/events.rs`, `src/store/stats.rs` |
-| **7** | Integration tests for gossip + sync | `tests/gossip/` (new) |
-| **8** | Remove old in-memory store, enrichment | Cleanup (only after tests pass) |
+| **1a** | Define own types in `src/store/types.rs` (~600 lines). Drop `k8s-openapi` dep. | `Cargo.toml`, `src/store/mod.rs`, `src/store/types.rs` |
+| **1b** | `StoreBackend` trait + `MemoryBackend` (refactor from current `ResourceStore`). API handlers unchanged. | `src/store/backend.rs`, `src/types.rs`, `src/api/server.rs` |
+| **1c** | `RedbBackend` implementation + `resources` table. Switch at startup via config. | `Cargo.toml` (+redb, +bincode), `src/store/db.rs` |
+| **2** | `nodes` table + `leases` table + heartbeat + scheduler lease acquisition | `src/store/nodes.rs`, `src/store/leases.rs`, `src/store/scheduler.rs` |
+| **3** | WebSocket gossip: broadcast writes to peers, receive + apply + dedup | `src/store/ws.rs`, `src/store/gossip.rs` |
+| **4** | Anti-entropy: periodic xxHash3 checksum + diff exchange | `Cargo.toml` (+xxhash-rust), `src/store/anti_entropy.rs` |
+| **5** | Scheduler: watch unscheduled pods, pick node, write assignment. Deschedule on node death. | `src/store/scheduler.rs` (extend) |
+| **6** | Worker: watch `assigned_to == self`, execute pod via CRI + NetMux, write status | Worker controller (new) |
+| **7** | Events table + retention. Route controller (derived from nodes). | `src/store/events.rs`, route controller |
+| **8** | `z8s join` CLI, worker auth (token). Integration tests (3 nodes on same machine). | `src/cli/join.rs`, `tests/gossip/` |
+| **9** | Remove old `ResourceStore` in-memory, old `ProcessTracker` status, old `AnyResource`. Cleanup. | Cleanup sweep (only after tests pass) |
