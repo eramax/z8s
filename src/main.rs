@@ -273,8 +273,8 @@ async fn main() -> Result<()> {
     let rec = reconciler.clone();
     tokio::spawn(async move { rec.run().await });
 
-    // Gossip state (shared between WS server and clients)
-    let gossip_state = if cfg!(feature = "gossip") || !cfg.peers.is_empty() {
+    // Gossip state (always initialize for incoming connections)
+    let gossip_state = {
         let state = Arc::new(tokio::sync::Mutex::new(
             crate::store::gossip::GossipState::new(cfg.node_name.clone(), store.clone())
         ));
@@ -297,8 +297,6 @@ async fn main() -> Result<()> {
         }
 
         Some(state)
-    } else {
-        None
     };
 
     // API server

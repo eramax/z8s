@@ -123,9 +123,16 @@ pub async fn gossip_ws_handler(
     ws: axum::extract::ws::WebSocketUpgrade,
     State(state): State<AppState>,
 ) -> impl axum::response::IntoResponse {
-    ws.on_upgrade(move |socket| {
-        crate::store::ws::handle_gossip_ws(socket, state.gossip_state.unwrap())
-    })
+    match state.gossip_state {
+        Some(ref gs) => {
+            let gs = gs.clone();
+            ws.on_upgrade(move |socket| {
+                crate::store::ws::handle_gossip_ws(socket, gs)
+            })
+            .into_response()
+        }
+        None => (axum::http::StatusCode::SERVICE_UNAVAILABLE, "gossip not configured").into_response(),
+    }
 }
 
 pub async fn run_server(
