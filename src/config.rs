@@ -30,6 +30,7 @@ pub struct Config {
     pub node_name: String,
     pub node_ip: String,
     pub peers: Vec<(String, String)>,
+    pub join_token: Option<String>,
 }
 
 impl Config {
@@ -77,6 +78,7 @@ impl Config {
             node_name: hostname(),
             node_ip: auto_detect_node_ip().unwrap_or_else(|| "127.0.0.1".to_string()),
             peers: Vec::new(),
+            join_token: None,
         }
     }
 
@@ -171,6 +173,12 @@ impl Config {
                         }
                     }
                 }
+                "--join-token" => {
+                    i += 1;
+                    if let Some(v) = args.get(i) {
+                        cfg.join_token = Some(v.to_string());
+                    }
+                }
                 "--vnet-cidr-size" => {
                     i += 1;
                     if let Some(v) = args.get(i) {
@@ -250,6 +258,7 @@ z8s — minimal Kubernetes-compatible container orchestrator
 
 USAGE:
     z8s [OPTIONS]
+    z8s join <ws-url> [--token <token>]   (join a cluster as a worker)
 
 OPTIONS:
     --port <PORT>             API server listen port        [default: 6443]
@@ -260,15 +269,28 @@ OPTIONS:
     --dns-port <PORT>         Force DNS listen port         [default: auto: try 53, then 5353]
     --manifests-dir <PATH>    Manifests directory to watch  [default: /etc/z8s/manifests]
     --data-dir <PATH>         Override data directory       [default: /var/lib/z8s or ~/.local/share/z8s]
+    --peers <NAME=IP,...>     Other server nodes for gossip  [default: none]
+    --join-token <TOKEN>      Token for worker node auth    [default: none]
     --help                    Show this help
 
 EXAMPLES:
-    # Default — listens on :6443, ClusterIPs in 10.96.0.0/16
+    # Single node — listens on :6443
     z8s
 
-    # Custom port and CIDR
-    z8s --port 8443 --service-cidr 10.96.0.0/12 --pod-cidr 10.42.0.0/16
+    # Custom port
+    z8s --port 7443
 
-    # Watch a custom manifests directory
-    z8s --manifests-dir /home/user/k8s-manifests
+    # Multi-node cluster: first server
+    z8s --port 6443 --peers node-b=10.0.0.2:6443
+
+    # Multi-node cluster: second server
+    z8s --port 6443 --peers node-a=10.0.0.1:6443
+
+    # Run two servers on the same machine (different ports)
+    z8s --port 7443 --peers node-b=127.0.0.1:8443 &
+    z8s --port 8443 --peers node-a=127.0.0.1:7443
+
+    # Join as a worker
+    z8s join ws://10.0.0.1:6443/ws/db --token mytoken
 ";
+

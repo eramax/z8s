@@ -131,7 +131,8 @@ pub async fn run_server(
     let app = build_router(state);
     let addr = format!("0.0.0.0:{}", z8s_port());
     info!("Starting k8s API server on {}", addr);
-    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(&addr).await
+        .unwrap_or_else(|e| panic!("Failed to bind to {} — port in use? ({})", addr, e));
     axum::serve(listener, app).await.unwrap();
 }
 

@@ -2,8 +2,17 @@
 # z8s daemon control script
 set -uo pipefail
 
-PIDFILE="/tmp/z8s.pid"
-LOGFILE="/tmp/z8s.log"
+# Use --port to isolate PID/LOG files per instance
+PORT="6443"
+args=("$@")
+for ((i=0; i<${#args[@]}; i++)); do
+    if [[ "${args[$i]}" == "--port" ]] && [[ $((i+1)) -lt ${#args[@]} ]]; then
+        PORT="${args[$((i+1))]}"
+    fi
+done
+
+PIDFILE="/tmp/z8s-${PORT}.pid"
+LOGFILE="/tmp/z8s-${PORT}.log"
 BINARY="/home/abb/dev/z8s/target/debug/z8s"
 WORKDIR="/home/abb/dev/z8s"
 
