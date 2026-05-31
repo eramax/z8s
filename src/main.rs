@@ -56,6 +56,21 @@ async fn main() -> Result<()> {
         .init();
 
     let cfg = crate::config::get();
+
+    // ── Join mode ──────────────────────────────────────────────────
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(|s| s.as_str()) == Some("join") {
+        let url = args.get(2).expect("Usage: z8s join <ws-url> [--token <token>]");
+        let token = if args.len() > 3 && args[3] == "--token" {
+            args.get(4).map(|s| s.to_string())
+        } else {
+            cfg.join_token.clone()
+        };
+        info!("Joining cluster at {} as worker", url);
+        join_cluster(url, token).await;
+        return Ok(());
+    }
+
     info!(
         "z8s v{} starting — port={}, service-cidr={}.{}.{}.{}/{}, domain={}, manifests={}",
         env!("CARGO_PKG_VERSION"),
@@ -365,4 +380,45 @@ async fn main() -> Result<()> {
 
     info!("z8s shutdown complete.");
     Ok(())
+}
+
+/// Connect to a cluster as a worker via WebSocket.
+async fn join_cluster(url: &str, _token: Option<String>) {
+    use std::time::Duration;
+    use tokio::time::sleep;
+    use tracing::warn;
+
+    loop {
+        match tokio_tungstenite::connect_async(url).await {
+            Ok((ws_stream, _)) => {
+                info!("Connected to cluster at {}", url);
+                let (mut _write, mut read) = ws_stream.split();
+
+                // Listen for messages until disconnect
+                use futures_util::StreamExt;
+                loop {
+                    match read.next().await {
+                        Some(Ok(msg)) => {
+                            if msg.is_close() {
+                                info!("Server closed connection");
+                                break;
+                            }
+                            // Worker would process incoming messages here
+                        }
+                        Some(Err(e)) => {
+                            warn!("WebSocket error: {}", e);
+                            break;
+                        }
+                        None => break,
+                        _ => {}
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("Failed to connect to {}: {}. Retrying in 5s...", url, e);
+                sleep(Duration::from_secs(5)).await;
+            }
+        }
+        sleep(Duration::from_secs(5)).await;
+    }
 }

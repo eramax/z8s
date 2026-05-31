@@ -36,13 +36,10 @@ pub fn z8s_port() -> u16 {
     crate::config::get().api_port
 }
 
-type EventStore = Arc<Mutex<Vec<Event>>>;
-
 #[derive(Clone)]
 pub struct AppState {
     pub store: Arc<dyn StoreBackend>,
     pub process_tracker: Arc<ProcessTracker>,
-    pub events: EventStore,
     pub registry: Arc<ComponentRegistry>,
     pub ctx: Arc<ReconcileContext>,
     pub gossip_state: Option<Arc<tokio::sync::Mutex<crate::store::gossip::GossipState>>>,
@@ -91,12 +88,7 @@ pub async fn build_app_state(
         info!("Creating default namespace");
         store.apply(AnyResource::Namespace(ns)).await.ok();
     }
-    let events: EventStore = Arc::new(Mutex::new(Vec::new()));
-    {
-        let mut ev = events.lock().await;
-        ev.push(make_event("z8s-started", "default", "Node", "z8s-node", "Started", "z8s daemon started", "Normal"));
-    }
-    AppState { store, process_tracker, events, registry, ctx, gossip_state }
+    AppState { store, process_tracker, registry, ctx, gossip_state }
 }
 
 pub fn build_router(state: AppState) -> Router {
@@ -174,36 +166,6 @@ pub fn make_namespace(name: &str, uid: &str) -> Namespace {
         },
         spec: None,
         status: Some(NamespaceStatus { phase: Some("Active".into()), ..Default::default() }),
-    }
-}
-
-pub fn make_event(
-    name: &str,
-    namespace: &str,
-    obj_kind: &str,
-    obj_name: &str,
-    reason: &str,
-    message: &str,
-    event_type: &str,
-) -> Event {
-    let time = now_time();
-    Event {
-        metadata: ObjectMeta {
-            name: Some(name.into()), namespace: Some(namespace.into()),
-            creation_timestamp: Some(time.clone()), ..Default::default()
-        },
-        involved_object: ObjectReference {
-            kind: Some(obj_kind.into()), name: Some(obj_name.into()),
-            namespace: Some(namespace.into()), ..Default::default()
-        },
-        reason: Some(reason.into()),
-        message: Some(message.into()),
-        type_: Some(event_type.into()),
-        count: Some(1),
-        first_timestamp: Some(time.clone()),
-        last_timestamp: Some(time),
-        source: Some(EventSource { component: Some("z8s".into()), ..Default::default() }),
-        ..Default::default()
     }
 }
 
