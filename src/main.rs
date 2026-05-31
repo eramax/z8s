@@ -309,6 +309,18 @@ async fn main() -> Result<()> {
         Some(state)
     };
 
+    // Register this node as a Node resource (after gossip state is initialized)
+    {
+        let mut node = crate::api::handlers::node::make_local_node();
+        if node.metadata.creation_timestamp.is_none() {
+            node.metadata.creation_timestamp = Some(crate::types::Time::now());
+        }
+        store.apply(AnyResource::Node(node.clone())).await.ok();
+        if let Some(ref gs) = gossip_state {
+            gs.lock().await.broadcast_write(&AnyResource::Node(node)).await;
+        }
+    }
+
     // API server
     let store_clone = store.clone();
     let _s2 = supervisor.clone();

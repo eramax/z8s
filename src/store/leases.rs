@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::time::sleep;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::types::{LeaseRecord, NodeRecord, NodeState};
 use crate::store::RedbBackend;
@@ -13,6 +13,7 @@ const LEASE_RENEW_BEFORE_MS: i64 = 10_000;
 
 /// Run a node's heartbeat loop. Writes a NodeRecord every 5s.
 pub async fn run_heartbeat(db: Arc<RedbBackend>, node_name: String, node_ip: String) {
+    info!("Heartbeat started for {} ({})", node_name, node_ip);
     loop {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
@@ -27,6 +28,7 @@ pub async fn run_heartbeat(db: Arc<RedbBackend>, node_name: String, node_ip: Str
         if let Err(e) = db.write_node(&record).await {
             warn!("Failed to write heartbeat for {}: {}", node_name, e);
         }
+        debug!("Heartbeat written for {} at {}", node_name, now);
         sleep(HEARTBEAT_INTERVAL).await;
     }
 }

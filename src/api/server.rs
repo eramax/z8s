@@ -293,7 +293,7 @@ pub fn build_table(items: &[serde_json::Value], cols: &[(&str, &str, &str)]) -> 
 }
 
 /// Convert a RFC3339 timestamp to a human-readable relative age (e.g. "5m", "2h", "7d").
-fn format_ts_relative(ts: &str, now: std::time::SystemTime) -> String {
+pub fn format_ts_relative(ts: &str, now: std::time::SystemTime) -> String {
     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts) {
         let delta = now.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()
             .saturating_sub(dt.timestamp() as u64);
