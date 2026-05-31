@@ -45,6 +45,8 @@ wait_crd_ready() {
 
 # ── Create namespace ──────────────────────────────────────────────────
 echo "Creating namespace $NS..."
+"$KUBECTL" --server="$SERVER" delete namespace "$NS" --ignore-not-found 2>&1
+sleep 1
 "$KUBECTL" --server="$SERVER" create namespace "$NS" 2>&1 || { echo "Failed to create namespace $NS"; exit 1; }
 sleep 1
 
@@ -185,6 +187,10 @@ spec:
         args: ["-text=Spoke1", "-listen=:8080"]
         ports:
         - containerPort: 8080
+        resources:
+          limits:
+            memory: "64Mi"
+            cpu: "50m"
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -212,6 +218,10 @@ spec:
         args: ["-text=Spoke2", "-listen=:8080"]
         ports:
         - containerPort: 8080
+        resources:
+          limits:
+            memory: "64Mi"
+            cpu: "50m"
 YAML
 
 # ── 6. Spoke services ─────────────────────────────────────────────────
@@ -299,6 +309,10 @@ spec:
                 self.end_headers()
                 self.wfile.write(f"error: {e}".encode())
           http.server.HTTPServer(("0.0.0.0", 8080), H).serve_forever()
+        resources:
+          limits:
+            memory: "128Mi"
+            cpu: "100m"
         env:
         - name: SPOKE1
           value: "${CIP_S1}"
