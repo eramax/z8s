@@ -92,7 +92,7 @@ impl StoreBackend for RedbBackend {
             Ok(result)
         })
         .await
-        .unwrap_or_else(|e| Ok(vec![]))
+        .unwrap_or_else(|_| Ok(vec![]))
         .unwrap_or_default()
     }
 
@@ -184,7 +184,7 @@ mod tests {
             Ok(result)
         })
         .await
-        .unwrap_or_else(|e| Ok(vec![]))
+        .unwrap_or_else(|_| Ok(vec![]))
         .unwrap_or_default()
     }
 

@@ -64,14 +64,18 @@ impl ProcessTracker {
     }
 
     pub async fn pod_restart_counts(&self, pod_name: &str) -> HashMap<String, u32> {
-        let prefix = format!("{}-", pod_name);
         self.restart_counts.lock().await.iter()
-            .filter(|(k, _)| k.starts_with(&prefix))
-            .map(|(k, &v)| {
-                let cname = k.strip_prefix(&prefix).unwrap_or(k.as_str()).to_string();
-                (cname, v)
-            })
+            .filter(|(k, _)| k.starts_with(&format!("{}-", pod_name)))
+            .map(|(k, v)| (k.trim_start_matches(&format!("{}-", pod_name)).to_string(), *v))
             .collect()
+    }
+
+    pub async fn restart_count(&self, pod_name: &str) -> u32 {
+        let counts = self.restart_counts.lock().await;
+        counts.iter()
+            .filter(|(k, _)| k.starts_with(&format!("{}-", pod_name)))
+            .map(|(_, v)| *v)
+            .sum()
     }
 
     /// Get all pod IPs (name → IP) for enrichment.

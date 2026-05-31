@@ -44,11 +44,11 @@ pub async fn handle_gossip_ws(mut ws: WebSocket, state: Arc<tokio::sync::Mutex<G
 
 async fn handle_message(msg: GossipMessage, ws: &mut WebSocket, state: &Arc<tokio::sync::Mutex<GossipState>>) {
     match msg {
-        GossipMessage::Gossip { key, value, term, source } => {
+        GossipMessage::Gossip { key, value, term, source: _ } => {
             let mut st = state.lock().await;
             if st.dedup(&key, term) {
                 st.apply(&key, &value, term).await;
-                debug!("Gossip: applied {} from {}", key, source);
+                debug!("Gossip: applied {}", key);
             }
         }
         GossipMessage::SyncRequest { request_id } => {
@@ -67,7 +67,7 @@ async fn handle_message(msg: GossipMessage, ws: &mut WebSocket, state: &Arc<toki
             }
             info!("Sent sync_full ({} entries)", count);
         }
-                                            GossipMessage::SyncFull { ref entries, .. } => {
+        GossipMessage::SyncFull { ref entries, .. } => {
             let mut st = state.lock().await;
             for entry in entries.iter() {
                 st.apply(&entry.key, &entry.value, entry.term);
@@ -106,7 +106,7 @@ pub async fn run_gossip_client(
                                     if let Ok(gmsg) = serde_json::from_str::<GossipMessage>(&text) {
                                         let mut st = state.lock().await;
                                         match gmsg {
-                                            GossipMessage::Gossip { key, value, term, source } => {
+                                            GossipMessage::Gossip { key, value, term, source: _ } => {
                                                 if st.dedup(&key, term) {
                                                     st.apply(&key, &value, term).await;
                                                 }
@@ -163,3 +163,4 @@ pub async fn run_gossip_client(
         sleep(Duration::from_secs(5)).await;
     }
 }
+

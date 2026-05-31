@@ -95,19 +95,26 @@ async fn main() -> Result<()> {
         );
     }
 
-    let store: Arc<dyn StoreBackend> = if let Some(ref data_dir) = cfg.data_dir {
+    let store: Arc<dyn StoreBackend>;
+    let redb: Option<Arc<crate::store::RedbBackend>>;
+
+    if let Some(ref data_dir) = cfg.data_dir {
         match crate::store::RedbBackend::open(data_dir) {
             Ok(db) => {
                 info!("Using redb database at {}", data_dir);
-                Arc::new(db)
+                let db = Arc::new(db);
+                store = db.clone() as Arc<dyn StoreBackend>;
+                redb = Some(db);
             }
             Err(e) => {
                 warn!("Failed to open redb at {}: {}. Falling back to in-memory.", data_dir, e);
-                Arc::new(MemoryBackend::new())
+                store = Arc::new(MemoryBackend::new());
+                redb = None;
             }
         }
     } else {
-        Arc::new(MemoryBackend::new())
+        store = Arc::new(MemoryBackend::new());
+        redb = None;
     };
 
     let cgroup_manager = Arc::new(CgroupManager::new().unwrap_or_else(|e| {
@@ -272,6 +279,32 @@ async fn main() -> Result<()> {
     let gs = gossip_state.clone();
     tokio::spawn(async move {
         api::server::run_server(store_clone, pt2, reg2, ctx2, gs).await;
+    });
+
+    // Heartbeat + scheduler
+    if let Some(ref db) = redb {
+        let hb_db = db.clone();
+        let hb_name = cfg.node_name.clone();
+        let hb_ip = cfg.node_ip.clone();
+        tokio::spawn(async move {
+            crate::store::leases::run_heartbeat(hb_db, hb_name, hb_ip).await;
+        });
+
+        let sched_store = store.clone();
+        let sched_name = cfg.node_name.clone();
+        let sched_db = db.clone();
+        tokio::spawn(async move {
+            crate::scheduler::scheduler::run_scheduler(sched_store, sched_name, sched_db).await;
+        });
+    }
+
+    // Worker: watch assigned pods on every node
+    let worker_store = store.clone();
+    let worker_name = cfg.node_name.clone();
+    let worker_ctx = ctx.clone();
+    let worker_pt = process_tracker.clone();
+    tokio::spawn(async move {
+        crate::scheduler::worker::run_worker(worker_store, worker_name, worker_ctx, worker_pt).await;
     });
 
     // L7 ingress HTTP listener
