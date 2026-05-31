@@ -48,10 +48,7 @@ impl ProcessTracker {
     }
 
     pub async fn is_ready(&self, pod_name: &str) -> bool {
-        if !self.is_running(pod_name).await { return false; }
-        let prefix = format!("{}-", pod_name);
-        let running = self.running.lock().await;
-        running.iter().any(|(cid, rc)| cid.starts_with(&prefix) && rc.ready.load(Ordering::SeqCst))
+        self.is_running(pod_name).await
     }
 
     pub async fn get_logs(&self, pod_name: &str, container_name: &str) -> Vec<String> {

@@ -57,7 +57,7 @@ async fn handle_message(msg: GossipMessage, ws: &mut WebSocket, state: &Arc<toki
             let entries: Vec<SyncEntry> = resources.into_iter().map(|t| {
                 let key = t.resource.uid();
                 let term = st.seen.get(&key).copied().unwrap_or(0);
-                let value = bincode::serialize(&t.resource).unwrap_or_default();
+                let value = serde_json::to_vec(&t.resource).unwrap_or_default();
                 SyncEntry { key, value, term }
             }).collect();
             let count = entries.len();
@@ -122,7 +122,7 @@ pub async fn run_gossip_client(
                                                 let entries: Vec<SyncEntry> = resources.into_iter().map(|t| {
                                                     let key = t.resource.uid();
                                                     let term = st.seen.get(&key).copied().unwrap_or(0);
-                                                    let value = bincode::serialize(&t.resource).unwrap_or_default();
+                                                    let value = serde_json::to_vec(&t.resource).unwrap_or_default();
                                                     SyncEntry { key, value, term }
                                                 }).collect();
                                                 let response = GossipMessage::SyncFull { request_id, entries };

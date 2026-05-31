@@ -29,7 +29,6 @@ async-trait = "0.1"
 rustables = "0.8"
 ipnetwork = "0.21"
 redb = "2"
-bincode = "1"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

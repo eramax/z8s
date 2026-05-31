@@ -30,7 +30,10 @@ impl Component for PodResource {
     }
 
     async fn reconcile(&self, ctx: &ReconcileContext, tracker: &ResourceTracker) -> Result<()> {
-        if tracker.state == ResourceState::Pending {
+        let pod_name = tracker.resource.name().to_string();
+        let already_running = ctx.process_tracker.is_running(&pod_name).await;
+
+        if !already_running && tracker.state == ResourceState::Pending {
             let permit = pod_start_semaphore().acquire().await;
             let ctx = ctx.clone();
             let resource = tracker.resource.clone();
@@ -41,19 +44,13 @@ impl Component for PodResource {
                 }
             });
         }
-        if tracker.state == ResourceState::Running && ctx.process_tracker.is_ready(tracker.resource.name()).await {
-            if let AnyResource::Pod(pod) = &tracker.resource {
-                let labels = pod.metadata.labels.clone().unwrap_or_default();
-                let ns = pod.metadata.namespace.as_deref().unwrap_or("default");
-                if let Err(e) = ctx.net.sync_services_for_labels(ns, &labels).await {
-                    tracing::warn!("sync_services_for_labels failed: {}", e);
-                }
-                if let Some(ip) = ctx.process_tracker.pod_ip(tracker.resource.name()).await {
-                    let npc = crate::netmux::np_controller::NetworkPolicyController::new(ctx.netmux.clone());
-                    if let Err(e) = npc.update_pod(ip, &labels, ns).await {
-                        tracing::warn!("NetworkPolicy update_pod failed: {}", e);
-                    }
-                }
+
+        // Sync services for pod labels regardless of state
+        if let AnyResource::Pod(pod) = &tracker.resource {
+            let labels = pod.metadata.labels.clone().unwrap_or_default();
+            let ns = pod.metadata.namespace.as_deref().unwrap_or("default");
+            if let Err(e) = ctx.net.sync_services_for_labels(ns, &labels).await {
+                tracing::warn!("sync_services_for_labels failed: {}", e);
             }
         }
         Ok(())

@@ -82,7 +82,7 @@ impl GossipState {
 
     /// Apply a gossip message to the local database.
     pub async fn apply(&self, key: &str, value: &[u8], term: u64) {
-        if let Ok(resource) = bincode::deserialize::<AnyResource>(value) {
+        if let Ok(resource) = serde_json::from_slice::<AnyResource>(value) {
             if let Err(e) = self.db.apply(resource).await {
                 warn!("Failed to apply gossiped resource {}: {}", key, e);
             } else {

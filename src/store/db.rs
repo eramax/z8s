@@ -24,7 +24,11 @@ impl RedbBackend {
         std::fs::create_dir_all(path)?;
         let db_path = path.join("z8s.redb");
         info!("Opening redb database at {}", db_path.display());
-        let db = Database::create(&db_path)?;
+        let db = if db_path.exists() {
+            Database::open(&db_path)?
+        } else {
+            Database::create(&db_path)?
+        };
         {
             let write_txn = db.begin_write()?;
             write_txn.open_table(RESOURCES)?;
@@ -41,7 +45,11 @@ impl RedbBackend {
         std::fs::create_dir_all(dir)?;
         let db_path = dir.join(filename);
         info!("Opening redb database at {}", db_path.display());
-        let db = Database::create(&db_path)?;
+        let db = if db_path.exists() {
+            Database::open(&db_path)?
+        } else {
+            Database::create(&db_path)?
+        };
         {
             let write_txn = db.begin_write()?;
             write_txn.open_table(RESOURCES)?;
@@ -67,12 +75,17 @@ impl StoreBackend for RedbBackend {
     async fn apply(&self, resource: AnyResource) -> anyhow::Result<()> {
         let db = self.db.clone();
         let key = resource.uid();
-        let bytes = bincode::serialize(&resource)?;
+        let bytes = serde_json::to_vec(&resource)?;
+        tracing::debug!("DB apply: key={}, size={}", key, bytes.len());
         tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
             let write_txn = db.begin_write()?;
             {
                 let mut table = write_txn.open_table(RESOURCES)?;
                 table.insert(key.as_str(), bytes.as_slice())?;
+                // Verify by reading back
+                if let Ok(v) = table.get(key.as_str()) {
+                    tracing::debug!("DB verify: key={}, found={}", key, v.is_some());
+                }
             }
             write_txn.commit()?;
             Ok(())
@@ -104,7 +117,7 @@ impl StoreBackend for RedbBackend {
             for item in table.iter()? {
                 let (_key, value) = item?;
                 let bytes = value.value();
-                if let Ok(resource) = bincode::deserialize::<AnyResource>(bytes) {
+                if let Ok(resource) = serde_json::from_slice::<AnyResource>(bytes) {
                     result.push(ResourceTracker::new(resource));
                 }
             }
@@ -118,16 +131,50 @@ impl StoreBackend for RedbBackend {
     async fn get_by_kind(&self, kind: &str) -> Vec<ResourceTracker> {
         let db = self.db.clone();
         let prefix = format!("{}/", kind);
+        let kind = kind.to_string();
         tokio::task::spawn_blocking(move || -> Result<Vec<ResourceTracker>, anyhow::Error> {
             let read_txn = db.begin_read()?;
             let table = read_txn.open_table(RESOURCES)?;
             let mut result = Vec::new();
+            let mut total = 0u64;
             for item in table.iter()? {
+                total += 1;
                 let (key, value) = item?;
                 if key.value().starts_with(&prefix) {
                     let bytes = value.value();
-                    if let Ok(resource) = bincode::deserialize::<AnyResource>(bytes) {
+                    if let Ok(resource) = serde_json::from_slice::<AnyResource>(bytes) {
                         result.push(ResourceTracker::new(resource));
+                    } else {
+                        tracing::warn!("DB deserialize fail for key={}", key.value());
+                    }
+                }
+            }
+            tracing::debug!("DB get_by_kind({}): total_keys={}, matched={}", kind, total, result.len());
+            Ok(result)
+        })
+        .await
+        .unwrap_or_else(|_| Ok(vec![]))
+        .unwrap_or_default()
+    }
+
+    async fn get(&self, uid: &str) -> Option<ResourceTracker> {
+        let db = self.db.clone();
+        let key = uid.to_string();
+        tokio::task::spawn_blocking(move || -> Option<ResourceTracker> {
+            let read_txn = db.begin_read().ok()?;
+            let table = read_txn.open_table(RESOURCES).ok()?;
+            let value = table.get(key.as_str()).ok()??;
+            let bytes = value.value();
+            let resource = serde_json::from_slice::<AnyResource>(bytes).ok()?;
+            Some(ResourceTracker::new(resource))
+        })
+        .await
+        .unwrap_or(None)
+    }
+
+    async fn update_state(&self, _uid: &str, _state: ResourceState) {
+        // State is ephemeral — rebuilt from process tracker on restart.
+    }
 }
 
 #[cfg(test)]
@@ -198,33 +245,6 @@ mod tests {
         assert_eq!(all.len(), 1);
     }
 }
-                }
-            }
-            Ok(result)
-        })
-        .await
-        .unwrap_or_else(|_| Ok(vec![]))
-        .unwrap_or_default()
-    }
-
-    async fn get(&self, uid: &str) -> Option<ResourceTracker> {
-        let db = self.db.clone();
-        let key = uid.to_string();
-        tokio::task::spawn_blocking(move || -> Option<ResourceTracker> {
-            let read_txn = db.begin_read().ok()?;
-            let table = read_txn.open_table(RESOURCES).ok()?;
-            let value = table.get(key.as_str()).ok()??;
-            let bytes = value.value();
-            let resource = bincode::deserialize::<AnyResource>(bytes).ok()?;
-            Some(ResourceTracker::new(resource))
-        })
-        .await
-        .unwrap_or(None)
-    }
-
-    async fn update_state(&self, _uid: &str, _state: ResourceState) {
-    }
-}
 
 // ── Node/lease operations (not part of StoreBackend trait) ────────────────────
 
@@ -236,7 +256,7 @@ impl RedbBackend {
             let read_txn = db.begin_read().ok()?;
             let table = read_txn.open_table(NODES).ok()?;
             let value = table.get(key.as_str()).ok()??;
-            bincode::deserialize::<crate::types::NodeRecord>(value.value()).ok()
+            serde_json::from_slice::<crate::types::NodeRecord>(value.value()).ok()
         })
         .await
         .unwrap_or(None)
@@ -245,7 +265,7 @@ impl RedbBackend {
     pub async fn write_node(&self, record: &crate::types::NodeRecord) -> anyhow::Result<()> {
         let db = self.db.clone();
         let key = record.node_name.clone();
-        let bytes = bincode::serialize(record)?;
+        let bytes = serde_json::to_vec(record)?;
         tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
             let write_txn = db.begin_write()?;
             {
@@ -264,7 +284,7 @@ impl RedbBackend {
             let read_txn = db.begin_read().ok()?;
             let table = read_txn.open_table(LEASES).ok()?;
             let value = table.get("scheduler").ok()??;
-            bincode::deserialize::<crate::types::LeaseRecord>(value.value()).ok()
+            serde_json::from_slice::<crate::types::LeaseRecord>(value.value()).ok()
         })
         .await
         .unwrap_or(None)
@@ -272,7 +292,7 @@ impl RedbBackend {
 
     pub async fn write_lease(&self, record: &crate::types::LeaseRecord) -> anyhow::Result<()> {
         let db = self.db.clone();
-        let bytes = bincode::serialize(record)?;
+        let bytes = serde_json::to_vec(record)?;
         tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
             let write_txn = db.begin_write()?;
             {

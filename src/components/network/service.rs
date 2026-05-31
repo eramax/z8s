@@ -275,7 +275,10 @@ impl Component for ServiceResource {
         ResourceCategory::Network
     }
 
-    async fn reconcile(&self, _ctx: &ReconcileContext, _tracker: &ResourceTracker) -> Result<()> {
+    async fn reconcile(&self, ctx: &ReconcileContext, tracker: &ResourceTracker) -> Result<()> {
+        if let AnyResource::Service(svc) = &tracker.resource {
+            self.network.sync_service(svc).await;
+        }
         Ok(())
     }
 

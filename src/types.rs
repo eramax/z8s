@@ -2141,7 +2141,7 @@ pub struct HeaderMatch {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
+#[serde(tag = "resourceType")]
 pub enum AnyResource {
     Pod(Pod),
     Deployment(Deployment),
@@ -2156,6 +2156,10 @@ pub enum AnyResource {
     RouteTable(RouteTable),
     Ingress(Ingress),
     NetworkPolicy(NetworkPolicy),
+    Namespace(Namespace),
+    Node(Node),
+    Endpoints(Endpoints),
+    EndpointSlice(EndpointSlice),
     Event(Event),
     StorageClass(StorageClass),
 }
@@ -2176,6 +2180,10 @@ impl AnyResource {
             AnyResource::RouteTable(r) => &r.metadata,
             AnyResource::Ingress(r) => &r.metadata,
             AnyResource::NetworkPolicy(r) => &r.metadata,
+            AnyResource::Namespace(r) => &r.metadata,
+            AnyResource::Node(r) => &r.metadata,
+            AnyResource::Endpoints(r) => &r.metadata,
+            AnyResource::EndpointSlice(r) => &r.metadata,
             AnyResource::Event(r) => &r.metadata,
             AnyResource::StorageClass(r) => &r.metadata,
         }
@@ -2196,6 +2204,10 @@ impl AnyResource {
             AnyResource::RouteTable(r) => &mut r.metadata,
             AnyResource::Ingress(r) => &mut r.metadata,
             AnyResource::NetworkPolicy(r) => &mut r.metadata,
+            AnyResource::Namespace(r) => &mut r.metadata,
+            AnyResource::Node(r) => &mut r.metadata,
+            AnyResource::Endpoints(r) => &mut r.metadata,
+            AnyResource::EndpointSlice(r) => &mut r.metadata,
             AnyResource::Event(r) => &mut r.metadata,
             AnyResource::StorageClass(r) => &mut r.metadata,
         }
@@ -2216,6 +2228,10 @@ impl AnyResource {
             AnyResource::RouteTable(_) => "RouteTable",
             AnyResource::Ingress(_) => "Ingress",
             AnyResource::NetworkPolicy(_) => "NetworkPolicy",
+            AnyResource::Namespace(_) => "Namespace",
+            AnyResource::Node(_) => "Node",
+            AnyResource::Endpoints(_) => "Endpoints",
+            AnyResource::EndpointSlice(_) => "EndpointSlice",
             AnyResource::Event(_) => "Event",
             AnyResource::StorageClass(_) => "StorageClass",
         }

@@ -222,15 +222,18 @@ pub fn resource_to_pod_json_with_status(
     };
 
     let time = now_time();
-    let phase = match state {
-        ResourceState::Pending => "Pending",
-        ResourceState::Running => "Running",
-        ResourceState::Succeeded => "Succeeded",
-        ResourceState::Failed(_) => "Failed",
-        ResourceState::Terminated => "Succeeded",
+    let phase = if is_ready {
+        "Running"
+    } else {
+        match state {
+            ResourceState::Pending => "Pending",
+            ResourceState::Running => "Running",
+            ResourceState::Succeeded => "Succeeded",
+            ResourceState::Failed(_) => "Failed",
+            ResourceState::Terminated => "Succeeded",
+        }
     };
-    let ready = if is_ready && matches!(state, ResourceState::Running) { "True" } else { "False" };
-
+    let ready = if is_ready { "True" } else { "False" };
     let ip = pod_ip.unwrap_or("127.0.0.1").to_string();
     let status = PodStatus {
         phase: Some(phase.into()),
@@ -251,20 +254,22 @@ pub fn resource_to_pod_json_with_status(
                 .map(|c| {
                     let restarts = restart_counts.get(&c.name).copied().unwrap_or(0) as i32;
                     let crash_loop = restarts >= 3 && !is_ready;
-                    let cstate = Some(match state {
-                        ResourceState::Running if !crash_loop => ContainerState {
+                    let cstate = Some(if is_ready {
+                        ContainerState {
                             running: Some(ContainerStateRunning { started_at: Some(time.clone()) }),
                             ..Default::default()
-                        },
-                        ResourceState::Succeeded | ResourceState::Terminated => ContainerState {
+                        }
+                    } else if matches!(state, ResourceState::Succeeded | ResourceState::Terminated) {
+                        ContainerState {
                             terminated: Some(ContainerStateTerminated {
                                 exit_code: 0,
                                 reason: Some("Completed".into()),
                                 ..Default::default()
                             }),
                             ..Default::default()
-                        },
-                        ResourceState::Failed(msg) => ContainerState {
+                        }
+                    } else if let ResourceState::Failed(msg) = state {
+                        ContainerState {
                             terminated: Some(ContainerStateTerminated {
                                 exit_code: 1,
                                 reason: Some("Error".into()),
@@ -272,20 +277,21 @@ pub fn resource_to_pod_json_with_status(
                                 ..Default::default()
                             }),
                             ..Default::default()
-                        },
-                        _ => ContainerState {
+                        }
+                    } else {
+                        ContainerState {
                             waiting: Some(ContainerStateWaiting {
                                 reason: Some(if crash_loop { "CrashLoopBackOff" } else { "ContainerCreating" }.into()),
                                 ..Default::default()
                             }),
                             ..Default::default()
-                        },
+                        }
                     });
                     ContainerStatus {
                         name: c.name.clone(),
                         image: c.image.clone().unwrap_or_default(),
                         image_id: c.image.clone().map(|i| format!("z8s://{}", i)).unwrap_or_default(),
-                        ready: is_ready && matches!(state, ResourceState::Running),
+                        ready: is_ready,
                         restart_count: restarts,
                         container_id: Some(format!("z8s://{}", c.name)),
                         state: cstate,

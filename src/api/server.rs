@@ -36,14 +36,12 @@ pub fn z8s_port() -> u16 {
     crate::config::get().api_port
 }
 
-type NamespaceStore = Arc<RwLock<HashMap<String, Namespace>>>;
 type EventStore = Arc<Mutex<Vec<Event>>>;
 
 #[derive(Clone)]
 pub struct AppState {
     pub store: Arc<dyn StoreBackend>,
     pub process_tracker: Arc<ProcessTracker>,
-    pub namespaces: NamespaceStore,
     pub events: EventStore,
     pub registry: Arc<ComponentRegistry>,
     pub ctx: Arc<ReconcileContext>,
@@ -79,17 +77,26 @@ pub async fn build_app_state(
     ctx: Arc<ReconcileContext>,
     gossip_state: Option<Arc<tokio::sync::Mutex<crate::store::gossip::GossipState>>>,
 ) -> AppState {
-    let namespaces: NamespaceStore = Arc::new(RwLock::new(HashMap::new()));
-    {
-        let mut ns = namespaces.write().await;
-        ns.insert("default".into(), make_namespace("default", "ns-default"));
+    // Log store state on startup
+    let pods = store.get_by_kind("Pod").await.len();
+    let svcs = store.get_by_kind("Service").await.len();
+    let deploys = store.get_by_kind("Deployment").await.len();
+    let ns_count = store.get_by_kind("Namespace").await.len();
+    info!("Store state: {} namespaces, {} pods, {} services, {} deployments", ns_count, pods, svcs, deploys);
+
+    // Ensure default namespace exists in the store
+    let existing = store.get_by_kind("Namespace").await;
+    if !existing.iter().any(|t| t.resource.name() == "default") {
+        let ns = make_namespace("default", "ns-default");
+        info!("Creating default namespace");
+        store.apply(AnyResource::Namespace(ns)).await.ok();
     }
     let events: EventStore = Arc::new(Mutex::new(Vec::new()));
     {
         let mut ev = events.lock().await;
         ev.push(make_event("z8s-started", "default", "Node", "z8s-node", "Started", "z8s daemon started", "Normal"));
     }
-    AppState { store, process_tracker, namespaces, events, registry, ctx, gossip_state }
+    AppState { store, process_tracker, events, registry, ctx, gossip_state }
 }
 
 pub fn build_router(state: AppState) -> Router {
