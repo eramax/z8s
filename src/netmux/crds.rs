@@ -1,7 +1,7 @@
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct VNet {
     #[serde(rename = "apiVersion", default = "default_api_version")]
     pub api_version: String,
@@ -16,7 +16,7 @@ pub struct VNet {
 fn default_api_version() -> String { "z8s.io/v1".to_string() }
 fn default_vnet_kind() -> String { "VNet".to_string() }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct VNetSpec {
     #[serde(default)]
     pub cidr: Option<String>,
@@ -29,14 +29,14 @@ pub struct VNetSpec {
 fn default_true() -> bool { true }
 fn default_role() -> String { "spoke".to_string() }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct VNetStatus {
     pub cidr: String,
     #[serde(default)]
     pub pod_count: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Subnet {
     #[serde(rename = "apiVersion", default = "default_api_version")]
     pub api_version: String,
@@ -48,13 +48,13 @@ pub struct Subnet {
 
 fn default_subnet_kind() -> String { "Subnet".to_string() }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SubnetSpec {
     pub vnet: String,
     pub cidr: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct Nsg {
     #[serde(rename = "apiVersion", default = "default_api_version")]
     pub api_version: String,
@@ -66,14 +66,14 @@ pub struct Nsg {
 
 fn default_nsg_kind() -> String { "NSG".to_string() }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct NsgSpec {
     pub target_vnets: Vec<String>,
     #[serde(default)]
     pub rules: Vec<NsgRule>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct NsgRule {
     pub name: String,
     pub action: String,
@@ -91,7 +91,7 @@ pub struct NsgRule {
 
 fn default_priority() -> u32 { 1000 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct RouteTable {
     #[serde(rename = "apiVersion", default = "default_api_version")]
     pub api_version: String,
@@ -103,13 +103,13 @@ pub struct RouteTable {
 
 fn default_routetable_kind() -> String { "RouteTable".to_string() }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct RouteTableSpec {
     #[serde(default)]
     pub rules: Vec<RouteRule>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct RouteRule {
     pub name: String,
     #[serde(default)]
@@ -121,7 +121,7 @@ pub struct RouteRule {
     pub action: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct HeaderMatch {
     pub name: String,
     #[serde(default)]

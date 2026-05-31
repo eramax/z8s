@@ -96,7 +96,20 @@ async fn main() -> Result<()> {
         );
     }
 
-    let store: Arc<dyn StoreBackend> = Arc::new(MemoryBackend::new());
+    let store: Arc<dyn StoreBackend> = if let Some(ref data_dir) = cfg.data_dir {
+        match crate::store::RedbBackend::open(data_dir) {
+            Ok(db) => {
+                info!("Using redb database at {}", data_dir);
+                Arc::new(db)
+            }
+            Err(e) => {
+                warn!("Failed to open redb at {}: {}. Falling back to in-memory.", data_dir, e);
+                Arc::new(MemoryBackend::new())
+            }
+        }
+    } else {
+        Arc::new(MemoryBackend::new())
+    };
 
     let cgroup_manager = Arc::new(CgroupManager::new().unwrap_or_else(|e| {
         warn!("Cgroups not available: {}. Running without resource limits.", e);

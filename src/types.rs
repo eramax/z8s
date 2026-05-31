@@ -1,13 +1,50 @@
-use anyhow::{Context, Result};
-use k8s_openapi::api::apps::v1::Deployment;
-use k8s_openapi::api::core::v1::{
-    ConfigMap, Container, PersistentVolume, PersistentVolumeClaim, Pod, Secret, Service,
-};
-use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-use serde::{Deserialize, Serialize};
+// ── Canonical Types ───────────────────────────────────────────────────────────
+// All type definitions live in src/store/types.rs. This file re-exports them
+// globally so they can be accessed as crate::types::Pod, crate::types::ObjectMeta, etc.
 
-// ── ResourceTracker ──────────────────────────────────────────────────────────
+pub use crate::store::{
+    APIGroup, APIGroupList, APIResource, APIResourceList, APIVersions,
+    ConfigMap, ConfigMapKeySelector, ConfigMapVolumeSource,
+    Container, ContainerPort, ContainerState, ContainerStateRunning,
+    ContainerStateTerminated, ContainerStateWaiting, ContainerStatus,
+    DaemonEndpoint, Deployment, DeploymentCondition, DeploymentSpec,
+    DeploymentStatus, DeploymentStrategy,
+    EmptyDirVolumeSource, EndpointAddress, EndpointPort, Endpoints,
+    EndpointSlice, EndpointSliceConditions, EndpointSliceEndpoint,
+    EndpointSlicePort, EnvVar, EnvVarSource,
+    Event, EventSeries, EventSource,
+    GroupVersionForDiscovery,
+    HostIP, HostPathVolumeSource,
+    HTTPIngressPath, HTTPIngressRuleValue,
+    IPBlock, Ingress, IngressBackend, IngressRule, IngressServiceBackend,
+    IngressSpec, IngressStatus, IngressTLS, IntOrString,
+    KeyToPath,
+    LabelSelector, LabelSelectorRequirement, List, ListMeta,
+    LoadBalancerIngress, LoadBalancerStatus,
+    ManagedFieldsEntry,
+    Namespace, NamespaceSpec, NamespaceStatus,
+    NetworkPolicy, NetworkPolicyEgressRule, NetworkPolicyIngressRule,
+    NetworkPolicyPeer, NetworkPolicyPort, NetworkPolicySpec,
+    Node, NodeAddress, NodeCondition, NodeDaemonEndpoints,
+    NodeSpec, NodeStatus, NodeSystemInfo,
+    ObjectFieldSelector, ObjectMeta, ObjectReference, OwnerReference,
+    PersistentVolume, PersistentVolumeClaim, PersistentVolumeClaimSpec,
+    PersistentVolumeClaimStatus, PersistentVolumeClaimVolumeSource,
+    PersistentVolumeSpec, PersistentVolumeStatus,
+    Pod, PodCondition, PodIP, PodSpec, PodStatus, PodTemplateSpec,
+    PortStatus, Quantity,
+    ResourceRequirements, RollingUpdateDeployment,
+    Secret, SecretKeySelector, SecretVolumeSource,
+    ServerAddressByClientCIDR, Service, ServiceBackendPort,
+    ServicePort, ServiceSpec, ServiceStatus,
+    Status, StatusCause, StatusDetails,
+    StorageClass, StoredResource,
+    Taint, Time, Volume, VolumeMount,
+};
+
+// ── ResourceState / ResourceTracker (legacy, used with AnyResource) ──────────
+
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ResourceState {
@@ -35,18 +72,18 @@ impl ResourceTracker {
     }
 }
 
-// ── AnyResource ──────────────────────────────────────────────────────────────
+// ── AnyResource (legacy, being replaced by StoredResource) ───────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum AnyResource {
-    Pod(Pod),
-    Deployment(Deployment),
-    Service(Service),
-    ConfigMap(ConfigMap),
-    Secret(Secret),
-    PersistentVolume(PersistentVolume),
-    PersistentVolumeClaim(PersistentVolumeClaim),
+    Pod(k8s_openapi::api::core::v1::Pod),
+    Deployment(k8s_openapi::api::apps::v1::Deployment),
+    Service(k8s_openapi::api::core::v1::Service),
+    ConfigMap(k8s_openapi::api::core::v1::ConfigMap),
+    Secret(k8s_openapi::api::core::v1::Secret),
+    PersistentVolume(k8s_openapi::api::core::v1::PersistentVolume),
+    PersistentVolumeClaim(k8s_openapi::api::core::v1::PersistentVolumeClaim),
     VNet(crate::netmux::crds::VNet),
     Subnet(crate::netmux::crds::Subnet),
     Nsg(crate::netmux::crds::Nsg),
@@ -56,7 +93,7 @@ pub enum AnyResource {
 }
 
 impl AnyResource {
-    pub fn metadata(&self) -> &ObjectMeta {
+    pub fn metadata(&self) -> &k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
         match self {
             AnyResource::Pod(r) => &r.metadata,
             AnyResource::Deployment(r) => &r.metadata,
@@ -74,7 +111,7 @@ impl AnyResource {
         }
     }
 
-    pub fn metadata_mut(&mut self) -> &mut ObjectMeta {
+    pub fn metadata_mut(&mut self) -> &mut k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
         match self {
             AnyResource::Pod(r) => &mut r.metadata,
             AnyResource::Deployment(r) => &mut r.metadata,
@@ -128,18 +165,16 @@ impl AnyResource {
 
 // ── YAML parsing ────────────────────────────────────────────────────────────
 
-pub fn parse_manifest_yaml(yaml: &str) -> Result<Vec<AnyResource>> {
+pub fn parse_manifest_yaml(yaml: &str) -> anyhow::Result<Vec<AnyResource>> {
+    use anyhow::Context;
     let mut resources = Vec::new();
-
     for doc in serde_yaml::Deserializer::from_str(yaml) {
         let value: serde_yaml::Value =
             serde_yaml::Value::deserialize(doc).context("Failed to parse YAML document")?;
-
         let kind = value
             .get("kind")
             .and_then(|k| k.as_str())
             .context("Missing 'kind' field in YAML")?;
-
         let resource = match kind {
             "Pod" => AnyResource::Pod(
                 serde_yaml::from_value(value).context("Failed to parse Pod")?,
@@ -182,16 +217,14 @@ pub fn parse_manifest_yaml(yaml: &str) -> Result<Vec<AnyResource>> {
             ),
             _ => anyhow::bail!("Unsupported resource kind: {}", kind),
         };
-
         resources.push(resource);
     }
-
     Ok(resources)
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-pub fn extract_containers(resource: &AnyResource) -> Vec<Container> {
+pub fn extract_containers(resource: &AnyResource) -> Vec<k8s_openapi::api::core::v1::Container> {
     match resource {
         AnyResource::Pod(pod) => pod.spec.as_ref().map_or_else(Vec::new, |s| {
             let mut c = s.containers.clone();
@@ -215,7 +248,7 @@ pub fn extract_containers(resource: &AnyResource) -> Vec<Container> {
     }
 }
 
-pub fn parse_quantity_bytes(q: &Quantity) -> u64 {
+pub fn parse_quantity_bytes(q: &k8s_openapi::apimachinery::pkg::api::resource::Quantity) -> u64 {
     let s = q.0.trim();
     if let Some(rest) = s.strip_suffix("Ti") {
         rest.parse::<u64>().unwrap_or(0) * 1024u64.pow(4)
@@ -242,7 +275,7 @@ pub fn parse_quantity_bytes(q: &Quantity) -> u64 {
     }
 }
 
-pub fn parse_quantity_cpu(q: &Quantity) -> (i64, i64) {
+pub fn parse_quantity_cpu(q: &k8s_openapi::apimachinery::pkg::api::resource::Quantity) -> (i64, i64) {
     let s = q.0.trim();
     if let Some(rest) = s.strip_suffix('m') {
         let millicores = rest.parse::<i64>().unwrap_or(0);
@@ -412,34 +445,34 @@ spec:
 
     #[test]
     fn parse_quantity_ki() {
-        assert_eq!(parse_quantity_bytes(&Quantity("128Ki".into())), 128 * 1024);
+        assert_eq!(parse_quantity_bytes(&k8s_openapi::apimachinery::pkg::api::resource::Quantity("128Ki".into())), 128 * 1024);
     }
 
     #[test]
     fn parse_quantity_mi() {
-        assert_eq!(parse_quantity_bytes(&Quantity("256Mi".into())), 256 * 1024 * 1024);
+        assert_eq!(parse_quantity_bytes(&k8s_openapi::apimachinery::pkg::api::resource::Quantity("256Mi".into())), 256 * 1024 * 1024);
     }
 
     #[test]
     fn parse_quantity_gi() {
-        assert_eq!(parse_quantity_bytes(&Quantity("1Gi".into())), 1024 * 1024 * 1024);
+        assert_eq!(parse_quantity_bytes(&k8s_openapi::apimachinery::pkg::api::resource::Quantity("1Gi".into())), 1024 * 1024 * 1024);
     }
 
     #[test]
     fn parse_quantity_plain_bytes() {
-        assert_eq!(parse_quantity_bytes(&Quantity("4096".into())), 4096);
+        assert_eq!(parse_quantity_bytes(&k8s_openapi::apimachinery::pkg::api::resource::Quantity("4096".into())), 4096);
     }
 
     #[test]
     fn parse_cpu_millicores() {
-        let (quota, period) = parse_quantity_cpu(&Quantity("500m".into()));
+        let (quota, period) = parse_quantity_cpu(&k8s_openapi::apimachinery::pkg::api::resource::Quantity("500m".into()));
         assert_eq!(quota, 50_000);
         assert_eq!(period, 100_000);
     }
 
     #[test]
     fn parse_cpu_cores() {
-        let (quota, period) = parse_quantity_cpu(&Quantity("2".into()));
+        let (quota, period) = parse_quantity_cpu(&k8s_openapi::apimachinery::pkg::api::resource::Quantity("2".into()));
         assert_eq!(quota, 200_000);
         assert_eq!(period, 100_000);
     }
