@@ -120,22 +120,6 @@ pub struct ListMeta {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct Status {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub code: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub details: Option<StatusDetails>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-    pub metadata: ListMeta,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub status: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
-#[serde(rename_all = "camelCase")]
 pub struct StatusDetails {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub causes: Option<Vec<StatusCause>>,
@@ -1847,17 +1831,6 @@ pub struct SubjectAccessReviewStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct Scale {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<ObjectMeta>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub spec: Option<ScaleSpec>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub status: Option<ScaleStatus>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
-#[serde(rename_all = "camelCase")]
 pub struct ScaleSpec {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub replicas: Option<i32>,
@@ -1869,6 +1842,52 @@ pub struct ScaleStatus {
     pub replicas: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selector: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Scale {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<ObjectMeta>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spec: Option<ScaleSpec>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<ScaleStatus>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Status {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<StatusDetails>,
+    pub metadata: ListMeta,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(rename = "apiVersion", skip_serializing_if = "Option::is_none")]
+    pub api_version: Option<String>,
+}
+
+impl Default for Status {
+    fn default() -> Self {
+        Self {
+            code: None,
+            details: None,
+            metadata: ListMeta::default(),
+            message: None,
+            reason: None,
+            status: None,
+            kind: Some("Status".into()),
+            api_version: Some("v1".into()),
+        }
+    }
 }
 
 // ── API discovery types ──────────────────────────────────────────────────────
