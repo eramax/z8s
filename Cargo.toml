@@ -24,6 +24,7 @@ uuid = { version = "1", features = ["v4"] }
 chrono = "0.4"
 axum = { version = "0.8", default-features = false, features = ["json", "tokio", "http1", "ws", "query"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+tokio-tungstenite = "0.21"
 async-trait = "0.1"
 rustables = "0.8"
 ipnetwork = "0.21"

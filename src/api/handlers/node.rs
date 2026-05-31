@@ -23,6 +23,8 @@ pub async fn list_nodes() -> Json<List<Node>> {
         kind: Some("NodeList".into()),
         api_version: None,
         items: vec![Node {
+            api_version: "v1".into(),
+            kind: "Node".into(),
             metadata: ObjectMeta {
                 name: Some("z8s-node".into()),
                 uid: Some("z8s-node".into()),

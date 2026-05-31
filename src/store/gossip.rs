@@ -1,0 +1,104 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex;
+use tokio::time::sleep;
+use tracing::{debug, info, warn};
+
+use crate::store::{AnyResource, StoreBackend};
+
+/// Gossip message types exchanged over WebSocket.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum GossipMessage {
+    Gossip {
+        key: String,
+        value: Vec<u8>,
+        term: u64,
+        source: String,
+    },
+    SyncRequest {
+        request_id: u64,
+    },
+    SyncFull {
+        request_id: u64,
+        entries: Vec<SyncEntry>,
+    },
+    Checksum {
+        hash: u64,
+        keys: Vec<String>,
+    },
+    KeyRequest {
+        keys: Vec<String>,
+    },
+    KeyResponse {
+        entries: Vec<SyncEntry>,
+    },
+    Heartbeat,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncEntry {
+    pub key: String,
+    pub value: Vec<u8>,
+    pub term: u64,
+}
+
+/// Tracks known terms per key for deduplication.
+pub struct GossipState {
+    pub node_name: String,
+    pub local_term: u64,
+    pub seen: HashMap<String, u64>,
+    pub db: Arc<dyn StoreBackend>,
+}
+
+impl GossipState {
+    pub fn new(node_name: String, db: Arc<dyn StoreBackend>) -> Self {
+        Self {
+            node_name,
+            local_term: 0,
+            seen: HashMap::new(),
+            db,
+        }
+    }
+
+    pub fn next_term(&mut self) -> u64 {
+        self.local_term += 1;
+        self.local_term
+    }
+
+    /// Returns true if this message is new (should be applied).
+    pub fn dedup(&mut self, key: &str, term: u64) -> bool {
+        let known = self.seen.get(key).copied().unwrap_or(0);
+        if term > known {
+            self.seen.insert(key.to_string(), term);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Apply a gossip message to the local database.
+    pub async fn apply(&self, key: &str, value: &[u8], term: u64) {
+        if let Ok(resource) = bincode::deserialize::<AnyResource>(value) {
+            if let Err(e) = self.db.apply(resource).await {
+                warn!("Failed to apply gossiped resource {}: {}", key, e);
+            } else {
+                debug!("Applied gossiped resource {} (term {})", key, term);
+            }
+        }
+    }
+}
+
+/// Compute a simple checksum over a list of keys and their terms.
+pub fn compute_checksum(keys: &[String], terms: &[u64]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for (k, t) in keys.iter().zip(terms.iter()) {
+        k.hash(&mut hasher);
+        t.hash(&mut hasher);
+    }
+    hasher.finish()
+}

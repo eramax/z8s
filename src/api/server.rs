@@ -47,6 +47,7 @@ pub struct AppState {
     pub events: EventStore,
     pub registry: Arc<ComponentRegistry>,
     pub ctx: Arc<ReconcileContext>,
+    pub gossip_state: Option<Arc<tokio::sync::Mutex<crate::store::gossip::GossipState>>>,
 }
 
 impl AppState {
@@ -76,6 +77,7 @@ pub async fn build_app_state(
     process_tracker: Arc<ProcessTracker>,
     registry: Arc<ComponentRegistry>,
     ctx: Arc<ReconcileContext>,
+    gossip_state: Option<Arc<tokio::sync::Mutex<crate::store::gossip::GossipState>>>,
 ) -> AppState {
     let namespaces: NamespaceStore = Arc::new(RwLock::new(HashMap::new()));
     {
@@ -87,7 +89,7 @@ pub async fn build_app_state(
         let mut ev = events.lock().await;
         ev.push(make_event("z8s-started", "default", "Node", "z8s-node", "Started", "z8s daemon started", "Normal"));
     }
-    AppState { store, process_tracker, namespaces, events, registry, ctx }
+    AppState { store, process_tracker, namespaces, events, registry, ctx, gossip_state }
 }
 
 pub fn build_router(state: AppState) -> Router {
@@ -113,8 +115,18 @@ pub fn build_router(state: AppState) -> Router {
         .merge(crate::api::handlers::subnet::routes())
         .merge(crate::api::handlers::nsg::routes())
         .merge(crate::api::handlers::routetable::routes())
+        .route("/ws/gossip", axum::routing::any(gossip_ws_handler))
         .fallback(fallback_handler)
         .with_state(state)
+}
+
+pub async fn gossip_ws_handler(
+    ws: axum::extract::ws::WebSocketUpgrade,
+    State(state): State<AppState>,
+) -> impl axum::response::IntoResponse {
+    ws.on_upgrade(move |socket| {
+        crate::store::ws::handle_gossip_ws(socket, state.gossip_state.unwrap())
+    })
 }
 
 pub async fn run_server(
@@ -122,8 +134,9 @@ pub async fn run_server(
     process_tracker: Arc<ProcessTracker>,
     registry: Arc<ComponentRegistry>,
     ctx: Arc<ReconcileContext>,
+    gossip_state: Option<Arc<tokio::sync::Mutex<crate::store::gossip::GossipState>>>,
 ) {
-    let state = build_app_state(store, process_tracker, registry, ctx).await;
+    let state = build_app_state(store, process_tracker, registry, ctx, gossip_state).await;
     let app = build_router(state);
     let addr = format!("0.0.0.0:{}", z8s_port());
     info!("Starting k8s API server on {}", addr);
@@ -144,6 +157,8 @@ pub fn now_rfc3339() -> String {
 
 pub fn make_namespace(name: &str, uid: &str) -> Namespace {
     Namespace {
+        api_version: "v1".into(),
+        kind: "Namespace".into(),
         metadata: ObjectMeta {
             name: Some(name.into()),
             uid: Some(uid.into()),
@@ -447,7 +462,8 @@ mod tests {
             netmux: test_netmux.clone(),
         });
         let registry = Arc::new(crate::components::ComponentRegistry::new());
-        let state = build_app_state(store, process_tracker, registry, ctx).await;
+        let gossip_state = None;
+        let state = build_app_state(store, process_tracker, registry, ctx, gossip_state).await;
         build_router(state)
     }
 
@@ -478,7 +494,8 @@ mod tests {
             netmux: test_netmux.clone(),
         });
         let registry = Arc::new(crate::components::ComponentRegistry::new());
-        let state = build_app_state(store.clone(), process_tracker, registry, ctx).await;
+        let gossip_state = None;
+        let state = build_app_state(store.clone(), process_tracker, registry, ctx, gossip_state).await;
         (build_router(state), store)
     }
 

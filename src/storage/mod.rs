@@ -71,6 +71,8 @@ impl ProvisionerDispatcher {
         let pv_name = format!("pvc-{}--{}", pvc_ns, pvc_name);
         let host_path = format!("/var/lib/z8s/pv/{}", pv_name);
         let mut pv = PersistentVolume {
+            api_version: "v1".into(),
+            kind: "PersistentVolume".into(),
             metadata: ObjectMeta {
                 name: Some(pv_name.clone()),
                 uid: Some(uuid::Uuid::new_v4().to_string()),

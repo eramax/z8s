@@ -280,8 +280,8 @@ impl NetMux {
         sorted.sort_by_key(|r| r.priority);
         for rule in &sorted {
             match rule.action.as_str() {
-                "deny" => for src in &rule.src_cidrs { for dst in &rule.dst_cidrs { self.nft.add_forward_deny(src, dst).await?; } }
-                "allow" => for src in &rule.src_cidrs { for dst in &rule.dst_cidrs { self.nft.add_forward_allow(src, dst).await?; } }
+                "deny" => for src in &rule.srcCIDRs { for dst in &rule.dstCIDRs { self.nft.add_forward_deny(src, dst).await?; } }
+                "allow" => for src in &rule.srcCIDRs { for dst in &rule.dstCIDRs { self.nft.add_forward_allow(src, dst).await?; } }
                 other => tracing::warn!("NSG rule '{}' unknown action '{}'", rule.name, other),
             }
         }

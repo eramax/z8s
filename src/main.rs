@@ -235,14 +235,36 @@ async fn main() -> Result<()> {
     let rec = reconciler.clone();
     tokio::spawn(async move { rec.run().await });
 
+    // Gossip state (shared between WS server and clients)
+    let gossip_state = if cfg!(feature = "gossip") || !cfg.peers.is_empty() {
+        let state = Arc::new(tokio::sync::Mutex::new(
+            crate::store::gossip::GossipState::new(cfg.node_name.clone(), store.clone())
+        ));
+
+        // Connect to each peer
+        for (name, addr) in &cfg.peers {
+            let url = format!("ws://{}/ws/gossip", addr);
+            let st = state.clone();
+            let n = name.clone();
+            tokio::spawn(async move {
+                crate::store::ws::run_gossip_client(n, url, st).await;
+            });
+        }
+
+        Some(state)
+    } else {
+        None
+    };
+
     // API server
     let store_clone = store.clone();
     let _s2 = supervisor.clone();
     let pt2 = process_tracker.clone();
     let reg2 = registry.clone();
     let ctx2 = ctx.clone();
+    let gs = gossip_state.clone();
     tokio::spawn(async move {
-        api::server::run_server(store_clone, pt2, reg2, ctx2).await;
+        api::server::run_server(store_clone, pt2, reg2, ctx2, gs).await;
     });
 
     // L7 ingress HTTP listener

@@ -36,6 +36,8 @@ pub fn create_pod_from_template(deploy: &Deployment, name: &str) -> Result<Pod> 
     let template = &spec.template;
 
     let mut pod = Pod::default();
+    pod.api_version = "v1".into();
+    pod.kind = "Pod".into();
     pod.metadata = template.metadata.clone().unwrap_or_default();
     pod.metadata.name = Some(name.to_string());
     let deploy_name = deploy.metadata.name.as_deref().unwrap_or("deployment");

@@ -351,6 +351,7 @@ pub struct Container {
 pub struct ContainerPort {
     pub container_port: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "hostIP")]
     pub host_ip: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub host_port: Option<i32>,
@@ -769,8 +770,10 @@ pub struct PodStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extended_resource_claim_status: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "hostIP")]
     pub host_ip: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "hostIPs")]
     pub host_ips: Option<Vec<HostIP>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub init_container_statuses: Option<Vec<ContainerStatus>>,
@@ -783,8 +786,10 @@ pub struct PodStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "podIP")]
     pub pod_ip: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "podIPs")]
     pub pod_ips: Option<Vec<PodIP>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub qos_class: Option<String>,
@@ -802,9 +807,13 @@ pub struct PodStatus {
 
 // ── Pod (our type with scheduler fields) ──────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Pod {
+    #[serde(rename = "apiVersion", default = "default_pod_api_version")]
+    pub api_version: String,
+    #[serde(default = "default_pod_kind")]
+    pub kind: String,
     pub metadata: ObjectMeta,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spec: Option<PodSpec>,
@@ -816,9 +825,23 @@ pub struct Pod {
     pub scheduler_epoch: u64,
 }
 
+impl Default for Pod {
+    fn default() -> Self {
+        Self {
+            api_version: "v1".into(),
+            kind: "Pod".into(),
+            metadata: ObjectMeta::default(),
+            spec: None,
+            status: None,
+            assigned_node: None,
+            scheduler_epoch: 0,
+        }
+    }
+}
+
 impl Pod {
     pub fn new(metadata: ObjectMeta, spec: Option<PodSpec>) -> Self {
-        Self { metadata, spec, status: None, assigned_node: None, scheduler_epoch: 0 }
+        Self { api_version: "v1".into(), kind: "Pod".into(), metadata, spec, status: None, assigned_node: None, scheduler_epoch: 0 }
     }
 }
 
@@ -846,10 +869,13 @@ pub struct ServiceSpec {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub allocate_load_balancer_node_ports: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "clusterIP")]
     pub cluster_ip: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "clusterIPs")]
     pub cluster_ips: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "externalIPs")]
     pub external_ips: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external_name: Option<String>,
@@ -866,6 +892,7 @@ pub struct ServiceSpec {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub load_balancer_class: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "loadBalancerIP")]
     pub load_balancer_ip: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub load_balancer_source_ranges: Option<Vec<String>>,
@@ -924,6 +951,10 @@ pub struct PortStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Service {
+    #[serde(rename = "apiVersion", default = "default_service_api_version")]
+    pub api_version: String,
+    #[serde(default = "default_service_kind")]
+    pub kind: String,
     pub metadata: ObjectMeta,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spec: Option<ServiceSpec>,
@@ -936,6 +967,10 @@ pub struct Service {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigMap {
+    #[serde(rename = "apiVersion", default = "default_configmap_api_version")]
+    pub api_version: String,
+    #[serde(default = "default_configmap_kind")]
+    pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub binary_data: Option<BTreeMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -950,6 +985,10 @@ pub struct ConfigMap {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Secret {
+    #[serde(rename = "apiVersion", default = "default_secret_api_version")]
+    pub api_version: String,
+    #[serde(default = "default_secret_kind")]
+    pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<BTreeMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1046,6 +1085,10 @@ pub struct PersistentVolumeStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PersistentVolume {
+    #[serde(rename = "apiVersion", default = "default_persistentvolume_api_version")]
+    pub api_version: String,
+    #[serde(default = "default_persistentvolume_kind")]
+    pub kind: String,
     pub metadata: ObjectMeta,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spec: Option<PersistentVolumeSpec>,
@@ -1100,6 +1143,10 @@ pub struct PersistentVolumeClaimStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PersistentVolumeClaim {
+    #[serde(rename = "apiVersion", default = "default_persistentvolumeclaim_api_version")]
+    pub api_version: String,
+    #[serde(default = "default_persistentvolumeclaim_kind")]
+    pub kind: String,
     pub metadata: ObjectMeta,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spec: Option<PersistentVolumeClaimSpec>,
@@ -1234,6 +1281,10 @@ pub struct DeploymentCondition {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Deployment {
+    #[serde(rename = "apiVersion", default = "default_deployment_api_version")]
+    pub api_version: String,
+    #[serde(default = "default_deployment_kind")]
+    pub kind: String,
     pub metadata: ObjectMeta,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spec: Option<DeploymentSpec>,
@@ -1325,6 +1376,10 @@ pub struct IngressStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Ingress {
+    #[serde(rename = "apiVersion", default = "default_ingress_api_version")]
+    pub api_version: String,
+    #[serde(default = "default_ingress_kind")]
+    pub kind: String,
     pub metadata: ObjectMeta,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spec: Option<IngressSpec>,
@@ -1397,6 +1452,10 @@ pub struct NetworkPolicySpec {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct NetworkPolicy {
+    #[serde(rename = "apiVersion", default = "default_networkpolicy_api_version")]
+    pub api_version: String,
+    #[serde(default = "default_networkpolicy_kind")]
+    pub kind: String,
     pub metadata: ObjectMeta,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spec: Option<NetworkPolicySpec>,
@@ -1421,6 +1480,10 @@ pub struct NamespaceStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Namespace {
+    #[serde(rename = "apiVersion", default = "default_namespace_api_version")]
+    pub api_version: String,
+    #[serde(default = "default_namespace_kind")]
+    pub kind: String,
     pub metadata: ObjectMeta,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spec: Option<NamespaceSpec>,
@@ -1434,8 +1497,10 @@ pub struct Namespace {
 #[serde(rename_all = "camelCase")]
 pub struct NodeSpec {
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "podCIDR")]
     pub pod_cidr: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "podCIDRs")]
     pub pod_cidrs: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_id: Option<String>,
@@ -1532,6 +1597,10 @@ pub struct NodeStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Node {
+    #[serde(rename = "apiVersion", default = "default_node_api_version")]
+    pub api_version: String,
+    #[serde(default = "default_node_kind")]
+    pub kind: String,
     pub metadata: ObjectMeta,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spec: Option<NodeSpec>,
@@ -1579,6 +1648,10 @@ pub struct EndpointSubset {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Endpoints {
+    #[serde(rename = "apiVersion", default = "default_endpoints_api_version")]
+    pub api_version: String,
+    #[serde(default = "default_endpoints_kind")]
+    pub kind: String,
     pub metadata: ObjectMeta,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subsets: Option<Vec<EndpointSubset>>,
@@ -1629,6 +1702,10 @@ pub struct EndpointSlicePort {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct EndpointSlice {
+    #[serde(rename = "apiVersion", default = "default_endpointslice_api_version")]
+    pub api_version: String,
+    #[serde(default = "default_endpointslice_kind")]
+    pub kind: String,
     pub address_type: String,
     pub endpoints: Vec<EndpointSliceEndpoint>,
     pub metadata: ObjectMeta,
@@ -1657,6 +1734,10 @@ pub struct EventSeries {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Event {
+    #[serde(rename = "apiVersion", default = "default_event_api_version")]
+    pub api_version: String,
+    #[serde(default = "default_event_kind")]
+    pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub action: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1692,6 +1773,10 @@ pub struct Event {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct StorageClass {
+    #[serde(rename = "apiVersion", default = "default_storageclass_api_version")]
+    pub api_version: String,
+    #[serde(default = "default_storageclass_kind")]
+    pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub allow_volume_expansion: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1876,6 +1961,39 @@ fn default_role() -> String { "spoke".to_string() }
 fn default_priority() -> u32 { 1000 }
 fn default_header_operator() -> String { "eq".to_string() }
 
+// ── Standard k8s default functions ─────────────────────────────────────────
+
+fn default_pod_api_version() -> String { "v1".to_string() }
+fn default_pod_kind() -> String { "Pod".to_string() }
+fn default_service_api_version() -> String { "v1".to_string() }
+fn default_service_kind() -> String { "Service".to_string() }
+fn default_configmap_api_version() -> String { "v1".to_string() }
+fn default_configmap_kind() -> String { "ConfigMap".to_string() }
+fn default_secret_api_version() -> String { "v1".to_string() }
+fn default_secret_kind() -> String { "Secret".to_string() }
+fn default_persistentvolume_api_version() -> String { "v1".to_string() }
+fn default_persistentvolume_kind() -> String { "PersistentVolume".to_string() }
+fn default_persistentvolumeclaim_api_version() -> String { "v1".to_string() }
+fn default_persistentvolumeclaim_kind() -> String { "PersistentVolumeClaim".to_string() }
+fn default_deployment_api_version() -> String { "apps/v1".to_string() }
+fn default_deployment_kind() -> String { "Deployment".to_string() }
+fn default_ingress_api_version() -> String { "networking.k8s.io/v1".to_string() }
+fn default_ingress_kind() -> String { "Ingress".to_string() }
+fn default_networkpolicy_api_version() -> String { "networking.k8s.io/v1".to_string() }
+fn default_networkpolicy_kind() -> String { "NetworkPolicy".to_string() }
+fn default_namespace_api_version() -> String { "v1".to_string() }
+fn default_namespace_kind() -> String { "Namespace".to_string() }
+fn default_node_api_version() -> String { "v1".to_string() }
+fn default_node_kind() -> String { "Node".to_string() }
+fn default_endpoints_api_version() -> String { "v1".to_string() }
+fn default_endpoints_kind() -> String { "Endpoints".to_string() }
+fn default_endpointslice_api_version() -> String { "discovery.k8s.io/v1".to_string() }
+fn default_endpointslice_kind() -> String { "EndpointSlice".to_string() }
+fn default_event_api_version() -> String { "v1".to_string() }
+fn default_event_kind() -> String { "Event".to_string() }
+fn default_storageclass_api_version() -> String { "storage.k8s.io/v1".to_string() }
+fn default_storageclass_kind() -> String { "StorageClass".to_string() }
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct VNet {
     #[serde(rename = "apiVersion", default = "default_api_version")]
@@ -1948,10 +2066,10 @@ pub struct NsgSpec {
 pub struct NsgRule {
     pub name: String,
     pub action: String,
-    #[serde(default)]
-    pub src_cidrs: Vec<String>,
-    #[serde(default)]
-    pub dst_cidrs: Vec<String>,
+    #[serde(alias = "src_cidrs", default)]
+    pub srcCIDRs: Vec<String>,
+    #[serde(alias = "dst_cidrs", default)]
+    pub dstCIDRs: Vec<String>,
     #[serde(default)]
     pub ports: Vec<String>,
     #[serde(default)]
@@ -2130,6 +2248,7 @@ impl ResourceTracker {
 #[serde(rename_all = "camelCase")]
 pub struct NodeRecord {
     pub node_name: String,
+    #[serde(rename = "nodeIP")]
     pub node_ip: String,
     pub last_seen: i64,
     pub state: NodeState,
