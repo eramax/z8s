@@ -83,6 +83,12 @@ pub async fn api_groups() -> Json<APIGroupList> {
                 preferred_version: Some(gvd("z8s.io/v1", "v1")),
                 server_address_by_client_cidrs: None,
             },
+            APIGroup {
+                name: "apiextensions.k8s.io".into(),
+                versions: vec![gvd("apiextensions.k8s.io/v1", "v1")],
+                preferred_version: Some(gvd("apiextensions.k8s.io/v1", "v1")),
+                server_address_by_client_cidrs: None,
+            },
         ],
     })
 }
@@ -124,16 +130,50 @@ pub async fn api_discovery_v1_resources() -> Json<APIResourceList> {
     })
 }
 
-pub async fn api_z8s_v1_resources() -> Json<APIResourceList> {
-    Json(APIResourceList {
-        group_version: "z8s.io/v1".into(),
-        resources: vec![
-            api_resource("vnets", "vnet", false, "VNet", &["get", "list", "create", "delete"], &[], &["all"]),
-            api_resource("subnets", "subnet", false, "Subnet", &["get", "list", "create", "delete"], &[], &["all"]),
-            api_resource("nsgs", "nsg", false, "NSG", &["get", "list", "create", "delete"], &[], &["all"]),
-            api_resource("routetables", "routetable", false, "RouteTable", &["get", "list", "create", "delete"], &[], &["all"]),
-        ],
-    })
+pub async fn api_z8s_v1_resources() -> Json<serde_json::Value> {
+    fn col(name: &str, json_path: &str, col_type: &str) -> serde_json::Value {
+        serde_json::json!({"name": name, "type": col_type, "jsonPath": json_path, "description": name})
+    }
+    fn resource_with_cols(name: &str, singular: &str, kind: &str, verbs: &[&str], short: &[&str], cols: Vec<serde_json::Value>) -> serde_json::Value {
+        let mut r = serde_json::json!({
+            "name": name, "singularName": singular, "namespaced": false, "kind": kind,
+            "verbs": verbs, "categories": ["all"],
+        });
+        if !short.is_empty() { r["shortNames"] = serde_json::json!(short); }
+        if !cols.is_empty() { r["additionalPrinterColumns"] = serde_json::json!(cols); }
+        r
+    }
+    Json(serde_json::json!({
+        "groupVersion": "z8s.io/v1",
+        "resources": [
+            resource_with_cols("vnets", "vnet", "VNet", &["get","list","create","delete"], &["vn"],
+                vec![col("CIDR", ".spec.cidr", "string"),
+                     col("Role", ".spec.role", "string"),
+                     col("Internet", ".spec.internetAccess", "boolean"),
+                     col("Subnets", ".spec._subnetCount", "integer"),
+                     col("Pods", ".spec._podCount", "integer"),
+                     col("Services", ".spec._serviceCount", "integer"),
+                     col("Age", ".metadata.creationTimestamp", "date")]),
+            resource_with_cols("subnets", "subnet", "Subnet", &["get","list","create","delete"], &["sn"],
+                vec![col("CIDR", ".spec.cidr", "string"),
+                     col("VNet", ".spec.vnet", "string"),
+                     col("Pods", ".spec._podCount", "integer"),
+                     col("Services", ".spec._serviceCount", "integer"),
+                     col("Age", ".metadata.creationTimestamp", "date")]),
+            resource_with_cols("nsgs", "nsg", "NSG", &["get","list","create","delete"], &["nsg"],
+                vec![col("Targets", ".spec._targets", "string"),
+                     col("Rules", ".spec._ruleCount", "integer"),
+                     col("Allows", ".spec._allowCount", "integer"),
+                     col("Denies", ".spec._denyCount", "integer"),
+                     col("Age", ".metadata.creationTimestamp", "date")]),
+            resource_with_cols("routetables", "routetable", "RouteTable", &["get","list","create","delete"], &["rt"],
+                vec![col("Rules", ".spec._ruleCount", "integer"),
+                     col("Allows", ".spec._allowCount", "integer"),
+                     col("Denies", ".spec._denyCount", "integer"),
+                     col("Methods", ".spec._methods", "string"),
+                     col("Age", ".metadata.creationTimestamp", "date")]),
+        ]
+    }))
 }
 
 pub async fn api_networking_v1_resources() -> Json<APIResourceList> {
@@ -142,6 +182,15 @@ pub async fn api_networking_v1_resources() -> Json<APIResourceList> {
         resources: vec![
             api_resource("ingresses", "ingress", true, "Ingress", &["get", "list", "watch", "create", "update", "delete"], &["ing"], &["all"]),
             api_resource("networkpolicies", "networkpolicy", true, "NetworkPolicy", &["get", "list", "watch", "create", "update", "delete"], &["netpol"], &["all"]),
+        ],
+    })
+}
+
+pub async fn api_extensions_v1_resources() -> Json<APIResourceList> {
+    Json(APIResourceList {
+        group_version: "apiextensions.k8s.io/v1".into(),
+        resources: vec![
+            api_resource("customresourcedefinitions", "customresourcedefinition", false, "CustomResourceDefinition", &["get", "list", "watch", "create", "update", "delete"], &["crd"], &[]),
         ],
     })
 }
@@ -215,6 +264,68 @@ pub async fn readyz() -> &'static str { "ok" }
 
 pub async fn livez() -> &'static str { "ok" }
 
+fn make_crd(name: &str, group: &str, kind: &str, plural: &str, singular: &str, cols: Vec<serde_json::Value>) -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": "apiextensions.k8s.io/v1",
+        "kind": "CustomResourceDefinition",
+        "metadata": {"name": format!("{}.{}", plural, group), "uid": "00000000-0000-0000-0000-000000000000", "creationTimestamp": "2026-01-01T00:00:00Z"},
+        "spec": {
+            "group": group,
+            "scope": "Cluster",
+            "names": {"kind": kind, "plural": plural, "singular": singular, "shortNames": []},
+            "versions": [{
+                "name": "v1",
+                "served": true,
+                "storage": true,
+                "schema": {"openAPIV3Schema": {"type": "object", "properties": {"spec": {"type": "object"}, "status": {"type": "object"}}}},
+                "additionalPrinterColumns": cols,
+            }]
+        }
+    })
+}
+
+fn crd_col(name: &str, json_path: &str, col_type: &str) -> serde_json::Value {
+    serde_json::json!({"name": name, "type": col_type, "jsonPath": json_path})
+}
+
+fn all_crds() -> Vec<serde_json::Value> {
+    vec![
+        make_crd("vnets.z8s.io", "z8s.io", "VNet", "vnets", "vnet",
+            vec![crd_col("CIDR", ".spec.cidr", "string"), crd_col("Role", ".spec.role", "string"),
+                 crd_col("Internet", ".spec.internetAccess", "boolean"),
+                 crd_col("Subnets", ".spec._subnetCount", "integer"),
+                 crd_col("Pods", ".spec._podCount", "integer"),
+                 crd_col("Services", ".spec._serviceCount", "integer"),
+                 crd_col("Age", ".metadata.creationTimestamp", "date")]),
+        make_crd("subnets.z8s.io", "z8s.io", "Subnet", "subnets", "subnet",
+            vec![crd_col("CIDR", ".spec.cidr", "string"), crd_col("VNet", ".spec.vnet", "string"),
+                 crd_col("Pods", ".spec._podCount", "integer"),
+                 crd_col("Services", ".spec._serviceCount", "integer"),
+                 crd_col("Age", ".metadata.creationTimestamp", "date")]),
+        make_crd("nsgs.z8s.io", "z8s.io", "NSG", "nsgs", "nsg",
+            vec![crd_col("Targets", ".spec._targets", "string"), crd_col("Rules", ".spec._ruleCount", "integer"),
+                 crd_col("Allows", ".spec._allowCount", "integer"), crd_col("Denies", ".spec._denyCount", "integer"),
+                 crd_col("Age", ".metadata.creationTimestamp", "date")]),
+        make_crd("routetables.z8s.io", "z8s.io", "RouteTable", "routetables", "routetable",
+            vec![crd_col("Rules", ".spec._ruleCount", "integer"), crd_col("Allows", ".spec._allowCount", "integer"),
+                 crd_col("Denies", ".spec._denyCount", "integer"), crd_col("Methods", ".spec._methods", "string"),
+                 crd_col("Age", ".metadata.creationTimestamp", "date")]),
+    ]
+}
+
+pub async fn list_crds() -> Json<serde_json::Value> {
+    let items: Vec<serde_json::Value> = all_crds();
+    Json(serde_json::json!({"apiVersion": "apiextensions.k8s.io/v1", "kind": "CustomResourceDefinitionList", "items": items, "metadata": {"resourceVersion": "1"}}))
+}
+
+pub async fn get_crd(Path(name): Path<String>) -> Result<Json<serde_json::Value>, ApiError> {
+    for crd in all_crds() {
+        if crd["metadata"]["name"].as_str() == Some(&name) {
+            return Ok(Json(crd));
+        }
+    }
+    Err(ApiError::not_found(format!("customresourcedefinition \"{}\" not found", name)))
+}
 
 
 
@@ -232,6 +343,9 @@ pub fn routes() -> Router<AppState> {
         .route("/apis/authorization.k8s.io/v1", get(api_authz_v1_resources))
         .route("/apis/authorization.k8s.io/v1/selfsubjectaccessreviews", post(self_subject_access_review))
         .route("/apis/authorization.k8s.io/v1/subjectaccessreviews", post(self_subject_access_review))
+        .route("/apis/apiextensions.k8s.io/v1", get(api_extensions_v1_resources))
+        .route("/apis/apiextensions.k8s.io/v1/customresourcedefinitions", get(list_crds))
+        .route("/apis/apiextensions.k8s.io/v1/customresourcedefinitions/{name}", get(get_crd))
         .route("/openapi/v2", get(openapi_v2))
         .route("/openapi/v3", get(openapi_v3))
         .route("/version", get(version_handler))

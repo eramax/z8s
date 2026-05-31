@@ -1,5 +1,11 @@
 use crate::api::server::*;
 
+pub fn wants_table(accept: &axum::http::HeaderMap) -> bool {
+    accept.get("accept")
+        .and_then(|v| v.to_str().ok())
+        .map_or(false, |v| v.contains("as=Table"))
+}
+
 pub async fn generic_list(s: &AppState, kind: &str, list_kind: &str) -> Json<serde_json::Value> {
     let items: Vec<serde_json::Value> = s.store.get_by_kind(kind).await
         .into_iter().filter_map(|t| serde_json::to_value(&t.resource).ok()).collect();

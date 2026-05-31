@@ -73,6 +73,20 @@ impl ProcessTracker {
             .collect()
     }
 
+    /// Get all pod IPs (name → IP) for enrichment.
+    pub async fn pod_ips(&self) -> Vec<(String, std::net::Ipv4Addr)> {
+        let running = self.running.lock().await;
+        let mut ips = Vec::new();
+        for (cid, rc) in running.iter() {
+            if let Some(ip) = rc.instance.pod_ip {
+                // Extract pod name from container ID (pod-container)
+                let pod_name = cid.rsplit_once('-').map_or(cid.as_str(), |(pod, _)| pod);
+                ips.push((pod_name.to_string(), ip));
+            }
+        }
+        ips
+    }
+
     /// Get the pod IP for a given pod name.
     pub async fn pod_ip(&self, pod_name: &str) -> Option<std::net::Ipv4Addr> {
         let prefix = format!("{}-", pod_name);
