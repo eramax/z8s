@@ -619,21 +619,39 @@ impl ProcessSupervisor {
         let ContainerSpawnCtx { entrypoint, cmd_args, env_vars, rootfs_path, container_id, pod_uid, image, container_name, volumes, run_as_user, run_as_group, isolate_net, privileged, extra_caps, working_dir, probes, subnet } = ctx;
         let pipes = create_std_pipes()?;
         let StdPipes { stdout_r, stdout_w, stderr_r, stderr_w, sync_r, sync_w, ack_r, ack_w } = pipes;
+        let (gc_pid_r, gc_pid_w) = nix::unistd::pipe()
+            .context("Failed to create grandchild PID pipe")?;
         let rootfs_owned = rootfs_path.to_string();
         let entrypoint_owned = entrypoint.to_string();
         let args_owned = cmd_args.to_vec();
         let env_owned = Self::merge_env(env_vars, &rootfs_owned);
 
+        // Fork #1: create intermediate child that will unshare namespaces (including PID)
+        // and then fork #2 to place the grandchild (actual container) in the new PID ns.
         match unsafe { nix::unistd::fork() } {
-            Ok(nix::unistd::ForkResult::Parent { child }) => {
+            Ok(nix::unistd::ForkResult::Parent { child: _intermediate }) => {
+                // Parent: close write ends and unused fds
                 drop(stdout_w);
                 drop(stderr_w);
                 drop(sync_w);
                 drop(ack_r);
-                let pid = child.as_raw() as u32;
-                info!("Container {} started with PID {} (root ns)", container_id, pid);
+                drop(gc_pid_w);
+
+                // Read grandchild PID from pipe (written by intermediate child)
+                let mut buf = [0u8; 4];
+                let n = nix::unistd::read(&gc_pid_r, &mut buf)
+                    .context("Failed to read grandchild PID")?;
+                if n != 4 {
+                    anyhow::bail!("Incomplete grandchild PID: got {} bytes", n);
+                }
+                let pid = u32::from_ne_bytes(buf);
+                drop(gc_pid_r);
+
+                info!("Container {} started with PID {} (root ns, pid ns)", container_id, pid);
                 self.cgroup_manager.add_pid_to_cgroup(pod_uid, pid)?;
 
+                // handle_veth_netns reads the sync byte from grandchild via sync_r
+                // and configures veth using grandchild's PID (for setns)
                 let (pod_ip, host_veth_ifindex) = self.handle_veth_netns(pod_uid, pid, isolate_net, &sync_r, &ack_w, subnet.as_deref());
 
                 drop(sync_r);
@@ -648,34 +666,84 @@ impl ProcessSupervisor {
                 Ok(Self::build_running_from_instance(instance, log_buffer, &probes))
             }
             Ok(nix::unistd::ForkResult::Child) => {
-                Self::setup_child_pipes(stdout_r, stderr_r, stdout_w, stderr_w);
+                // ── Intermediate child ──────────────────────────────────────────
+                drop(gc_pid_r);
+
                 let _ = nix::unistd::setsid();
                 let pod_hostname = container_id.rsplit_once('-').map_or(container_id, |(pod, _)| pod);
-                let isolation = match rootfs::child_enter_ns_root(&rootfs_owned, &volumes, isolate_net, pod_hostname) {
-                    Ok(i) => i,
+
+                // Phase 1: unshare namespaces including CLONE_NEWPID.
+                // This puts future children in a new PID namespace.
+                if let Err(e) = rootfs::unshare_container_ns(isolate_net, pod_hostname, true) {
+                    error!("z8s: namespace setup failed: {}", e);
+                    std::process::exit(1);
+                }
+
+                // Fork #2 BEFORE closing fds — grandchild inherits all open fds.
+                match unsafe { nix::unistd::fork() } {
+                    Ok(nix::unistd::ForkResult::Parent { child: gc }) => {
+                        // Intermediate child (after fork #2):
+                        // Grandchild inherited all fds — close everything except gc_pid_w.
+                        drop(stdout_r);
+                        drop(stderr_r);
+                        drop(sync_r);
+                        drop(ack_w);
+                        drop(stdout_w);
+                        drop(stderr_w);
+                        drop(sync_w);
+                        drop(ack_r);
+
+                        // Write grandchild PID to parent, then exit immediately.
+                        // The grandchild is reparented to z8s (PR_SET_CHILD_SUBREAPER)
+                        // and ProcessTracker::reap_zombies catches it directly.
+                        let gc_pid = gc.as_raw() as u32;
+                        let _ = nix::unistd::write(&gc_pid_w, &gc_pid.to_ne_bytes());
+                        drop(gc_pid_w);
+
+                        std::process::exit(0);
+                    }
+                    Ok(nix::unistd::ForkResult::Child) => {
+                        // ── Grandchild (PID 1 in new PID ns) ───────────────────
+                        drop(gc_pid_w);
+                        drop(sync_r);
+                        drop(ack_w);
+
+                        // Redirect container stdout/stderr to pipe
+                        Self::setup_child_pipes(stdout_r, stderr_r, stdout_w, stderr_w);
+
+                        // Phase 2: set up rootfs isolation (pivot_root/chroot + mount)
+                        let isolation = match rootfs::setup_container_rootfs(&rootfs_owned, &volumes) {
+                            Ok(i) => i,
+                            Err(e) => {
+                                error!("z8s: rootfs setup failed: {}", e);
+                                std::process::exit(1);
+                            }
+                        };
+
+                        // Sync with parent for veth setup (if isolate_net)
+                        if isolate_net {
+                            nix::unistd::write(&sync_w, b"S").ok();
+                            let mut ack = [0u8; 1];
+                            let _ = nix::unistd::read(&ack_r, &mut ack);
+                        }
+                        drop(sync_w);
+                        drop(ack_r);
+
+                        Self::child_setup_privileges(run_as_group, run_as_user, &working_dir, privileged, &extra_caps, isolation);
+
+                        let (exec_path, prog_args) = Self::argv_for_isolation(
+                            &entrypoint_owned,
+                            &args_owned,
+                            &rootfs_owned,
+                            isolation,
+                        );
+                        Self::execvpe_container(&exec_path, &prog_args, &env_owned, &rootfs_owned, isolation);
+                    }
                     Err(e) => {
-                        error!("z8s: root namespace setup failed: {}", e);
+                        error!("z8s: second fork failed: {}", e);
                         std::process::exit(1);
                     }
-                };
-
-                if isolate_net {
-                    nix::unistd::write(&sync_w, b"S").ok();
-                    let mut ack = [0u8; 1];
-                    let _ = nix::unistd::read(&ack_r, &mut ack);
                 }
-                drop(sync_w);
-                drop(ack_r);
-
-                Self::child_setup_privileges(run_as_group, run_as_user, &working_dir, privileged, &extra_caps, isolation);
-
-                let (exec_path, prog_args) = Self::argv_for_isolation(
-                    &entrypoint_owned,
-                    &args_owned,
-                    &rootfs_owned,
-                    isolation,
-                );
-                Self::execvpe_container(&exec_path, &prog_args, &env_owned, &rootfs_owned, isolation);
             }
             Err(e) => {
                 drop(stdout_r);
@@ -686,6 +754,8 @@ impl ProcessSupervisor {
                 drop(sync_w);
                 drop(ack_r);
                 drop(ack_w);
+                drop(gc_pid_r);
+                drop(gc_pid_w);
                 anyhow::bail!("Failed to fork: {}", e);
             }
         }
@@ -950,11 +1020,11 @@ impl ProcessSupervisor {
         if let Some(rc) = running.remove(container_id) {
             if let Some(pid) = rc.instance.pid {
                 info!("Stopping container {} (PID {})", container_id, pid);
+                // Container is PID 1 in its own PID namespace. SIGTERM from the ancestor
+                // namespace is blocked unless the process registered a handler, so use
+                // SIGKILL directly (always delivered to PID 1 from ancestor ns).
                 // Kill the entire process group (container is session leader via setsid())
-                // Negative PID targets the process group, killing orphaned children
                 let pgid = nix::unistd::Pid::from_raw(-(pid as i32));
-                let _ = kill(pgid, Signal::SIGTERM);
-                tokio::time::sleep(Duration::from_millis(500)).await;
                 let _ = kill(pgid, Signal::SIGKILL);
                 // Also kill the main PID in case the pgid kill missed it
                 let _ = kill(nix::unistd::Pid::from_raw(pid as i32), Signal::SIGKILL);

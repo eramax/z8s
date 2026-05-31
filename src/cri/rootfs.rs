@@ -524,31 +524,34 @@ pub fn child_enter_ns_fork(
     Ok(RootfsIsolation::Degraded)
 }
 
-pub fn child_enter_ns_root(
-    rootfs_path: &str,
-    volumes: &[crate::cri::volumes::ResolvedVolume],
-    isolate_net: bool,
-    hostname: &str,
-) -> Result<RootfsIsolation> {
-    // Do NOT include CLONE_NEWPID: unshare(CLONE_NEWPID) only affects future fork()s from
-    // this child, not the child itself. The kernel then requires a fresh /proc mount scoped
-    // to the new PID namespace before the exec'd process can fork workers. Without a proper
-    // double-fork / subreaper setup (which requires z8s to be PID 1), multi-process daemons
-    // like nginx get ENOMEM when spawning workers. CLONE_NEWNS + chroot/pivot_root provides
-    // sufficient filesystem isolation without breaking fork() inside the container.
+/// Phase 1 of container namespace setup: create namespaces, set hostname, bring up loopback.
+/// When `pid_ns` is true, also creates a new PID namespace (first child of the caller
+/// becomes PID 1). This is called by the intermediate child before the second fork.
+pub fn unshare_container_ns(isolate_net: bool, hostname: &str, pid_ns: bool) -> Result<()> {
     let mut flags = CloneFlags::CLONE_NEWNS
         | CloneFlags::CLONE_NEWUTS
         | CloneFlags::CLONE_NEWIPC;
     if isolate_net {
         flags |= CloneFlags::CLONE_NEWNET;
     }
-    unshare(flags).context("Failed to unshare mount/uts/ipc")?;
+    if pid_ns {
+        flags |= CloneFlags::CLONE_NEWPID;
+    }
+    unshare(flags).context("Failed to unshare namespaces")?;
     sethostname(hostname).context("Failed to set container hostname")?;
-
     if isolate_net {
         crate::netmux::netlink::ensure_loopback_up().ok();
     }
+    Ok(())
+}
 
+/// Phase 2 of container namespace setup: set up rootfs isolation in the container's
+/// mount namespace (pivot_root or chroot with fresh proc/sysfs mounts).
+/// Called by the grandchild in the double-fork approach, or by `child_enter_ns_root`.
+pub fn setup_container_rootfs(
+    rootfs_path: &str,
+    volumes: &[crate::cri::volumes::ResolvedVolume],
+) -> Result<RootfsIsolation> {
     mount(
         None::<&str>,
         "/",
@@ -582,6 +585,18 @@ pub fn child_enter_ns_root(
     .context("Failed to mount /dev")?;
     info!("Container filesystem mounted (root mode)");
     Ok(RootfsIsolation::Chroot)
+}
+
+/// Combined namespace + rootfs setup for the single-fork path (backward compat).
+/// Calls `unshare_container_ns` then `setup_container_rootfs`.
+pub fn child_enter_ns_root(
+    rootfs_path: &str,
+    volumes: &[crate::cri::volumes::ResolvedVolume],
+    isolate_net: bool,
+    hostname: &str,
+) -> Result<RootfsIsolation> {
+    unshare_container_ns(isolate_net, hostname, false)?;
+    setup_container_rootfs(rootfs_path, volumes)
 }
 
 /// Parse /proc/self/mountinfo to make the parent mount of `rootfs` MS_PRIVATE.
@@ -841,18 +856,14 @@ pub fn drop_capabilities(privileged: bool, extra_caps: &[String]) {
 
     let mut keep: HashSet<Capability> = [
         Capability::CAP_CHOWN,
-        Capability::CAP_DAC_OVERRIDE,
         Capability::CAP_FSETID,
         Capability::CAP_FOWNER,
-        Capability::CAP_MKNOD,
-        Capability::CAP_NET_RAW,
         Capability::CAP_SETGID,
         Capability::CAP_SETUID,
         Capability::CAP_SETFCAP,
         Capability::CAP_SETPCAP,
         Capability::CAP_NET_BIND_SERVICE,
         Capability::CAP_SYS_CHROOT,
-        Capability::CAP_KILL,
         Capability::CAP_AUDIT_WRITE,
     ]
     .iter()

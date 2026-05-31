@@ -60,7 +60,8 @@ pub async fn build_spec(resource: &AnyResource, store: &dyn StoreBackend) -> Con
         let declared_ports: Vec<u16> = container.ports.as_ref()
             .map(|ps| ps.iter().map(|p| p.container_port as u16).collect())
             .unwrap_or_default();
-        let isolated_net = !declared_ports.is_empty();
+        let host_network = pod.and_then(|p| p.spec.as_ref()?.host_network).unwrap_or(false);
+        let isolated_net = if host_network { false } else { true };
 
         let (entrypoint, args) = if let Some(cmd) = &container.command {
             if cmd.is_empty() {

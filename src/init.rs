@@ -1,8 +1,7 @@
 use anyhow::Result;
-use nix::errno::Errno;
+use nix::sys::prctl;
 use nix::sys::signal::Signal;
 use nix::sys::signalfd::SignalFd;
-use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
 use std::os::fd::AsRawFd;
 use tokio::io::unix::AsyncFd;
@@ -14,8 +13,11 @@ pub struct InitHandler {
 
 impl InitHandler {
     pub fn new() -> Result<Self> {
+        // Become a child subreaper so orphaned descendants (e.g. grandchild from
+        // double-fork for PID namespaces) are reparented to us instead of init(1).
+        prctl::set_child_subreaper(true).ok();
+
         let mut mask = nix::sys::signal::SigSet::empty();
-        mask.add(Signal::SIGCHLD);
         mask.add(Signal::SIGTERM);
         mask.add(Signal::SIGINT);
         mask.add(Signal::SIGHUP);
@@ -35,9 +37,7 @@ impl InitHandler {
                 match self.signalfd.read_signal() {
                     Ok(Some(siginfo)) => {
                         let signo = siginfo.ssi_signo as i32;
-                        if signo == Signal::SIGCHLD as i32 {
-                            self.reap_zombies();
-                        } else if signo == Signal::SIGTERM as i32
+                        if signo == Signal::SIGTERM as i32
                             || signo == Signal::SIGINT as i32
                         {
                             info!("Received shutdown signal, initiating graceful shutdown");
@@ -57,26 +57,6 @@ impl InitHandler {
                         break;
                     }
                 }
-            }
-        }
-    }
-
-    fn reap_zombies(&self) {
-        loop {
-            match waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG)) {
-                Ok(WaitStatus::Exited(pid, status)) => {
-                    info!("Reaped child {} exited with status {}", pid, status);
-                }
-                Ok(WaitStatus::Signaled(pid, sig, _core_dumped)) => {
-                    info!("Reaped child {} killed by signal {:?}", pid, sig);
-                }
-                Ok(WaitStatus::StillAlive) => break,
-                Err(Errno::ECHILD) => break,
-                Err(e) => {
-                    error!("waitpid error: {}", e);
-                    break;
-                }
-                _ => break,
             }
         }
     }
