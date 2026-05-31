@@ -3,7 +3,8 @@ use anyhow::{Context, Result};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::types::{AnyResource, ResourceState, ResourceStore, ResourceTracker};
+use crate::types::{AnyResource, ResourceState, ResourceTracker};
+use crate::store::StoreBackend;
 use crate::components::{Component, ReconcileContext, ResourceCategory};
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::core::v1::Pod;
@@ -58,11 +59,11 @@ pub fn create_pod_from_template(deploy: &Deployment, name: &str) -> Result<Pod> 
 }
 
 pub struct DeploymentResource {
-    pub store: Arc<ResourceStore>,
+    pub store: Arc<dyn StoreBackend>,
 }
 
 impl DeploymentResource {
-    pub fn new(store: Arc<ResourceStore>) -> Self {
+    pub fn new(store: Arc<dyn StoreBackend>) -> Self {
         Self { store }
     }
 }

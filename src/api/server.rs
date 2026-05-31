@@ -1,4 +1,4 @@
-pub use crate::api::types::{ResourceState, ResourceStore};
+pub use crate::api::types::{ResourceState, StoreBackend, MemoryBackend};
 pub use crate::api::AnyResource;
 pub use axum::extract::{Path, State};
 pub use axum::http::{Method, StatusCode, Uri};
@@ -45,7 +45,7 @@ type EventStore = Arc<Mutex<Vec<Event>>>;
 
 #[derive(Clone)]
 pub struct AppState {
-    pub store: Arc<ResourceStore>,
+    pub store: Arc<dyn StoreBackend>,
     pub process_tracker: Arc<ProcessTracker>,
     pub namespaces: NamespaceStore,
     pub events: EventStore,
@@ -76,7 +76,7 @@ impl AppState {
 }
 
 pub async fn build_app_state(
-    store: Arc<ResourceStore>,
+    store: Arc<dyn StoreBackend>,
     process_tracker: Arc<ProcessTracker>,
     registry: Arc<ComponentRegistry>,
     ctx: Arc<ReconcileContext>,
@@ -122,7 +122,7 @@ pub fn build_router(state: AppState) -> Router {
 }
 
 pub async fn run_server(
-    store: Arc<ResourceStore>,
+    store: Arc<dyn StoreBackend>,
     process_tracker: Arc<ProcessTracker>,
     registry: Arc<ComponentRegistry>,
     ctx: Arc<ReconcileContext>,
@@ -432,12 +432,12 @@ mod tests {
     use tower::ServiceExt;
 
     pub async fn make_app() -> axum::Router {
-        let store = Arc::new(ResourceStore::new());
+        let store: Arc<dyn StoreBackend> = Arc::new(MemoryBackend::new());
         let cgroup = Arc::new(crate::cri::cgroup::CgroupManager::new()
             .unwrap_or_else(|_| crate::cri::cgroup::CgroupManager::new().unwrap()));
         let image = Arc::new(crate::cri::image::ImageManager::new()
             .unwrap_or_else(|_| crate::cri::image::ImageManager::new().unwrap()));
-        let supervisor = Arc::new(crate::cri::runtime::ProcessSupervisor::new(image, cgroup.clone(), Arc::new(crate::netmux::NetMux::new(&crate::config::get().pod_cidr).unwrap()), store.clone()));
+        let supervisor = Arc::new(crate::cri::runtime::ProcessSupervisor::new(image, cgroup.clone(), Arc::new(crate::netmux::NetMux::new(&crate::config::get().pod_cidr).unwrap())));
         let container_runtime = Arc::new(crate::cri::runtime::ContainerRuntime::new(supervisor.clone(), cgroup));
         let process_tracker = Arc::new(ProcessTracker {
             running: supervisor.running.clone(),
@@ -462,13 +462,13 @@ mod tests {
         build_router(state)
     }
 
-    pub async fn make_app_with_store() -> (axum::Router, Arc<ResourceStore>) {
-        let store = Arc::new(ResourceStore::new());
+    pub async fn make_app_with_store() -> (axum::Router, Arc<dyn StoreBackend>) {
+        let store: Arc<dyn StoreBackend> = Arc::new(MemoryBackend::new());
         let cgroup = Arc::new(crate::cri::cgroup::CgroupManager::new()
             .unwrap_or_else(|_| crate::cri::cgroup::CgroupManager::new().unwrap()));
         let image = Arc::new(crate::cri::image::ImageManager::new()
             .unwrap_or_else(|_| crate::cri::image::ImageManager::new().unwrap()));
-        let supervisor = Arc::new(crate::cri::runtime::ProcessSupervisor::new(image, cgroup.clone(), Arc::new(crate::netmux::NetMux::new(&crate::config::get().pod_cidr).unwrap()), store.clone()));
+        let supervisor = Arc::new(crate::cri::runtime::ProcessSupervisor::new(image, cgroup.clone(), Arc::new(crate::netmux::NetMux::new(&crate::config::get().pod_cidr).unwrap())));
         let container_runtime = Arc::new(crate::cri::runtime::ContainerRuntime::new(supervisor.clone(), cgroup));
         let process_tracker = Arc::new(ProcessTracker {
             running: supervisor.running.clone(),

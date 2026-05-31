@@ -1,4 +1,5 @@
-use crate::types::{AnyResource, ResourceStore};
+use crate::types::AnyResource;
+use crate::store::StoreBackend;
 use crate::scheduler::process::ProcessTracker;
 use k8s_openapi::api::core::v1::Service;
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
@@ -12,15 +13,15 @@ use crate::netmux::NetMux;
 
 
 pub struct NetworkManager {
-    pub store: Arc<ResourceStore>,
-    pub process_tracker: Arc<ProcessTracker>,
+    pub store: Arc<dyn StoreBackend>,
+    process_tracker: Arc<ProcessTracker>,
     proxies: Mutex<HashSet<String>>,
     counter: Arc<AtomicUsize>,
     netmux: Arc<NetMux>,
 }
 
 impl NetworkManager {
-    pub fn new(store: Arc<ResourceStore>, process_tracker: Arc<ProcessTracker>, netmux: Arc<NetMux>) -> Self {
+    pub fn new(store: Arc<dyn StoreBackend>, process_tracker: Arc<ProcessTracker>, netmux: Arc<NetMux>) -> Self {
         Self {
             store,
             process_tracker,
@@ -75,12 +76,12 @@ impl NetworkManager {
                     IntOrString::Int(n) => *n as u16,
                     IntOrString::String(name) => {
                         // Look up the named port from pod container specs
-                        Self::resolve_named_port(&self.store, &svc_ns, name).await.unwrap_or(svc_port_num)
+                        Self::resolve_named_port(self.store.as_ref(), &svc_ns, name).await.unwrap_or(svc_port_num)
                     }
                 };
 
                 // Resolve backend pods matching the selector
-                let backends = Self::resolve_backend_pods(&self.store, &self.process_tracker, &selector, &svc_ns, container_port).await;
+                let backends = Self::resolve_backend_pods(self.store.as_ref(), &self.process_tracker, &selector, &svc_ns, container_port).await;
                 debug!("resolve_backend_pods for {}: found {} backends", key, backends.len());
                 let cluster_ip_addr: std::net::Ipv4Addr = cluster_ip.parse().unwrap_or_else(|_| {
                     debug!("ClusterIP for {} is empty, using default", key);
@@ -102,10 +103,10 @@ impl NetworkManager {
                     let container_port = match &target_port {
                         IntOrString::Int(n) => *n as u16,
                         IntOrString::String(name) => {
-                            Self::resolve_named_port(&self.store, &svc_ns, name).await.unwrap_or(svc_port.port as u16)
+                            Self::resolve_named_port(self.store.as_ref(), &svc_ns, name).await.unwrap_or(svc_port.port as u16)
                         }
                     };
-                    let backends = Self::resolve_backend_pods(&self.store, &self.process_tracker, &selector, &svc_ns, container_port).await;
+                    let backends = Self::resolve_backend_pods(self.store.as_ref(), &self.process_tracker, &selector, &svc_ns, container_port).await;
                     let cluster_ip_addr: std::net::Ipv4Addr = cluster_ip.parse().unwrap_or_else(|_| {
                         debug!("ClusterIP for {} is empty, using default", key);
                         std::net::Ipv4Addr::new(10, 96, 0, 1)
@@ -127,7 +128,7 @@ impl NetworkManager {
     /// Resolve backend pod IPs matching a service selector.
     /// Uses a cached pod list by namespace to avoid O(N×M) iteration.
     async fn resolve_backend_pods(
-        store: &ResourceStore,
+        store: &dyn StoreBackend,
         tracker: &ProcessTracker,
         selector: &BTreeMap<String, String>,
         ns: &str,
@@ -149,7 +150,7 @@ impl NetworkManager {
     }
 
     /// Resolve a named port from pod containers to a numeric port.
-    async fn resolve_named_port(store: &ResourceStore, ns: &str, name: &str) -> Option<u16> {
+    async fn resolve_named_port(store: &dyn StoreBackend, ns: &str, name: &str) -> Option<u16> {
         let pods = store.get_by_kind("Pod").await;
         for t in &pods {
             if t.resource.namespace() != ns { continue; }
@@ -255,12 +256,12 @@ use crate::types::ResourceTracker;
 use crate::components::{Component, ReconcileContext, ResourceCategory};
 
 pub struct ServiceResource {
-    pub store: Arc<ResourceStore>,
+    pub store: Arc<dyn StoreBackend>,
     pub network: Arc<NetworkManager>,
 }
 
 impl ServiceResource {
-    pub fn new(store: Arc<ResourceStore>, network: Arc<NetworkManager>) -> Self {
+    pub fn new(store: Arc<dyn StoreBackend>, network: Arc<NetworkManager>) -> Self {
         Self { store, network }
     }
 }

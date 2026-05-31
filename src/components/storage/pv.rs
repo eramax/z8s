@@ -2,16 +2,17 @@ use async_trait::async_trait;
 use anyhow::Result;
 use std::sync::Arc;
 
-use crate::types::{AnyResource, ResourceStore, ResourceTracker};
+use crate::types::{AnyResource, ResourceTracker};
+use crate::store::StoreBackend;
 use crate::components::{Component, ReconcileContext, ResourceCategory};
 use k8s_openapi::api::core::v1::{ObjectReference, PersistentVolumeClaimStatus};
 
 pub struct PvResource {
-    pub store: Arc<ResourceStore>,
+    pub store: Arc<dyn StoreBackend>,
 }
 
 impl PvResource {
-    pub fn new(store: Arc<ResourceStore>) -> Self {
+    pub fn new(store: Arc<dyn StoreBackend>) -> Self {
         Self { store }
     }
 }

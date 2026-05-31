@@ -7,12 +7,12 @@ use crate::components::{Component, ReconcileContext, ResourceCategory};
 use crate::netmux::NetMux;
 
 pub struct IngressResource {
-    pub store: Arc<crate::types::ResourceStore>,
+    pub store: Arc<dyn crate::store::StoreBackend>,
     pub netmux: Arc<NetMux>,
 }
 
 impl IngressResource {
-    pub fn new(store: Arc<crate::types::ResourceStore>, netmux: Arc<NetMux>) -> Self {
+    pub fn new(store: Arc<dyn crate::store::StoreBackend>, netmux: Arc<NetMux>) -> Self {
         Self { store, netmux }
     }
 }

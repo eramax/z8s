@@ -9,7 +9,8 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::info;
 
-use crate::types::{AnyResource, ResourceStore};
+use crate::types::AnyResource;
+use crate::store::StoreBackend;
 
 #[derive(Clone, Debug)]
 pub struct StorageClass {
@@ -37,14 +38,14 @@ pub trait StorageProvisioner: Send + Sync {
 }
 
 pub struct ProvisionerDispatcher {
-    store: Arc<ResourceStore>,
+    store: Arc<dyn StoreBackend>,
     loop_prov: loop_prov::LoopProvisioner,
     hostpath_prov: hostpath::HostPathProvisioner,
     inflight: Mutex<HashMap<String, ()>>,
 }
 
 impl ProvisionerDispatcher {
-    pub fn new(store: Arc<ResourceStore>) -> Self {
+    pub fn new(store: Arc<dyn StoreBackend>) -> Self {
         Self {
             store,
             loop_prov: loop_prov::LoopProvisioner,

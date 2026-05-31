@@ -1,4 +1,5 @@
-use crate::types::{parse_manifest_yaml, ResourceStore};
+use crate::types::parse_manifest_yaml;
+use crate::store::StoreBackend;
 use crate::api::AnyResource;
 use anyhow::{Context, Result};
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
@@ -8,13 +9,13 @@ use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
 pub struct ManifestWatcher {
-    store: Arc<ResourceStore>,
+    store: Arc<dyn StoreBackend>,
     dir: String,
     processed: Arc<RwLock<std::collections::HashSet<String>>>,
 }
 
 impl ManifestWatcher {
-    pub fn new(store: Arc<ResourceStore>) -> Self {
+    pub fn new(store: Arc<dyn StoreBackend>) -> Self {
         Self {
             store,
             dir: crate::config::get().manifests_dir.clone(),

@@ -2,15 +2,16 @@ use async_trait::async_trait;
 use anyhow::Result;
 use std::sync::Arc;
 
-use crate::types::{AnyResource, ResourceStore, ResourceTracker};
+use crate::types::{AnyResource, ResourceTracker};
+use crate::store::StoreBackend;
 use crate::components::{Component, ReconcileContext, ResourceCategory};
 
 pub struct SecretResource {
-    pub store: Arc<ResourceStore>,
+    pub store: Arc<dyn StoreBackend>,
 }
 
 impl SecretResource {
-    pub fn new(store: Arc<ResourceStore>) -> Self {
+    pub fn new(store: Arc<dyn StoreBackend>) -> Self {
         Self { store }
     }
 }

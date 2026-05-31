@@ -6,10 +6,8 @@ use k8s_openapi::api::core::v1::{
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use tokio::sync::RwLock;
 
-// ── ResourceStore ────────────────────────────────────────────────────────────
+// ── ResourceTracker ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ResourceState {
@@ -33,62 +31,6 @@ impl ResourceTracker {
             resource,
             state: ResourceState::Pending,
             last_updated: chrono::Utc::now(),
-        }
-    }
-}
-
-pub struct ResourceStore {
-    resources: RwLock<HashMap<String, ResourceTracker>>,
-}
-
-impl ResourceStore {
-    pub fn new() -> Self {
-        Self {
-            resources: RwLock::new(HashMap::new()),
-        }
-    }
-
-    pub async fn apply(&self, resource: AnyResource) -> anyhow::Result<()> {
-        let uid = resource.uid();
-        let mut store = self.resources.write().await;
-        let existing_state = store.get(&uid).map(|t| t.state.clone());
-        let mut tracker = ResourceTracker::new(resource);
-        if let Some(state) = existing_state {
-            tracker.state = state;
-        }
-        store.insert(uid, tracker);
-        Ok(())
-    }
-
-    pub async fn delete(&self, resource: &AnyResource) -> anyhow::Result<()> {
-        let uid = resource.uid();
-        self.resources.write().await.remove(&uid);
-        Ok(())
-    }
-
-    pub async fn get_all(&self) -> Vec<ResourceTracker> {
-        self.resources.read().await.values().cloned().collect()
-    }
-
-    pub async fn get_by_kind(&self, kind: &str) -> Vec<ResourceTracker> {
-        self.resources
-            .read()
-            .await
-            .values()
-            .filter(|t| t.resource.kind() == kind)
-            .cloned()
-            .collect()
-    }
-
-    pub async fn get(&self, uid: &str) -> Option<ResourceTracker> {
-        self.resources.read().await.get(uid).cloned()
-    }
-
-    pub async fn update_state(&self, uid: &str, state: ResourceState) {
-        let mut store = self.resources.write().await;
-        if let Some(tracker) = store.get_mut(uid) {
-            tracker.state = state;
-            tracker.last_updated = chrono::Utc::now();
         }
     }
 }
@@ -351,7 +293,8 @@ mod tests {
 
     #[tokio::test]
     async fn store_namespaced_resources_do_not_collide() {
-        let store = ResourceStore::new();
+        use crate::store::{MemoryBackend, StoreBackend};
+        let store = MemoryBackend::new();
 
         let cm_a_yaml = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: config\n  namespace: ns-a\ndata:\n  key: value-a\n";
         let cm_b_yaml = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: config\n  namespace: ns-b\ndata:\n  key: value-b\n";

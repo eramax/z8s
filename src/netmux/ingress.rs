@@ -7,7 +7,8 @@ use tokio::io::AsyncReadExt;
 use tracing::{info, warn};
 use k8s_openapi::api::networking::v1::Ingress;
 
-use crate::types::{AnyResource, ResourceStore};
+use crate::types::AnyResource;
+use crate::store::StoreBackend;
 
 /// L7 ingress state — Host routes per Ingress UID
 pub struct IngressState {
@@ -20,7 +21,7 @@ impl IngressState {
     }
 }
 
-pub async fn start_http(state: Arc<IngressState>, store: Arc<ResourceStore>) -> Result<()> {
+pub async fn start_http(state: Arc<IngressState>, store: Arc<dyn StoreBackend>) -> Result<()> {
     let addr = SocketAddr::from(([0, 0, 0, 0], 80));
     let listener = TcpListener::bind(addr).await?;
     info!("Ingress: listening on {}", addr);
@@ -29,7 +30,7 @@ pub async fn start_http(state: Arc<IngressState>, store: Arc<ResourceStore>) -> 
         let s = state.clone();
         let st = store.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(client, &s, &st).await {
+            if let Err(e) = handle_connection(client, &s, st.as_ref()).await {
                 warn!("Ingress conn from {}: {}", peer, e);
             }
         });
@@ -65,7 +66,7 @@ pub fn remove_ingress(state: &IngressState, ingress: &Ingress) -> Result<()> {
     Ok(())
 }
 
-async fn handle_connection(mut client: TcpStream, state: &IngressState, store: &ResourceStore) -> Result<()> {
+async fn handle_connection(mut client: TcpStream, state: &IngressState, store: &dyn StoreBackend) -> Result<()> {
     let mut buf = vec![0u8; 4096];
     let n = client.peek(&mut buf).await.context("peek")?;
     if n == 0 { return Ok(()); }
@@ -95,7 +96,7 @@ fn extract_host(buf: &[u8]) -> Option<&str> {
     None
 }
 
-async fn resolve_endpoint(store: &ResourceStore, service_name: &str, port: u16) -> (String, u16) {
+async fn resolve_endpoint(store: &dyn StoreBackend, service_name: &str, port: u16) -> (String, u16) {
     for t in &store.get_by_kind("Service").await {
         if let AnyResource::Service(svc) = &t.resource {
             if svc.metadata.name.as_deref() == Some(service_name) {

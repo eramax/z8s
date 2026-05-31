@@ -1,4 +1,5 @@
-use crate::types::{ResourceStore, AnyResource};
+use crate::types::AnyResource;
+use crate::store::StoreBackend;
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
@@ -15,7 +16,7 @@ pub fn new_dns_records() -> DnsRecords {
     Arc::new(std::sync::RwLock::new(HashMap::new()))
 }
 
-pub async fn run_dns(store: Arc<ResourceStore>, dns_records: DnsRecords) -> Option<u16> {
+pub async fn run_dns(store: Arc<dyn StoreBackend>, dns_records: DnsRecords) -> Option<u16> {
     let cfg = crate::config::get();
     let ports: Vec<u16> = if let Some(p) = cfg.dns_port {
         vec![p]
@@ -33,7 +34,7 @@ pub async fn run_dns(store: Arc<ResourceStore>, dns_records: DnsRecords) -> Opti
     None
 }
 
-async fn dns_loop(sock: UdpSocket, store: Arc<ResourceStore>, dns_records: DnsRecords) {
+async fn dns_loop(sock: UdpSocket, store: Arc<dyn StoreBackend>, dns_records: DnsRecords) {
     let sock = Arc::new(sock);
     let mut buf = [0u8; MAX_UDP];
     let upstream = tokio::task::spawn_blocking(read_upstream_dns).await.unwrap_or_default();
@@ -46,7 +47,7 @@ async fn dns_loop(sock: UdpSocket, store: Arc<ResourceStore>, dns_records: DnsRe
                 let upstream = upstream.clone();
                 let dns_records = dns_records.clone();
                 tokio::spawn(async move {
-                    if let Some(resp) = handle_query(&query, &store, &upstream, &dns_records).await {
+                    if let Some(resp) = handle_query(&query, store.as_ref(), &upstream, &dns_records).await {
                         sock.send_to(&resp, src).await.ok();
                     }
                 });
@@ -180,7 +181,7 @@ fn cname_record(name: &str, target: &str) -> Vec<u8> {
 
 async fn handle_query(
     query: &[u8],
-    store: &ResourceStore,
+    store: &dyn StoreBackend,
     upstream: &[String],
     dns_records: &DnsRecords,
 ) -> Option<Vec<u8>> {
@@ -271,7 +272,7 @@ enum ServiceResolution {
 }
 
 /// Resolve a DNS name to a service endpoint.
-async fn resolve_service(name: &str, store: &ResourceStore) -> ServiceResolution {
+async fn resolve_service(name: &str, store: &dyn StoreBackend) -> ServiceResolution {
     let name = name.trim_end_matches('.');
     let Some((svc_name, ns_hint)) = parse_service_name(name) else {
         return ServiceResolution::None;

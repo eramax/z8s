@@ -3,7 +3,8 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::types::{AnyResource, ResourceStore, ResourceTracker};
+use crate::types::{AnyResource, ResourceTracker};
+use crate::store::StoreBackend;
 use crate::cri::RuntimeProvider;
 use crate::netmux::network::NetworkEngine;
 use crate::netmux::NetMux;
@@ -29,7 +30,7 @@ pub trait Component: Send + Sync + 'static {
 
 #[derive(Clone)]
 pub struct ReconcileContext {
-    pub store: Arc<ResourceStore>,
+    pub store: Arc<dyn StoreBackend>,
     pub pipeline: Arc<ReconciliationPipeline>,
     pub cri: Arc<dyn RuntimeProvider>,
     pub net: Arc<dyn NetworkEngine>,
@@ -165,7 +166,7 @@ pub trait PipelineStage: Send + Sync {
 }
 
 pub struct StageContext {
-    pub store: Arc<ResourceStore>,
+    pub store: Arc<dyn StoreBackend>,
     pub cri: Arc<dyn RuntimeProvider>,
     pub net: Arc<dyn NetworkEngine>,
 }

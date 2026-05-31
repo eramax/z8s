@@ -7,9 +7,11 @@ mod manifest;
 mod netmux;
 mod scheduler;
 mod storage;
+mod store;
 mod types;
 
-use crate::types::ResourceStore;
+use crate::types::AnyResource;
+use crate::store::{StoreBackend, MemoryBackend};
 use crate::components::{ComponentRegistry, PipelineBuilder, ReconcileContext};
 use crate::components::compute::deployment::DeploymentResource;
 use crate::components::compute::pod::PodResource;
@@ -94,7 +96,7 @@ async fn main() -> Result<()> {
         );
     }
 
-    let store = Arc::new(ResourceStore::new());
+    let store: Arc<dyn StoreBackend> = Arc::new(MemoryBackend::new());
 
     let cgroup_manager = Arc::new(CgroupManager::new().unwrap_or_else(|e| {
         warn!("Cgroups not available: {}. Running without resource limits.", e);
@@ -276,7 +278,7 @@ async fn main() -> Result<()> {
 
     let resources = store.get_all().await;
     for tracker in &resources {
-        let spec = crate::components::compute::spec_builder::build_spec(&tracker.resource, &store).await;
+        let spec = crate::components::compute::spec_builder::build_spec(&tracker.resource, store.as_ref()).await;
         let _ = crate::cri::RuntimeProvider::stop_pod(cri.as_ref(), &spec).await;
     }
 

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
-use crate::types::{AnyResource, ResourceStore, extract_containers, parse_quantity_bytes, parse_quantity_cpu};
+use crate::types::{AnyResource, extract_containers, parse_quantity_bytes, parse_quantity_cpu};
+use crate::store::StoreBackend;
 use crate::cri::spec::{ContainerConfig, ContainerSpec, ResolvedVolume};
 use crate::cri::health::{ProbeConfig, ProbeAction, ExecProbe, HttpProbe, TcpProbe};
 use k8s_openapi::api::core::v1::{ConfigMap, Container, Pod, Secret, Volume};
@@ -8,7 +9,7 @@ use anyhow::{Context, Result};
 use tracing::warn;
 use std::path::Path;
 
-pub async fn build_spec(resource: &AnyResource, store: &ResourceStore) -> ContainerSpec {
+pub async fn build_spec(resource: &AnyResource, store: &dyn StoreBackend) -> ContainerSpec {
     let containers = extract_containers(resource);
     let pod_name = resource.name().to_string();
     let pod_uid = resource.uid();
@@ -123,7 +124,7 @@ pub async fn build_spec(resource: &AnyResource, store: &ResourceStore) -> Contai
     }
 }
 
-async fn fetch_cms_and_secrets(store: &ResourceStore) -> (HashMap<(String, String), ConfigMap>, HashMap<(String, String), Secret>) {
+async fn fetch_cms_and_secrets(store: &dyn StoreBackend) -> (HashMap<(String, String), ConfigMap>, HashMap<(String, String), Secret>) {
     let cms = store.get_by_kind("ConfigMap").await.into_iter()
         .filter_map(|t| if let AnyResource::ConfigMap(cm) = t.resource {
             let ns = cm.metadata.namespace.clone().unwrap_or_default();
@@ -169,7 +170,7 @@ fn resolve_env_from(container: &Container, pod: &Pod, cms: &HashMap<(String, Str
     vars
 }
 
-async fn resolve_service_env(pod: &Pod, store: &ResourceStore) -> Vec<(String, String)> {
+async fn resolve_service_env(pod: &Pod, store: &dyn StoreBackend) -> Vec<(String, String)> {
     let pod_ns = pod.metadata.namespace.as_deref().unwrap_or("default");
     let trackers = store.get_by_kind("Service").await;
     let mut vars = Vec::new();
@@ -242,7 +243,7 @@ fn convert_probe(probe: &k8s_openapi::api::core::v1::Probe) -> Option<ProbeConfi
     })
 }
 
-async fn fetch_pvc_hostpaths(store: &ResourceStore) -> HashMap<(String, String), String> {
+async fn fetch_pvc_hostpaths(store: &dyn StoreBackend) -> HashMap<(String, String), String> {
     let pvc_trackers = store.get_by_kind("PersistentVolumeClaim").await;
     let pv_trackers = store.get_by_kind("PersistentVolume").await;
     let mut map = HashMap::new();

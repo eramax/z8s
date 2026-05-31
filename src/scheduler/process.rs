@@ -5,7 +5,8 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
-use crate::types::{AnyResource, ResourceState, ResourceStore};
+use crate::types::{AnyResource, ResourceState};
+use crate::store::StoreBackend;
 use crate::cri::runtime::RunningContainer;
 use crate::cri::RuntimeProvider;
 use crate::netmux::network::PodResolver;
@@ -15,7 +16,7 @@ pub struct ProcessTracker {
     pub running: Arc<Mutex<HashMap<String, RunningContainer>>>,
     pub restart_counts: Arc<Mutex<HashMap<String, u32>>>,
     pub cri: Arc<dyn RuntimeProvider>,
-    pub store: Arc<ResourceStore>,
+    pub store: Arc<dyn StoreBackend>,
 }
 
 impl ProcessTracker {
@@ -23,20 +24,20 @@ impl ProcessTracker {
         running: Arc<Mutex<HashMap<String, RunningContainer>>>,
         restart_counts: Arc<Mutex<HashMap<String, u32>>>,
         cri: Arc<dyn RuntimeProvider>,
-        store: Arc<ResourceStore>,
+        store: Arc<dyn StoreBackend>,
     ) -> Self {
         Self { running, restart_counts, cri, store }
     }
 
     pub async fn start_pod(&self, resource: &AnyResource) -> anyhow::Result<()> {
-        let spec = crate::components::compute::spec_builder::build_spec(resource, &self.store).await;
+        let spec = crate::components::compute::spec_builder::build_spec(resource, self.store.as_ref()).await;
         self.cri.start_pod(&spec).await?;
         self.store.update_state(&resource.uid(), ResourceState::Running).await;
         Ok(())
     }
 
     pub async fn stop_pod(&self, resource: &AnyResource) {
-        let spec = crate::components::compute::spec_builder::build_spec(resource, &self.store).await;
+        let spec = crate::components::compute::spec_builder::build_spec(resource, self.store.as_ref()).await;
         let _ = self.cri.stop_pod(&spec).await;
         self.store.update_state(&resource.uid(), ResourceState::Terminated).await;
     }
@@ -149,7 +150,7 @@ impl ProcessTracker {
         reaped
     }
 
-    pub async fn handle_exited_containers(&self, reaped: Vec<(u32, i32)>, store: &Arc<ResourceStore>) {
+    pub async fn handle_exited_containers(&self, reaped: Vec<(u32, i32)>, store: &Arc<dyn StoreBackend>) {
         let reaped_map: HashMap<u32, i32> = reaped.into_iter().collect();
         let dead: Vec<(String, u32, i32)> = {
             let running = self.running.lock().await;
