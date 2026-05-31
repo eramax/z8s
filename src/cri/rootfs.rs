@@ -11,6 +11,17 @@ const DEV_NODES: &[&str] = &[
     "null", "zero", "full", "random", "urandom", "tty", "console", "ptmx",
 ];
 
+const DEV_NODE_NUMBERS: &[(u64, u64)] = &[
+    (1, 3),  // null
+    (1, 5),  // zero
+    (1, 7),  // full
+    (1, 8),  // random
+    (1, 9),  // urandom
+    (5, 0),  // tty
+    (5, 1),  // console
+    (5, 2),  // ptmx
+];
+
 pub fn is_root() -> bool {
     Uid::effective().is_root()
 }
@@ -288,11 +299,15 @@ pub fn prepare_rootfs(rootfs_path: &str) -> Result<()> {
             .with_context(|| format!("Failed to create /{} in rootfs", dir))?;
     }
 
-    use std::os::unix::fs::PermissionsExt;
-    for name in DEV_NODES {
+    for (name, (major, minor)) in DEV_NODES.iter().zip(DEV_NODE_NUMBERS.iter()) {
         let path = rootfs.join("dev").join(name);
-        let _ = std::fs::write(&path, []);
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666));
+        let _ = std::fs::remove_file(&path);
+        let _ = mknod(
+            &path,
+            SFlag::S_IFCHR,
+            Mode::S_IRUSR | Mode::S_IWUSR | Mode::S_IRGRP | Mode::S_IWGRP | Mode::S_IROTH | Mode::S_IWOTH,
+            makedev(*major, *minor),
+        );
     }
 
     let resolv_conf = rootfs.join("etc/resolv.conf");

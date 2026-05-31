@@ -1,10 +1,12 @@
 use anyhow::{Context, Result};
+use nix::mount::{mount, umount2, MntFlags, MsFlags};
 use oci_distribution::client::{Client, ClientConfig, ImageLayer};
 use oci_distribution::config::ConfigFile;
 use oci_distribution::secrets::RegistryAuth;
 use oci_distribution::Reference;
+use std::ffi::CString;
 use std::path::Path;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::cri::oci::{save_image_config, OCI_CONFIG_FILE};
 
@@ -130,8 +132,8 @@ impl ImageManager {
         if Path::new(&cache_path).exists() && Path::new(&cache_meta).exists() {
             if let Ok(cached_ref) = std::fs::read_to_string(&cache_meta) {
                 if cached_ref.trim() == image_ref {
-                    info!("Copying cached rootfs for {} to {}", image_ref, container_rootfs);
-                    return Self::copy_cache_to_container(&cache_path, &container_rootfs, &meta_path, image_ref);
+                    info!("Mounting overlay rootfs for {} at {}", image_ref, container_rootfs);
+                    return Self::mount_overlay_rootfs(&cache_path, &container_rootfs, &meta_path, image_ref);
                 }
             }
         }
@@ -155,7 +157,7 @@ impl ImageManager {
             if let Ok(cached_ref) = std::fs::read_to_string(&cache_meta) {
                 if cached_ref.trim() == image_ref {
                     info!("Cache populated by concurrent pull for {}", image_ref);
-                    return Self::copy_cache_to_container(&cache_path, &container_rootfs, &meta_path, image_ref);
+                    return Self::mount_overlay_rootfs(&cache_path, &container_rootfs, &meta_path, image_ref);
                 }
             }
         }
@@ -210,11 +212,70 @@ impl ImageManager {
         std::fs::write(&cache_meta, image_ref)
             .context("Failed to write cache metadata")?;
 
-        Self::copy_cache_to_container(&cache_path, &container_rootfs, &meta_path, image_ref)
-            .context("Failed to copy image cache to container rootfs")
+        Self::mount_overlay_rootfs(&cache_path, &container_rootfs, &meta_path, image_ref)
+            .context("Failed to mount overlay rootfs")
     }
 
-    fn copy_cache_to_container(cache_path: &str, container_rootfs: &str, meta_path: &str, image_ref: &str) -> Result<String> {
+    fn mount_overlay_rootfs(cache_path: &str, container_rootfs: &str, meta_path: &str, image_ref: &str) -> Result<String> {
+    let upper = format!("{}/upper", container_rootfs);
+    let work = format!("{}/work", container_rootfs);
+    let merged = format!("{}/merged", container_rootfs);
+
+    // Clean any stale mounts from previous runs.
+    let _ = umount2(merged.as_str(), MntFlags::MNT_DETACH);
+    let _ = umount2(container_rootfs, MntFlags::MNT_DETACH);
+
+    std::fs::create_dir_all(&upper)?;
+    std::fs::create_dir_all(&work)?;
+    std::fs::create_dir_all(&merged)?;
+
+    // Mount tmpfs over the entire container rootfs so upperdir and workdir
+    // share the same mount (required by overlayfs) and bypass the root overlay.
+    info!("mounting tmpfs at {}", container_rootfs);
+    if let Err(e) = mount(
+        Some("tmpfs"),
+        container_rootfs,
+        Some("tmpfs"),
+        MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
+        None::<&str>,
+    ) {
+        warn!("tmpfs mount at {} failed: {}, falling back to copy for {}", container_rootfs, e, image_ref);
+        let _ = std::fs::remove_dir_all(container_rootfs);
+        return Self::copy_cache_to_container(cache_path, container_rootfs, meta_path, image_ref);
+    }
+    info!("tmpfs mounted at {}", container_rootfs);
+
+    // Recreate upper/work/merged inside the fresh tmpfs.
+    std::fs::create_dir_all(&upper)?;
+    std::fs::create_dir_all(&work)?;
+    std::fs::create_dir_all(&merged)?;
+
+    let data = CString::new(format!(
+        "lowerdir={},upperdir={},workdir={}",
+        cache_path, upper, work
+    ))?;
+    info!("mounting overlay: lowerdir={}, upperdir={}, workdir={}", cache_path, upper, work);
+    if let Err(e) = mount(
+        Some("overlay"),
+        merged.as_str(),
+        Some("overlay"),
+        MsFlags::MS_NODEV | MsFlags::MS_NOEXEC | MsFlags::MS_NOSUID,
+        Some(data.as_c_str()),
+    ) {
+        warn!("overlay mount failed: {}, falling back to copy for {}", e, image_ref);
+        let _ = umount2(container_rootfs, MntFlags::MNT_DETACH);
+        let _ = std::fs::remove_dir_all(container_rootfs);
+        return Self::copy_cache_to_container(cache_path, container_rootfs, meta_path, image_ref);
+    }
+
+    Self::copy_oci_config(cache_path, container_rootfs);
+    Self::backfill_oci_config(cache_path, container_rootfs);
+    std::fs::write(meta_path, image_ref)?;
+    info!("Overlay mounted: {} -> lowerdir={}, upperdir={}", merged, cache_path, upper);
+    Ok(merged)
+}
+
+fn copy_cache_to_container(cache_path: &str, container_rootfs: &str, meta_path: &str, image_ref: &str) -> Result<String> {
         if Path::new(container_rootfs).exists() {
             // Attempt to remove stale rootfs (may fail if live mounts from crashed containers).
             // If removal fails we overwrite in-place via copy_dir.
@@ -225,6 +286,16 @@ impl ImageManager {
         Self::backfill_oci_config(cache_path, container_rootfs);
         std::fs::write(meta_path, image_ref)?;
         Ok(container_rootfs.to_string())
+    }
+
+    pub fn unmount_overlay(rootfs_path: &str) {
+        if rootfs_path.ends_with("/merged") {
+            let _ = umount2(rootfs_path, MntFlags::MNT_DETACH);
+            if let Some(parent) = Path::new(rootfs_path).parent() {
+                let _ = umount2(parent, MntFlags::MNT_DETACH);
+                let _ = std::fs::remove_dir_all(parent);
+            }
+        }
     }
 
     fn backfill_oci_config(cache_path: &str, container_rootfs: &str) {

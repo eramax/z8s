@@ -1042,6 +1042,7 @@ impl ProcessSupervisor {
                             warn!("NetMux detach failed for {}: {}", spec.pod_uid, e);
                         }
                     }
+                    crate::cri::image::ImageManager::unmount_overlay(&rc.instance.rootfs);
                 }
             }
             self.stop_container(&cfg.container_id).await;
