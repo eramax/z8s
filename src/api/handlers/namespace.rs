@@ -5,6 +5,8 @@ use crate::api::server::*;
 pub async fn list_namespaces(State(state): State<AppState>) -> Json<List<Namespace>> {
     let ns = state.namespaces.read().await;
     Json(List {
+        kind: Some("NamespaceList".into()),
+        api_version: None,
         items: ns.values().cloned().collect(),
         metadata: make_list_meta(),
     })

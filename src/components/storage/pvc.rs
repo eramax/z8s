@@ -2,10 +2,10 @@ use async_trait::async_trait;
 use anyhow::Result;
 use std::sync::Arc;
 
-use crate::types::{AnyResource, ResourceTracker};
+use crate::store::{AnyResource, ResourceTracker};
 use crate::store::StoreBackend;
 use crate::components::{Component, ReconcileContext, ResourceCategory};
-use k8s_openapi::api::core::v1::{ObjectReference, PersistentVolume, PersistentVolumeClaimStatus};
+use crate::types::{ObjectReference, PersistentVolume, PersistentVolumeClaim, PersistentVolumeClaimStatus, PersistentVolumeStatus};
 
 pub struct PvcResource {
     pub store: Arc<dyn StoreBackend>,
@@ -68,7 +68,7 @@ impl Component for PvcResource {
             namespace: Some(pvc_namespace.clone()),
             ..Default::default()
         });
-        updated_pv.status = Some(k8s_openapi::api::core::v1::PersistentVolumeStatus {
+        updated_pv.status = Some(PersistentVolumeStatus {
             phase: Some("Bound".to_string()),
             ..Default::default()
         });
@@ -119,12 +119,12 @@ impl Component for PvcResource {
     }
 }
 
-fn find_matching_pv(pvc: &k8s_openapi::api::core::v1::PersistentVolumeClaim, pvs: &[ResourceTracker]) -> Option<PersistentVolume> {
+fn find_matching_pv(pvc: &PersistentVolumeClaim, pvs: &[ResourceTracker]) -> Option<PersistentVolume> {
     let pvc_spec = pvc.spec.as_ref()?;
     let req_storage = pvc_spec.resources.as_ref()
         .and_then(|r| r.requests.as_ref())
         .and_then(|m| m.get("storage"))
-        .map(|q| crate::types::parse_quantity_bytes(q))
+        .map(|q| crate::store::parse_quantity_bytes(q))
         .unwrap_or(0);
 
     for t in pvs {
@@ -141,7 +141,7 @@ fn find_matching_pv(pvc: &k8s_openapi::api::core::v1::PersistentVolumeClaim, pvs
         let pv_capacity = pv.spec.as_ref()
             .and_then(|s| s.capacity.as_ref())
             .and_then(|m| m.get("storage"))
-            .map(|q| crate::types::parse_quantity_bytes(q))
+            .map(|q| crate::store::parse_quantity_bytes(q))
             .unwrap_or(0);
         if pv_capacity < req_storage {
             continue;

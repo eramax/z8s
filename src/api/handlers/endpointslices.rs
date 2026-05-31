@@ -22,7 +22,7 @@ pub async fn list_endpointslices_ns(state: &AppState, namespace: Option<String>)
             items.extend(state.ctx.net.compute_endpointslices(svc).await);
         }
     }
-    Json(List { items, metadata: make_list_meta() })
+    Json(List { kind: Some("EndpointSliceList".into()), api_version: None, items, metadata: make_list_meta() })
 }
 
 pub async fn get_endpointslice(

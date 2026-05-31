@@ -1,4 +1,4 @@
-use crate::types::parse_manifest_yaml;
+use crate::store::parse_manifest_yaml;
 use crate::store::StoreBackend;
 use crate::api::AnyResource;
 use anyhow::{Context, Result};

@@ -2,10 +2,10 @@ use async_trait::async_trait;
 use anyhow::Result;
 use std::sync::Arc;
 
-use crate::types::{AnyResource, ResourceTracker};
+use crate::store::{AnyResource, ResourceTracker};
 use crate::store::StoreBackend;
 use crate::components::{Component, ReconcileContext, ResourceCategory};
-use k8s_openapi::api::core::v1::{ObjectReference, PersistentVolumeClaimStatus};
+use crate::types::{ObjectReference, PersistentVolume, PersistentVolumeClaim, PersistentVolumeClaimStatus, PersistentVolumeStatus};
 
 pub struct PvResource {
     pub store: Arc<dyn StoreBackend>,
@@ -63,7 +63,7 @@ impl Component for PvResource {
                     ..Default::default()
                 });
             }
-            updated_pv.status = Some(k8s_openapi::api::core::v1::PersistentVolumeStatus {
+            updated_pv.status = Some(PersistentVolumeStatus {
                 phase: Some("Bound".into()),
                 ..Default::default()
             });
@@ -83,19 +83,19 @@ impl Component for PvResource {
     }
 }
 
-fn try_bind_pvc(pv: &k8s_openapi::api::core::v1::PersistentVolume, pvc: &k8s_openapi::api::core::v1::PersistentVolumeClaim) -> Option<k8s_openapi::api::core::v1::PersistentVolumeClaim> {
+fn try_bind_pvc(pv: &PersistentVolume, pvc: &PersistentVolumeClaim) -> Option<PersistentVolumeClaim> {
     let pv_spec = pv.spec.as_ref()?;
     let pvc_spec = pvc.spec.as_ref()?;
 
     let req_storage = pvc_spec.resources.as_ref()
         .and_then(|r| r.requests.as_ref())
         .and_then(|m| m.get("storage"))
-        .map(|q| crate::types::parse_quantity_bytes(q))
+        .map(|q| crate::store::parse_quantity_bytes(q))
         .unwrap_or(0);
 
     let pv_capacity = pv_spec.capacity.as_ref()
         .and_then(|m| m.get("storage"))
-        .map(|q| crate::types::parse_quantity_bytes(q))
+        .map(|q| crate::store::parse_quantity_bytes(q))
         .unwrap_or(0);
 
     if pv_capacity < req_storage { return None; }

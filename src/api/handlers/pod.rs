@@ -83,7 +83,7 @@ pub async fn get_pod_log(
     let trackers = state.store.get_by_kind("Pod").await;
     for t in &trackers {
         if t.resource.namespace() == namespace && t.resource.name() == name {
-            let containers = crate::types::extract_containers(&t.resource);
+            let containers = crate::store::extract_containers(&t.resource);
             if let Some(container) = containers.first() {
                 let logs = state.process_tracker.get_logs(&name, &container.name).await;
                 return Ok(logs.join("\n"));
@@ -113,7 +113,7 @@ pub async fn pod_handler(
                 return Err(ApiError::bad_request("missing body".into()));
             }
             let body = parse_body(&body)?;
-            let mut pod: k8s_openapi::api::core::v1::Pod = serde_json::from_value(body)
+            let mut pod: crate::types::Pod = serde_json::from_value(body)
                 .map_err(|e| ApiError::bad_request(format!("invalid Pod: {}", e)))?;
             if pod.metadata.namespace.is_none() {
                 pod.metadata.namespace = Some(namespace);
@@ -169,7 +169,7 @@ pub async fn create_pod(
     if kind != "Pod" {
         return Err(ApiError::bad_request(format!("expected Pod, got {}", kind)));
     }
-    let mut pod: k8s_openapi::api::core::v1::Pod = serde_json::from_value(body)
+    let mut pod: crate::types::Pod = serde_json::from_value(body)
         .map_err(|e| ApiError::bad_request(format!("invalid Pod: {}", e)))?;
     if pod.metadata.namespace.is_none() {
         pod.metadata.namespace = Some(namespace);
@@ -193,7 +193,7 @@ pub async fn create_pod(
 }
 
 
-pub fn fill_pod_metadata(pod: &mut k8s_openapi::api::core::v1::Pod) {
+pub fn fill_pod_metadata(pod: &mut crate::types::Pod) {
     let meta = &mut pod.metadata;
     if meta.creation_timestamp.is_none() {
         meta.creation_timestamp = Some(now_time());
@@ -216,8 +216,6 @@ pub fn resource_to_pod_json_with_status(
     restart_counts: &std::collections::HashMap<String, u32>,
     pod_ip: Option<&str>,
 ) -> serde_json::Value {
-    use k8s_openapi::api::core::v1::{ContainerStateTerminated, ContainerStateWaiting};
-
     let pod = match resource {
         AnyResource::Pod(p) => p,
         _ => return serde_json::Value::Null,
@@ -316,7 +314,7 @@ pub fn resource_to_pod_json_with_status(
 pub fn pod_condition(
     type_: &str,
     status: &str,
-    time: &k8s_openapi::apimachinery::pkg::apis::meta::v1::Time,
+    time: &crate::types::Time,
 ) -> PodCondition {
     PodCondition {
         type_: type_.into(),

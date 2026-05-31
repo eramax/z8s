@@ -32,7 +32,7 @@ pub async fn list_nsgs(headers: axum::http::HeaderMap, State(s): State<AppState>
 }
 pub async fn create_nsg(State(s): State<AppState>, raw: axum::body::Bytes) -> Result<axum::response::Response, ApiError> {
     let body = parse_body(&raw)?;
-    let r: crate::netmux::crds::Nsg = serde_json::from_value(body).map_err(|e| ApiError::bad_request(e.to_string()))?;
+    let r: crate::types::Nsg = serde_json::from_value(body).map_err(|e| ApiError::bad_request(e.to_string()))?;
     crate::api::handlers::crd::generic_create(&s, AnyResource::Nsg(r), "NSG").await
 }
 pub async fn get_nsg(State(s): State<AppState>, Path(n): Path<String>) -> Result<Json<serde_json::Value>, ApiError> {

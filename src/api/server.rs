@@ -4,21 +4,17 @@ pub use axum::extract::{Path, State};
 pub use axum::http::{Method, StatusCode, Uri};
 pub use axum::response::{IntoResponse, Json};
 pub use axum::Router;
-pub use k8s_openapi::api::apps::v1::{DeploymentCondition, DeploymentStatus};
-pub use k8s_openapi::api::authorization::v1::{
-    SelfSubjectAccessReview, SelfSubjectAccessReviewSpec, SubjectAccessReviewStatus,
-};
-pub use k8s_openapi::api::core::v1::{
-    ConfigMap, ContainerState, ContainerStateRunning, ContainerStatus, DaemonEndpoint, Event, EventSource, HostIP, Namespace, NamespaceStatus, Node, NodeAddress,
-    NodeCondition, NodeDaemonEndpoints, NodeSpec, NodeStatus, NodeSystemInfo,
-    ObjectReference, PodCondition, PodIP, PodStatus, Secret, Service, ServiceStatus,
-};
-pub use k8s_openapi::api::discovery::v1::EndpointSlice;
-pub use k8s_openapi::List;
-pub use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
-pub use k8s_openapi::apimachinery::pkg::apis::meta::v1::{
+pub use crate::types::{
     APIGroup, APIGroupList, APIResource, APIResourceList, APIVersions, GroupVersionForDiscovery,
     ListMeta, ObjectMeta, Status,
+    DeploymentCondition, DeploymentStatus,
+    ConfigMap, ContainerState, ContainerStateRunning, ContainerStateTerminated, ContainerStateWaiting, ContainerStatus, DaemonEndpoint,
+    Endpoints, Event, EventSource, HostIP, Ingress, Namespace, NamespaceStatus,
+    NetworkPolicy, Node, NodeAddress,
+    NodeCondition, NodeDaemonEndpoints, NodeSpec, NodeStatus, NodeSystemInfo,
+    ObjectReference, PodCondition, PodIP, PodStatus, Secret, Service, ServiceStatus,
+    EndpointSlice, Quantity, List, Scale, ScaleSpec, ScaleStatus,
+    SelfSubjectAccessReview, SelfSubjectAccessReviewSpec, SubjectAccessReviewStatus,
 };
 pub use std::collections::{BTreeMap, HashMap};
 pub use std::sync::Arc;
@@ -138,15 +134,8 @@ pub async fn run_server(
 
 // ── Shared helpers ───────────────────────────────────────────────────────────
 
-pub fn now_time() -> k8s_openapi::apimachinery::pkg::apis::meta::v1::Time {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
-    k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
-        k8s_openapi::jiff::Timestamp::from_second(secs)
-            .unwrap_or_else(|_| k8s_openapi::jiff::Timestamp::from_second(0).unwrap()),
-    )
+pub fn now_time() -> crate::types::Time {
+    crate::types::Time(chrono::Utc::now().to_rfc3339())
 }
 
 pub fn now_rfc3339() -> String {
@@ -575,11 +564,11 @@ mod tests {
     #[tokio::test]
     pub async fn label_selector_filters_pods() {
         let (app, store) = make_app_with_store().await;
-        let pod_a: k8s_openapi::api::core::v1::Pod = serde_json::from_value(serde_json::json!({
+        let pod_a: crate::types::Pod = serde_json::from_value(serde_json::json!({
             "apiVersion":"v1","kind":"Pod","metadata":{"name":"pod-a","namespace":"default","labels":{"app":"web"}},
             "spec":{"containers":[{"name":"c","image":"alpine"}]}
         })).unwrap();
-        let pod_b: k8s_openapi::api::core::v1::Pod = serde_json::from_value(serde_json::json!({
+        let pod_b: crate::types::Pod = serde_json::from_value(serde_json::json!({
             "apiVersion":"v1","kind":"Pod","metadata":{"name":"pod-b","namespace":"default","labels":{"app":"db"}},
             "spec":{"containers":[{"name":"c","image":"postgres"}]}
         })).unwrap();
@@ -658,10 +647,10 @@ mod tests {
     #[tokio::test]
     pub async fn list_pods_scoped_to_namespace() {
         let (app, store) = make_app_with_store().await;
-        let pod_default: k8s_openapi::api::core::v1::Pod = serde_json::from_value(serde_json::json!({
+        let pod_default: crate::types::Pod = serde_json::from_value(serde_json::json!({
             "apiVersion":"v1","kind":"Pod","metadata":{"name":"p1","namespace":"default"},"spec":{"containers":[{"name":"c","image":"alpine"}]}
         })).unwrap();
-        let pod_other: k8s_openapi::api::core::v1::Pod = serde_json::from_value(serde_json::json!({
+        let pod_other: crate::types::Pod = serde_json::from_value(serde_json::json!({
             "apiVersion":"v1","kind":"Pod","metadata":{"name":"p2","namespace":"other"},"spec":{"containers":[{"name":"c","image":"alpine"}]}
         })).unwrap();
         store.apply(AnyResource::Pod(pod_default)).await.unwrap();

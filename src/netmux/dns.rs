@@ -1,4 +1,4 @@
-use crate::types::AnyResource;
+use crate::store::AnyResource;
 use crate::store::StoreBackend;
 use std::collections::HashMap;
 use std::net::Ipv4Addr;

@@ -36,7 +36,7 @@ pub async fn list_routetables(headers: axum::http::HeaderMap, State(s): State<Ap
 }
 pub async fn create_routetable(State(s): State<AppState>, raw: axum::body::Bytes) -> Result<axum::response::Response, ApiError> {
     let body = parse_body(&raw)?;
-    let r: crate::netmux::crds::RouteTable = serde_json::from_value(body).map_err(|e| ApiError::bad_request(e.to_string()))?;
+    let r: crate::types::RouteTable = serde_json::from_value(body).map_err(|e| ApiError::bad_request(e.to_string()))?;
     crate::api::handlers::crd::generic_create(&s, AnyResource::RouteTable(r), "RouteTable").await
 }
 pub async fn get_routetable(State(s): State<AppState>, Path(n): Path<String>) -> Result<Json<serde_json::Value>, ApiError> {

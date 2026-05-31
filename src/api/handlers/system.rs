@@ -211,7 +211,7 @@ pub async fn self_subject_access_review(
     _body: axum::body::Bytes,
 ) -> Json<SelfSubjectAccessReview> {
     Json(SelfSubjectAccessReview {
-        metadata: ObjectMeta::default(),
+        metadata: Some(ObjectMeta::default()),
         spec: SelfSubjectAccessReviewSpec::default(),
         status: Some(SubjectAccessReviewStatus {
             allowed: true,

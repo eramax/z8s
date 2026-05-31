@@ -2,7 +2,7 @@ use axum::Router;
 use axum::routing::{get, patch};
 use crate::api::server::*;
 
-pub fn fill_deployment_metadata(deploy: &mut k8s_openapi::api::apps::v1::Deployment) {
+pub fn fill_deployment_metadata(deploy: &mut crate::types::Deployment) {
     let meta = &mut deploy.metadata;
     if meta.creation_timestamp.is_none() {
         meta.creation_timestamp = Some(now_time());
@@ -73,10 +73,10 @@ pub fn resource_to_deploy_json(
 
 pub async fn count_deployment_pods(
     resource: &AnyResource,
-    pods: &[crate::types::ResourceTracker],
+    pods: &[crate::store::ResourceTracker],
     tracker: &crate::scheduler::process::ProcessTracker,
 ) -> (usize, usize) {
-    use crate::types::extract_containers;
+    use crate::store::extract_containers;
     let deploy = match resource {
         AnyResource::Deployment(d) => d,
         _ => return (0, 0),
@@ -146,7 +146,7 @@ pub fn deployment_list_to_table(items: &[serde_json::Value]) -> serde_json::Valu
 }
 
 
-pub fn pod_managed_by_deployment(pod: &k8s_openapi::api::core::v1::Pod, deploy_name: &str) -> bool {
+pub fn pod_managed_by_deployment(pod: &crate::types::Pod, deploy_name: &str) -> bool {
     pod.metadata
         .name
         .as_deref()
@@ -221,7 +221,7 @@ pub async fn patch_deployment_scale(
     Path((namespace, name)): Path<(String, String)>,
     raw: axum::body::Bytes,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    use k8s_openapi::api::autoscaling::v1::{Scale, ScaleSpec, ScaleStatus};
+    use crate::types::{Scale, ScaleSpec, ScaleStatus};
     let body = parse_body(&raw)?;
 
     let trackers = state.store.get_by_kind("Deployment").await;
@@ -253,12 +253,12 @@ pub async fn patch_deployment_scale(
                     });
 
                 let scale = Scale {
-                    metadata: ObjectMeta {
+                    metadata: Some(ObjectMeta {
                         name: Some(name.clone()),
                         namespace: Some(namespace.clone()),
                         uid: Some(format!("Deployment/{}/{}", namespace, name)),
                         ..Default::default()
-                    },
+                    }),
                     spec: Some(ScaleSpec { replicas: Some(replicas) }),
                     status: Some(ScaleStatus { replicas, selector }),
                 };
@@ -280,7 +280,7 @@ pub async fn create_deployment(
     if kind != "Deployment" {
         return Err(ApiError::bad_request(format!("expected Deployment, got {}", kind)));
     }
-    let mut deploy: k8s_openapi::api::apps::v1::Deployment = serde_json::from_value(body)
+    let mut deploy: crate::types::Deployment = serde_json::from_value(body)
         .map_err(|e| ApiError::bad_request(format!("invalid Deployment: {}", e)))?;
     if deploy.metadata.namespace.is_none() {
         deploy.metadata.namespace = Some(namespace);
@@ -343,7 +343,7 @@ pub async fn patch_deployment(
         .and_then(|t| serde_json::to_value(&t.resource).ok());
     let mut merged = existing.unwrap_or(serde_json::Value::Object(Default::default()));
     json_merge_patch(&mut merged, &patch);
-    let mut deploy: k8s_openapi::api::apps::v1::Deployment = serde_json::from_value(merged)
+    let mut deploy: crate::types::Deployment = serde_json::from_value(merged)
         .map_err(|e| ApiError::bad_request(format!("invalid Deployment: {}", e)))?;
     if deploy.metadata.namespace.is_none() {
         deploy.metadata.namespace = Some(namespace);

@@ -31,7 +31,7 @@ pub async fn list_vnets(headers: axum::http::HeaderMap, State(s): State<AppState
 }
 pub async fn create_vnet(State(s): State<AppState>, raw: axum::body::Bytes) -> Result<axum::response::Response, ApiError> {
     let body = parse_body(&raw)?;
-    let r: crate::netmux::crds::VNet = serde_json::from_value(body).map_err(|e| ApiError::bad_request(e.to_string()))?;
+    let r: crate::types::VNet = serde_json::from_value(body).map_err(|e| ApiError::bad_request(e.to_string()))?;
     crate::api::handlers::crd::generic_create(&s, AnyResource::VNet(r), "VNet").await
 }
 pub async fn get_vnet(State(s): State<AppState>, Path(n): Path<String>) -> Result<Json<serde_json::Value>, ApiError> {

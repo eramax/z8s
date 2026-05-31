@@ -5,24 +5,24 @@ use uuid::Uuid;
 
 pub async fn list_networkpolicies_all(
     State(state): State<AppState>,
-) -> Json<List<k8s_openapi::api::networking::v1::NetworkPolicy>> {
-    let items: Vec<k8s_openapi::api::networking::v1::NetworkPolicy> = state.store.get_by_kind("NetworkPolicy").await
+) -> Json<List<NetworkPolicy>> {
+    let items: Vec<NetworkPolicy> = state.store.get_by_kind("NetworkPolicy").await
         .into_iter()
         .filter_map(|t| if let AnyResource::NetworkPolicy(np) = t.resource { Some(np) } else { None })
         .collect();
-    Json(List { items, metadata: make_list_meta() })
+    Json(List { kind: Some("NetworkPolicyList".into()), api_version: None, items, metadata: make_list_meta() })
 }
 
 pub async fn list_networkpolicies(
     State(state): State<AppState>,
     Path(namespace): Path<String>,
-) -> Json<List<k8s_openapi::api::networking::v1::NetworkPolicy>> {
-    let items: Vec<k8s_openapi::api::networking::v1::NetworkPolicy> = state.store.get_by_kind("NetworkPolicy").await
+) -> Json<List<NetworkPolicy>> {
+    let items: Vec<NetworkPolicy> = state.store.get_by_kind("NetworkPolicy").await
         .into_iter()
         .filter(|t| t.resource.namespace() == namespace)
         .filter_map(|t| if let AnyResource::NetworkPolicy(np) = t.resource { Some(np) } else { None })
         .collect();
-    Json(List { items, metadata: make_list_meta() })
+    Json(List { kind: Some("NetworkPolicyList".into()), api_version: None, items, metadata: make_list_meta() })
 }
 
 pub async fn create_networkpolicy(
@@ -31,7 +31,7 @@ pub async fn create_networkpolicy(
     raw: axum::body::Bytes,
 ) -> Result<axum::response::Response, ApiError> {
     let body = parse_body(&raw)?;
-    let mut np: k8s_openapi::api::networking::v1::NetworkPolicy = serde_json::from_value(body)
+    let mut np: NetworkPolicy = serde_json::from_value(body)
         .map_err(|e| ApiError::bad_request(format!("invalid NetworkPolicy: {}", e)))?;
     if np.metadata.namespace.is_none() { np.metadata.namespace = Some(namespace.clone()); }
     if np.metadata.uid.is_none() {
@@ -78,7 +78,7 @@ pub async fn update_networkpolicy(
         .and_then(|t| if let AnyResource::NetworkPolicy(np) = t.resource { serde_json::to_value(np).ok() } else { None });
     let mut merged = existing.unwrap_or(serde_json::Value::Object(Default::default()));
     json_merge_patch(&mut merged, &patch);
-    let mut np: k8s_openapi::api::networking::v1::NetworkPolicy = serde_json::from_value(merged)
+    let mut np: NetworkPolicy = serde_json::from_value(merged)
         .map_err(|e| ApiError::bad_request(format!("invalid NetworkPolicy: {}", e)))?;
     if np.metadata.namespace.is_none() { np.metadata.namespace = Some(namespace); }
     if np.metadata.name.is_none() { np.metadata.name = Some(name); }

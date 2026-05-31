@@ -2,18 +2,18 @@ use axum::Router;
 use axum::routing::get;
 use crate::api::server::*;
 
-pub async fn list_endpoints_all(State(state): State<AppState>) -> Json<List<k8s_openapi::api::core::v1::Endpoints>> {
+pub async fn list_endpoints_all(State(state): State<AppState>) -> Json<List<Endpoints>> {
     list_endpoints_ns(&state, None).await
 }
 
 pub async fn list_endpoints(
     State(state): State<AppState>,
     Path(namespace): Path<String>,
-) -> Json<List<k8s_openapi::api::core::v1::Endpoints>> {
+) -> Json<List<Endpoints>> {
     list_endpoints_ns(&state, Some(namespace)).await
 }
 
-pub async fn list_endpoints_ns(state: &AppState, namespace: Option<String>) -> Json<List<k8s_openapi::api::core::v1::Endpoints>> {
+pub async fn list_endpoints_ns(state: &AppState, namespace: Option<String>) -> Json<List<Endpoints>> {
     let svc_trackers = state.store.get_by_kind("Service").await;
     let mut items = Vec::new();
     for t in &svc_trackers {
@@ -22,13 +22,13 @@ pub async fn list_endpoints_ns(state: &AppState, namespace: Option<String>) -> J
             items.push(state.ctx.net.compute_endpoints(svc).await);
         }
     }
-    Json(List { items, metadata: make_list_meta() })
+    Json(List { kind: Some("EndpointsList".into()), api_version: None, items, metadata: make_list_meta() })
 }
 
 pub async fn get_endpoints(
     State(state): State<AppState>,
     Path((namespace, name)): Path<(String, String)>,
-) -> Result<Json<k8s_openapi::api::core::v1::Endpoints>, ApiError> {
+) -> Result<Json<Endpoints>, ApiError> {
     let trackers = state.store.get_by_kind("Service").await;
     for t in &trackers {
         if t.resource.namespace() == namespace && t.resource.name() == name {

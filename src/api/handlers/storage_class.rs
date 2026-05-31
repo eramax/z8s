@@ -1,8 +1,7 @@
 use axum::Router;
 use axum::routing::get;
 use crate::api::server::*;
-use k8s_openapi::api::storage::v1::StorageClass as K8sStorageClass;
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+use crate::types::{StorageClass as K8sStorageClass, ObjectMeta};
 
 fn sc_meta(name: &str) -> ObjectMeta {
     ObjectMeta {
@@ -34,7 +33,7 @@ fn builtin_classes() -> Vec<K8sStorageClass> {
 pub async fn list_storage_classes(
 ) -> Json<List<K8sStorageClass>> {
     let items = builtin_classes();
-    Json(List { items, metadata: make_list_meta() })
+    Json(List { kind: Some("StorageClassList".into()), api_version: None, items, metadata: make_list_meta() })
 }
 
 pub async fn get_storage_class(

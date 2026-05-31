@@ -5,9 +5,8 @@ use anyhow::{Context, Result};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::AsyncReadExt;
 use tracing::{info, warn};
-use k8s_openapi::api::networking::v1::Ingress;
-
-use crate::types::AnyResource;
+use crate::types::Ingress;
+use crate::store::AnyResource;
 use crate::store::StoreBackend;
 
 /// L7 ingress state — Host routes per Ingress UID

@@ -1,8 +1,7 @@
-use crate::types::AnyResource;
+use crate::store::AnyResource;
 use crate::store::StoreBackend;
 use crate::scheduler::process::ProcessTracker;
-use k8s_openapi::api::core::v1::Service;
-use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
+use crate::types::{Service, IntOrString};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
@@ -154,7 +153,7 @@ impl NetworkManager {
         let pods = store.get_by_kind("Pod").await;
         for t in &pods {
             if t.resource.namespace() != ns { continue; }
-            let containers = crate::types::extract_containers(&t.resource);
+            let containers = crate::store::extract_containers(&t.resource);
             for c in &containers {
                 if let Some(ports) = &c.ports {
                     for p in ports {
@@ -209,7 +208,7 @@ impl NetworkManager {
                     let trackers = self.store.get_by_kind("Service").await;
                     for t in &trackers {
                         if t.resource.namespace() == ns && t.resource.name() == name {
-                            if let crate::types::AnyResource::Service(svc) = &t.resource {
+                            if let crate::store::AnyResource::Service(svc) = &t.resource {
                                 if let Some(spec) = &svc.spec {
                                     if let Some(cip) = &spec.cluster_ip {
                                         if let Ok(ip) = cip.parse::<std::net::Ipv4Addr>() {
@@ -252,7 +251,7 @@ impl crate::netmux::network::NetworkEngine for NetworkManager {
 
 use async_trait::async_trait;
 use anyhow::Result;
-use crate::types::ResourceTracker;
+use crate::store::ResourceTracker;
 use crate::components::{Component, ReconcileContext, ResourceCategory};
 
 pub struct ServiceResource {

@@ -20,6 +20,8 @@ pub async fn list_nodes() -> Json<List<Node>> {
     capacity.insert("pods".into(), Quantity("110".into()));
 
     Json(List {
+        kind: Some("NodeList".into()),
+        api_version: None,
         items: vec![Node {
             metadata: ObjectMeta {
                 name: Some("z8s-node".into()),

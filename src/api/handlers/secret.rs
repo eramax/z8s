@@ -22,6 +22,8 @@ pub async fn list_secrets_in_ns(state: &AppState, namespace: Option<String>) -> 
         .filter_map(|t| if let AnyResource::Secret(s) = t.resource { Some(s) } else { None })
         .collect();
     Json(List::<Secret> {
+        kind: Some("SecretList".into()),
+        api_version: None,
         items,
         metadata: ListMeta { resource_version: Some("1".into()), ..Default::default() },
     })
@@ -59,11 +61,13 @@ pub async fn create_secret(
     if sec.metadata.creation_timestamp.is_none() {
         sec.metadata.creation_timestamp = Some(now_time());
     }
-    // Kubernetes API: move stringData into data as base64-encoded ByteString
+    // Kubernetes API: move stringData into data as base64-encoded values
     if let Some(sd) = sec.string_data.take() {
         let data = sec.data.get_or_insert_with(Default::default);
         for (k, v) in sd {
-            data.insert(k, k8s_openapi::ByteString(v.into_bytes()));
+            use base64::Engine;
+            let encoded = base64::engine::general_purpose::STANDARD.encode(v);
+            data.insert(k, encoded);
         }
     }
     let resource = AnyResource::Secret(sec);
@@ -94,7 +98,9 @@ pub async fn update_secret(
     if let Some(sd) = sec.string_data.take() {
         let data = sec.data.get_or_insert_with(Default::default);
         for (k, v) in sd {
-            data.insert(k, k8s_openapi::ByteString(v.into_bytes()));
+            use base64::Engine;
+            let encoded = base64::engine::general_purpose::STANDARD.encode(v);
+            data.insert(k, encoded);
         }
     }
     let resource = AnyResource::Secret(sec);

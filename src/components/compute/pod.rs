@@ -3,7 +3,7 @@ use anyhow::Result;
 use std::sync::OnceLock;
 use tokio::sync::Semaphore;
 
-use crate::types::{AnyResource, ResourceState, ResourceTracker};
+use crate::store::{AnyResource, ResourceState, ResourceTracker};
 use crate::components::{Component, ReconcileContext, ResourceCategory};
 
 fn pod_start_semaphore() -> &'static Semaphore {

@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use redb::{Database, ReadableTable, TableDefinition};
 use tracing::info;
 
-use crate::types::{AnyResource, ResourceState, ResourceTracker};
+use crate::store::{AnyResource, ResourceState, ResourceTracker};
 
 use super::backend::StoreBackend;
 
@@ -113,7 +113,7 @@ mod tests {
     async fn apply_and_get() {
         let db = temp_db();
         let yaml = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm1\n  namespace: default\ndata:\n  key: val\n";
-        let resource = crate::types::parse_manifest_yaml(yaml).unwrap().remove(0);
+        let resource = crate::store::parse_manifest_yaml(yaml).unwrap().remove(0);
         db.apply(resource).await.unwrap();
         let got = db.get("ConfigMap/default/cm1").await;
         assert!(got.is_some());
@@ -125,12 +125,12 @@ mod tests {
     #[tokio::test]
     async fn get_by_kind_prefix_scan() {
         let db = temp_db();
-        let cm = crate::types::parse_manifest_yaml(
+        let cm = crate::store::parse_manifest_yaml(
             "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: a\n  namespace: ns1\n",
         )
         .unwrap()
         .remove(0);
-        let secret = crate::types::parse_manifest_yaml(
+        let secret = crate::store::parse_manifest_yaml(
             "apiVersion: v1\nkind: Secret\nmetadata:\n  name: s\n  namespace: ns1\n",
         )
         .unwrap()
@@ -147,7 +147,7 @@ mod tests {
     async fn delete_removes_entry() {
         let db = temp_db();
         let yaml = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: delme\n  namespace: default\n";
-        let resource = crate::types::parse_manifest_yaml(yaml).unwrap().remove(0);
+        let resource = crate::store::parse_manifest_yaml(yaml).unwrap().remove(0);
         db.apply(resource.clone()).await.unwrap();
         assert!(db.get("ConfigMap/default/delme").await.is_some());
         db.delete(&resource).await.unwrap();
@@ -159,8 +159,8 @@ mod tests {
         let db = temp_db();
         let yaml1 = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: ow\n  namespace: default\ndata:\n  k: v1\n";
         let yaml2 = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: ow\n  namespace: default\ndata:\n  k: v2\n";
-        let r1 = crate::types::parse_manifest_yaml(yaml1).unwrap().remove(0);
-        let r2 = crate::types::parse_manifest_yaml(yaml2).unwrap().remove(0);
+        let r1 = crate::store::parse_manifest_yaml(yaml1).unwrap().remove(0);
+        let r2 = crate::store::parse_manifest_yaml(yaml2).unwrap().remove(0);
         db.apply(r1).await.unwrap();
         db.apply(r2).await.unwrap();
         let all = db.get_by_kind("ConfigMap").await;

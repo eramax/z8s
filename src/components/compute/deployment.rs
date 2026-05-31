@@ -3,12 +3,10 @@ use anyhow::{Context, Result};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::types::{AnyResource, ResourceState, ResourceTracker};
+use crate::store::{AnyResource, ResourceState, ResourceTracker};
 use crate::store::StoreBackend;
 use crate::components::{Component, ReconcileContext, ResourceCategory};
-use k8s_openapi::api::apps::v1::Deployment;
-use k8s_openapi::api::core::v1::Pod;
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
+use crate::types::{Deployment, Pod, OwnerReference};
 
 pub fn labels_match(selector: &BTreeMap<String, String>, labels: &BTreeMap<String, String>) -> bool {
     for (key, value) in selector {

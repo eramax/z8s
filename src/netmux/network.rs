@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use k8s_openapi::api::core::v1::Service;
+use crate::types::Service;
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone)]
@@ -14,10 +14,10 @@ pub trait NetworkEngine: Send + Sync {
     async fn sync_service(&self, svc: &Service) -> anyhow::Result<()>;
     async fn remove_service(&self, ns: &str, name: &str) -> anyhow::Result<()>;
     async fn sync_services_for_labels(&self, ns: &str, labels: &BTreeMap<String, String>) -> anyhow::Result<()>;
-    async fn compute_endpoints(&self, _svc: &Service) -> k8s_openapi::api::core::v1::Endpoints {
-        k8s_openapi::api::core::v1::Endpoints::default()
+    async fn compute_endpoints(&self, _svc: &Service) -> crate::types::Endpoints {
+        crate::types::Endpoints::default()
     }
-    async fn compute_endpointslices(&self, _svc: &Service) -> Vec<k8s_openapi::api::discovery::v1::EndpointSlice> {
+    async fn compute_endpointslices(&self, _svc: &Service) -> Vec<crate::types::EndpointSlice> {
         vec![]
     }
 }

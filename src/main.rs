@@ -10,8 +10,7 @@ mod storage;
 mod store;
 mod types;
 
-use crate::types::AnyResource;
-use crate::store::{StoreBackend, MemoryBackend};
+use crate::store::{AnyResource, StoreBackend, MemoryBackend};
 use crate::components::{ComponentRegistry, PipelineBuilder, ReconcileContext};
 use crate::components::compute::deployment::DeploymentResource;
 use crate::components::compute::pod::PodResource;

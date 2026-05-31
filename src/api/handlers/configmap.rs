@@ -19,7 +19,7 @@ pub async fn list_configmaps_in_ns(state: &AppState, namespace: Option<String>) 
         .filter(|t| namespace.as_deref().map_or(true, |ns| t.resource.namespace() == ns))
         .filter_map(|t| if let AnyResource::ConfigMap(cm) = t.resource { Some(cm) } else { None })
         .collect();
-    Json(List { items, metadata: make_list_meta() })
+    Json(List { kind: Some("ConfigMapList".into()), api_version: None, items, metadata: make_list_meta() })
 }
 
 pub async fn get_configmap(

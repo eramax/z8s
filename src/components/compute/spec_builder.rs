@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 
-use crate::types::{AnyResource, extract_containers, parse_quantity_bytes, parse_quantity_cpu};
+use crate::store::{AnyResource, extract_containers, parse_quantity_bytes, parse_quantity_cpu};
 use crate::store::StoreBackend;
 use crate::cri::spec::{ContainerConfig, ContainerSpec, ResolvedVolume};
 use crate::cri::health::{ProbeConfig, ProbeAction, ExecProbe, HttpProbe, TcpProbe};
-use k8s_openapi::api::core::v1::{ConfigMap, Container, Pod, Secret, Volume};
+use crate::types::{ConfigMap, Container, Pod, Secret, Volume};
 use anyhow::{Context, Result};
 use tracing::warn;
 use std::path::Path;
@@ -159,7 +159,10 @@ fn resolve_env_from(container: &Container, pod: &Pod, cms: &HashMap<(String, Str
         if let Some(sec_ref) = &env_from.secret_ref {
             if let Some(sec) = secrets.get(&(ns.to_string(), sec_ref.name.clone())) {
                 for (k, v) in sec.data.as_ref().into_iter().flatten() {
-                    if let Ok(s) = std::str::from_utf8(&v.0) { vars.push((format!("{}{}", prefix, k), s.to_string())); }
+                    use base64::Engine;
+                    if let Ok(bs) = base64::engine::general_purpose::STANDARD.decode(v) {
+                        if let Ok(s) = std::str::from_utf8(&bs) { vars.push((format!("{}{}", prefix, k), s.to_string())); }
+                    }
                 }
                 for (k, v) in sec.string_data.as_ref().into_iter().flatten() {
                     vars.push((format!("{}{}", prefix, k), v.clone()));
@@ -210,14 +213,13 @@ fn resolve_resource_limits(container: &Container) -> (Option<i64>, Option<i64>, 
     (ml, mlo, cq, cp)
 }
 
-fn convert_probe(probe: &k8s_openapi::api::core::v1::Probe) -> Option<ProbeConfig> {
-    use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
+fn convert_probe(probe: &crate::types::Probe) -> Option<ProbeConfig> {
     let action = if let Some(exec) = &probe.exec {
-        ProbeAction::Exec(ExecProbe { command: exec.command.clone() })
+        ProbeAction::Exec(ExecProbe { command: Some(exec.command.clone()) })
     } else if let Some(http) = &probe.http_get {
         let port = match &http.port {
-            IntOrString::Int(i) => *i as u16,
-            IntOrString::String(s) => s.parse().unwrap_or(80),
+            crate::types::IntOrString::Int(i) => *i as u16,
+            crate::types::IntOrString::String(s) => s.parse().unwrap_or(80),
         };
         ProbeAction::HTTPGet(HttpProbe {
             host: http.host.clone(),
@@ -228,8 +230,8 @@ fn convert_probe(probe: &k8s_openapi::api::core::v1::Probe) -> Option<ProbeConfi
         })
     } else if let Some(tcp) = &probe.tcp_socket {
         let port = match &tcp.port {
-            IntOrString::Int(i) => *i as u16,
-            IntOrString::String(s) => s.parse().unwrap_or(80),
+            crate::types::IntOrString::Int(i) => *i as u16,
+            crate::types::IntOrString::String(s) => s.parse().unwrap_or(80),
         };
         ProbeAction::TCPSocket(TcpProbe { host: tcp.host.clone(), port })
     } else {
@@ -383,8 +385,9 @@ fn resolve_volume_source(
     }
 
     if let Some(sec_src) = &vol.secret {
-        if let Some(sec_name) = &sec_src.secret_name {
-            let dir = format!("{}/secrets/{}/{}", base, namespace, sec_name);
+        let sec_name = &sec_src.secret_name;
+        let dir = format!("{}/secrets/{}/{}", base, namespace, sec_name);
+        {
             std::fs::create_dir_all(&dir)
                 .with_context(|| format!("Failed to create secret dir {}", dir))?;
             if let Some(sec) = get_secret(namespace, sec_name) {
@@ -428,7 +431,10 @@ pub fn materialize_configmap(cm: &ConfigMap, dir: &str) -> Result<()> {
     if let Some(binary_data) = &cm.binary_data {
         for (key, value) in binary_data {
             let path = Path::new(dir).join(key);
-            std::fs::write(&path, &value.0)
+            use base64::Engine;
+            let bytes = base64::engine::general_purpose::STANDARD.decode(value)
+                .unwrap_or_default();
+            std::fs::write(&path, &bytes)
                 .with_context(|| format!("Failed to write configmap binary key '{}'", key))?;
         }
     }
@@ -440,7 +446,10 @@ pub fn materialize_secret(sec: &Secret, dir: &str) -> Result<()> {
     if let Some(data) = &sec.data {
         for (key, value) in data {
             let path = Path::new(dir).join(key);
-            std::fs::write(&path, &value.0)
+            use base64::Engine;
+            let bytes = base64::engine::general_purpose::STANDARD.decode(value)
+                .unwrap_or_default();
+            std::fs::write(&path, &bytes)
                 .with_context(|| format!("Failed to write secret key '{}'", key))?;
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).ok();
         }

@@ -5,7 +5,7 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
-use crate::types::{AnyResource, ResourceState};
+use crate::store::{AnyResource, ResourceState};
 use crate::store::StoreBackend;
 use crate::cri::runtime::RunningContainer;
 use crate::cri::RuntimeProvider;

@@ -3,13 +3,13 @@ pub mod loop_prov;
 
 use async_trait::async_trait;
 use anyhow::{Context, Result};
-use k8s_openapi::api::core::v1::{PersistentVolume, PersistentVolumeClaim, PersistentVolumeClaimStatus};
+use crate::types::{PersistentVolume, PersistentVolumeClaim, PersistentVolumeClaimStatus, ObjectMeta, PersistentVolumeSpec, PersistentVolumeStatus, ObjectReference, HostPathVolumeSource};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::info;
 
-use crate::types::AnyResource;
+use crate::store::AnyResource;
 use crate::store::StoreBackend;
 
 #[derive(Clone, Debug)]
@@ -71,7 +71,7 @@ impl ProvisionerDispatcher {
         let pv_name = format!("pvc-{}--{}", pvc_ns, pvc_name);
         let host_path = format!("/var/lib/z8s/pv/{}", pv_name);
         let mut pv = PersistentVolume {
-            metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+            metadata: ObjectMeta {
                 name: Some(pv_name.clone()),
                 uid: Some(uuid::Uuid::new_v4().to_string()),
                 annotations: Some({
@@ -81,25 +81,25 @@ impl ProvisionerDispatcher {
                 }),
                 ..Default::default()
             },
-            spec: Some(k8s_openapi::api::core::v1::PersistentVolumeSpec {
+            spec: Some(PersistentVolumeSpec {
                 capacity: spec.resources.as_ref()
                     .and_then(|r| r.requests.as_ref())
                     .cloned(),
                 access_modes: spec.access_modes.clone(),
-                claim_ref: Some(k8s_openapi::api::core::v1::ObjectReference {
+                claim_ref: Some(ObjectReference {
                     kind: Some("PersistentVolumeClaim".into()),
                     name: pvc.metadata.name.clone(),
                     namespace: pvc.metadata.namespace.clone(),
                     ..Default::default()
                 }),
                 persistent_volume_reclaim_policy: Some("Delete".into()),
-                host_path: Some(k8s_openapi::api::core::v1::HostPathVolumeSource {
+                host_path: Some(HostPathVolumeSource {
                     path: host_path,
                     type_: None,
                 }),
                 ..Default::default()
             }),
-            status: Some(k8s_openapi::api::core::v1::PersistentVolumeStatus {
+            status: Some(PersistentVolumeStatus {
                 phase: Some("Available".into()),
                 ..Default::default()
             }),

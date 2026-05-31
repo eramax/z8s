@@ -79,6 +79,8 @@ pub async fn list_services_in_ns(state: &AppState, namespace: Option<String>, he
         return (StatusCode::OK, Json(service_list_to_table(&items))).into_response();
     }
     Json(List::<Service> {
+        kind: Some("ServiceList".into()),
+        api_version: None,
         items: svcs,
         metadata: ListMeta { resource_version: Some("1".into()), ..Default::default() },
     }).into_response()
@@ -126,7 +128,7 @@ pub async fn create_service(
         if let Some(ports) = spec.ports.as_mut() {
             for p in ports.iter_mut() {
                 if p.target_port.is_none() {
-                    p.target_port = Some(k8s_openapi::apimachinery::pkg::util::intstr::IntOrString::Int(p.port));
+                    p.target_port = Some(crate::types::IntOrString::Int(p.port));
                 }
                 if (svc_type == "NodePort" || svc_type == "LoadBalancer") && p.node_port.is_none() {
                     p.node_port = Some(alloc_node_port());
@@ -171,7 +173,7 @@ pub async fn update_service(
         if let Some(ports) = spec.ports.as_mut() {
             for p in ports.iter_mut() {
                 if p.target_port.is_none() {
-                    p.target_port = Some(k8s_openapi::apimachinery::pkg::util::intstr::IntOrString::Int(p.port));
+                    p.target_port = Some(crate::types::IntOrString::Int(p.port));
                 }
             }
         }

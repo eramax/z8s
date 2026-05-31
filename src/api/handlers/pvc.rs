@@ -1,7 +1,7 @@
 use axum::Router;
 use axum::routing::get;
 use crate::api::server::*;
-use k8s_openapi::api::core::v1::PersistentVolumeClaim;
+use crate::types::PersistentVolumeClaim;
 
 pub async fn list_pvcs_all(State(state): State<AppState>) -> Json<List<PersistentVolumeClaim>> {
     let items: Vec<PersistentVolumeClaim> = state.store.get_by_kind("PersistentVolumeClaim").await
@@ -11,7 +11,7 @@ pub async fn list_pvcs_all(State(state): State<AppState>) -> Json<List<Persisten
             _ => None,
         })
         .collect();
-    Json(List { items, metadata: make_list_meta() })
+    Json(List { kind: Some("PersistentVolumeClaimList".into()), api_version: None, items, metadata: make_list_meta() })
 }
 
 pub async fn list_pvcs(
@@ -26,7 +26,7 @@ pub async fn list_pvcs(
             _ => None,
         })
         .collect();
-    Json(List { items, metadata: make_list_meta() })
+    Json(List { kind: Some("PersistentVolumeClaimList".into()), api_version: None, items, metadata: make_list_meta() })
 }
 
 pub async fn get_pvc(

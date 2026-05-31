@@ -5,6 +5,8 @@ use crate::api::server::*;
 pub async fn list_events_all(State(state): State<AppState>) -> Json<List<Event>> {
     let ev = state.events.lock().await;
     Json(List {
+        kind: Some("EventList".into()),
+        api_version: None,
         items: ev.clone(),
         metadata: make_list_meta(),
     })
@@ -17,6 +19,8 @@ pub async fn list_events(
 ) -> Json<List<Event>> {
     let ev = state.events.lock().await;
     Json(List {
+        kind: Some("EventList".into()),
+        api_version: None,
         items: ev
             .iter()
             .filter(|e| e.metadata.namespace.as_deref() == Some(&namespace))

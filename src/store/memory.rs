@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use tokio::sync::RwLock;
 
-use crate::types::{AnyResource, ResourceState, ResourceTracker};
+use crate::store::{AnyResource, ResourceState, ResourceTracker};
 
 use super::backend::StoreBackend;
 

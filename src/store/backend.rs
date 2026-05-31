@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use crate::types::{AnyResource, ResourceState, ResourceTracker};
+use crate::store::{AnyResource, ResourceState, ResourceTracker};
 
 #[async_trait]
 pub trait StoreBackend: Send + Sync {

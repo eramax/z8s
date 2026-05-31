@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use k8s_openapi::api::core::v1::{PersistentVolume, PersistentVolumeClaim};
+use crate::types::{PersistentVolume, PersistentVolumeClaim};
 use std::path::Path;
 use tracing::info;
 

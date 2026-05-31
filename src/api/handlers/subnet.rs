@@ -47,7 +47,7 @@ pub async fn list_subnets(headers: axum::http::HeaderMap, State(s): State<AppSta
 }
 pub async fn create_subnet(State(s): State<AppState>, raw: axum::body::Bytes) -> Result<axum::response::Response, ApiError> {
     let body = parse_body(&raw)?;
-    let r: crate::netmux::crds::Subnet = serde_json::from_value(body).map_err(|e| ApiError::bad_request(e.to_string()))?;
+    let r: crate::types::Subnet = serde_json::from_value(body).map_err(|e| ApiError::bad_request(e.to_string()))?;
     crate::api::handlers::crd::generic_create(&s, AnyResource::Subnet(r), "Subnet").await
 }
 pub async fn get_subnet(State(s): State<AppState>, Path(n): Path<String>) -> Result<Json<serde_json::Value>, ApiError> {

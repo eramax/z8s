@@ -1,7 +1,7 @@
 use axum::Router;
 use axum::routing::get;
 use crate::api::server::*;
-use k8s_openapi::api::core::v1::PersistentVolume;
+use crate::types::PersistentVolume;
 
 pub async fn list_pvs(State(state): State<AppState>) -> Json<List<PersistentVolume>> {
     let items: Vec<PersistentVolume> = state.store.get_by_kind("PersistentVolume").await
@@ -11,7 +11,7 @@ pub async fn list_pvs(State(state): State<AppState>) -> Json<List<PersistentVolu
             _ => None,
         })
         .collect();
-    Json(List { items, metadata: make_list_meta() })
+    Json(List { kind: Some("PersistentVolumeList".into()), api_version: None, items, metadata: make_list_meta() })
 }
 
 pub async fn get_pv(

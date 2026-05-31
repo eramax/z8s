@@ -2,7 +2,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use anyhow::Result;
 use tracing::info;
-use crate::types::{AnyResource, ResourceTracker};
+use crate::store::{AnyResource, ResourceTracker};
 use crate::components::{Component, ReconcileContext, ResourceCategory};
 use crate::netmux::NetMux;
 

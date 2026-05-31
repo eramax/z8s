@@ -44,4 +44,4 @@ pub async fn generic_delete(s: &AppState, kind: &str, name: &str) -> Result<Json
 }
 
 // Required for metadata_mut to work — AnyResource has metadata_mut() method.
-pub use crate::types::AnyResource;
+pub use crate::store::AnyResource;

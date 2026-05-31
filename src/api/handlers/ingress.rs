@@ -5,24 +5,24 @@ use uuid::Uuid;
 
 pub async fn list_ingresses_all(
     State(state): State<AppState>,
-) -> Json<List<k8s_openapi::api::networking::v1::Ingress>> {
-    let items: Vec<k8s_openapi::api::networking::v1::Ingress> = state.store.get_by_kind("Ingress").await
+) -> Json<List<Ingress>> {
+    let items: Vec<Ingress> = state.store.get_by_kind("Ingress").await
         .into_iter()
         .filter_map(|t| if let AnyResource::Ingress(ing) = t.resource { Some(ing) } else { None })
         .collect();
-    Json(List { items, metadata: make_list_meta() })
+    Json(List { kind: Some("IngressList".into()), api_version: None, items, metadata: make_list_meta() })
 }
 
 pub async fn list_ingresses(
     State(state): State<AppState>,
     Path(namespace): Path<String>,
-) -> Json<List<k8s_openapi::api::networking::v1::Ingress>> {
-    let items: Vec<k8s_openapi::api::networking::v1::Ingress> = state.store.get_by_kind("Ingress").await
+) -> Json<List<Ingress>> {
+    let items: Vec<Ingress> = state.store.get_by_kind("Ingress").await
         .into_iter()
         .filter(|t| t.resource.namespace() == namespace)
         .filter_map(|t| if let AnyResource::Ingress(ing) = t.resource { Some(ing) } else { None })
         .collect();
-    Json(List { items, metadata: make_list_meta() })
+    Json(List { kind: Some("IngressList".into()), api_version: None, items, metadata: make_list_meta() })
 }
 
 pub async fn create_ingress(
@@ -31,7 +31,7 @@ pub async fn create_ingress(
     raw: axum::body::Bytes,
 ) -> Result<axum::response::Response, ApiError> {
     let body = parse_body(&raw)?;
-    let mut ing: k8s_openapi::api::networking::v1::Ingress = serde_json::from_value(body)
+    let mut ing: Ingress = serde_json::from_value(body)
         .map_err(|e| ApiError::bad_request(format!("invalid Ingress: {}", e)))?;
     if ing.metadata.namespace.is_none() {
         ing.metadata.namespace = Some(namespace.clone());
@@ -80,7 +80,7 @@ pub async fn update_ingress(
         .and_then(|t| if let AnyResource::Ingress(ing) = t.resource { serde_json::to_value(ing).ok() } else { None });
     let mut merged = existing.unwrap_or(serde_json::Value::Object(Default::default()));
     json_merge_patch(&mut merged, &patch);
-    let mut ing: k8s_openapi::api::networking::v1::Ingress = serde_json::from_value(merged)
+    let mut ing: Ingress = serde_json::from_value(merged)
         .map_err(|e| ApiError::bad_request(format!("invalid Ingress: {}", e)))?;
     if ing.metadata.namespace.is_none() { ing.metadata.namespace = Some(namespace); }
     if ing.metadata.name.is_none() { ing.metadata.name = Some(name); }

@@ -1,7 +1,6 @@
 pub mod pool;
 pub mod netlink;
 pub mod nftables;
-pub mod crds;
 pub mod np_controller;
 pub mod ingress;
 pub mod dns;
@@ -267,7 +266,7 @@ impl NetMux {
         Ok(())
     }
 
-    pub async fn apply_vnet(&self, vnet: &crate::netmux::crds::VNet, cidr: &str) -> Result<()> {
+    pub async fn apply_vnet(&self, vnet: &crate::types::VNet, cidr: &str) -> Result<()> {
         if !vnet.spec.internet_access {
             self.nft.add_forward_deny(cidr, "0.0.0.0/0").await?;
         }
@@ -275,7 +274,7 @@ impl NetMux {
         Ok(())
     }
 
-    pub async fn apply_nsg(&self, nsg: &crate::netmux::crds::Nsg) -> Result<()> {
+    pub async fn apply_nsg(&self, nsg: &crate::types::Nsg) -> Result<()> {
         self.nft.reset_nsg_rules().await?;
         let mut sorted = nsg.spec.rules.clone();
         sorted.sort_by_key(|r| r.priority);

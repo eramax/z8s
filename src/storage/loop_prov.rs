@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use k8s_openapi::api::core::v1::{PersistentVolume, PersistentVolumeClaim};
+use crate::types::{PersistentVolume, PersistentVolumeClaim};
 use std::path::Path;
 use tracing::{info, warn};
 
@@ -31,7 +31,7 @@ impl LoopProvisioner {
         let capacity = pv.spec.as_ref()
             .and_then(|s| s.capacity.as_ref())
             .and_then(|m| m.get("storage"))
-            .map(|q| crate::types::parse_quantity_bytes(q))
+            .map(|q| crate::store::parse_quantity_bytes(q))
             .unwrap_or(0);
 
         if capacity == 0 {
