@@ -65,6 +65,15 @@ impl AppState {
     pub async fn backend_port(&self, pod: &str, port: u16) -> u16 {
         self.process_tracker.backend_connect_port(pod, port).await
     }
+
+    /// Apply a resource and broadcast to gossip peers
+    pub async fn apply_and_broadcast(&self, resource: AnyResource) -> anyhow::Result<()> {
+        self.store.apply(resource.clone()).await?;
+        if let Some(ref gs) = self.gossip_state {
+            gs.lock().await.broadcast_write(&resource).await;
+        }
+        Ok(())
+    }
 }
 
 pub async fn build_app_state(

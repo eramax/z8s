@@ -4,8 +4,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
-use tokio::time::sleep;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 use crate::store::{AnyResource, StoreBackend};
 
@@ -52,6 +51,7 @@ pub struct GossipState {
     pub local_term: u64,
     pub seen: HashMap<String, u64>,
     pub db: Arc<dyn StoreBackend>,
+    pub peers: Vec<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>,
 }
 
 impl GossipState {
@@ -61,6 +61,37 @@ impl GossipState {
             local_term: 0,
             seen: HashMap::new(),
             db,
+            peers: Vec::new(),
+        }
+    }
+
+    /// Add a peer broadcast channel
+    pub fn add_peer(&mut self, tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>) {
+        self.peers.push(tx);
+    }
+
+    /// Called after a local write to broadcast to all peers
+    pub async fn broadcast_write(&self, resource: &AnyResource) {
+        if self.peers.is_empty() {
+            tracing::warn!("broadcast_write: no peers");
+            return;
+        }
+        let key = resource.uid();
+        if let Ok(value) = serde_json::to_vec(resource) {
+            let msg = GossipMessage::Gossip {
+                key: key.clone(),
+                value,
+                term: 0,
+                source: self.node_name.clone(),
+            };
+            if let Ok(json) = serde_json::to_string(&msg) {
+                for (i, tx) in self.peers.iter().enumerate() {
+                    match tx.send(json.as_bytes().to_vec()) {
+                        Ok(()) => tracing::info!("Broadcast {} to peer {}", key, i),
+                        Err(e) => tracing::warn!("Broadcast to peer {} failed: {}", i, e),
+                    }
+                }
+            }
         }
     }
 
@@ -72,7 +103,7 @@ impl GossipState {
     /// Returns true if this message is new (should be applied).
     pub fn dedup(&mut self, key: &str, term: u64) -> bool {
         let known = self.seen.get(key).copied().unwrap_or(0);
-        if term > known {
+        if term >= known {
             self.seen.insert(key.to_string(), term);
             true
         } else {

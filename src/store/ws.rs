@@ -45,6 +45,7 @@ pub async fn handle_gossip_ws(mut ws: WebSocket, state: Arc<tokio::sync::Mutex<G
 async fn handle_message(msg: GossipMessage, ws: &mut WebSocket, state: &Arc<tokio::sync::Mutex<GossipState>>) {
     match msg {
         GossipMessage::Gossip { key, value, term, source: _ } => {
+            tracing::info!("handle_message Gossip: key={}", key);
             let mut st = state.lock().await;
             if st.dedup(&key, term) {
                 st.apply(&key, &value, term).await;
@@ -86,6 +87,7 @@ pub async fn run_gossip_client(
     peer_name: String,
     peer_url: String,
     state: Arc<tokio::sync::Mutex<GossipState>>,
+    mut broadcast_rx: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
 ) {
     loop {
         match tokio_tungstenite::connect_async(&peer_url).await {
@@ -107,6 +109,7 @@ pub async fn run_gossip_client(
                                         let mut st = state.lock().await;
                                         match gmsg {
                                             GossipMessage::Gossip { key, value, term, source: _ } => {
+                                                tracing::info!("Client received Gossip: key={}", key);
                                                 if st.dedup(&key, term) {
                                                     st.apply(&key, &value, term).await;
                                                 }
@@ -150,6 +153,13 @@ pub async fn run_gossip_client(
                             let msg = GossipMessage::Heartbeat;
                             if let Ok(json) = serde_json::to_string(&msg) {
                                 let _ = write.send(tokio_tungstenite::tungstenite::Message::Text(json.into())).await;
+                            }
+                        }
+                        msg = broadcast_rx.recv() => {
+                            if let Some(bytes) = msg {
+                                let text = String::from_utf8_lossy(&bytes).to_string();
+                                info!("Broadcast forwarding to {}: {}", peer_name, &text[..text.len().min(80)]);
+                                let _ = write.send(tokio_tungstenite::tungstenite::Message::Text(text.into())).await;
                             }
                         }
                     }

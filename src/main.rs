@@ -275,17 +275,27 @@ async fn main() -> Result<()> {
 
     // Gossip state (always initialize for incoming connections)
     let gossip_state = {
-        let state = Arc::new(tokio::sync::Mutex::new(
-            crate::store::gossip::GossipState::new(cfg.node_name.clone(), store.clone())
-        ));
+        let mut gs = crate::store::gossip::GossipState::new(cfg.node_name.clone(), store.clone());
+        let state = std::sync::Arc::new(tokio::sync::Mutex::new(gs));
 
         // Connect to each peer
         for (name, addr) in &cfg.peers {
             let url = format!("ws://{}/ws/gossip", addr);
             let st = state.clone();
             let n = name.clone();
+
+            // Create per-peer broadcast channel
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            tokio::task::block_in_place(|| {
+                let rt = tokio::runtime::Handle::current();
+                rt.block_on(async {
+                    let mut gs = st.lock().await;
+                    gs.add_peer(tx);
+                });
+            });
+
             tokio::spawn(async move {
-                crate::store::ws::run_gossip_client(n, url, st).await;
+                crate::store::ws::run_gossip_client(n, url, st, rx).await;
             });
 
             // Anti-entropy per peer

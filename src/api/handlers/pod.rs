@@ -123,7 +123,7 @@ pub async fn pod_handler(
             }
             fill_pod_metadata(&mut pod);
             let resource = AnyResource::Pod(pod);
-            state.store.apply(resource.clone()).await
+            state.apply_and_broadcast(resource.clone()).await
                 .map_err(|e| ApiError::bad_request(e.to_string()))?;
             let pod_name = resource.name().to_string();
             let already_running = state.process_tracker.is_running(&pod_name).await;
@@ -176,7 +176,7 @@ pub async fn create_pod(
     }
     fill_pod_metadata(&mut pod);
     let resource = AnyResource::Pod(pod);
-    state.store.apply(resource.clone()).await
+    state.apply_and_broadcast(resource.clone()).await
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
 
     state.registry.on_apply(&state.ctx, &resource).await;
