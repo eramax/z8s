@@ -456,25 +456,32 @@ z8s --port 8443 --data-dir /tmp/z8s-c \
 
 ## Redb Tables — Canonical Schema
 
-### Dual-Type Strategy: k8s-openapi for API, Own Types for Storage
+### Single Type System: Our Own Types for Everything
 
-To avoid breaking kubectl compatibility while gaining control over the internal schema:
+Define our own types in `src/store/types.rs` — ~600 lines of hand-written structs with serde annotations. These types serve **both** the API layer (HTTP responses) and the storage layer (redb). No k8s-openapi dependency at all.
 
-- **API layer** keeps `k8s-openapi` types for all HTTP responses (kubectl reads these)
-- **Storage layer** uses our own types (`src/store/types.rs`) with `StoredResource` enum for redb
-- **Conversion layer** (`From`/`TryFrom` traits) bridges between the two
+```rust
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Pod {
+    pub metadata: ObjectMeta,
+    pub spec: PodSpec,
+    pub status: PodStatus,
+    pub assigned_node: Option<String>,
+    pub scheduler_epoch: u64,
+}
+```
 
-This allows incremental migration: files that are converted use own types directly. Files that aren't converted yet use the conversion. When nothing references k8s-openapi anymore, we drop the crate.
+`#[serde(rename_all = "camelCase")]` ensures kubectl gets valid Kubernetes JSON. Optional fields use `Option` so they're absent from JSON when `None` (kubectl requirement). The scheduler-extension fields (`assigned_node`, `scheduler_epoch`) are native to the Pod struct — no separate tables.
 
-### Why Our Own Types
+### Why Not k8s-openapi
 
-Our types embed scheduler fields directly — no separate `pod_status` table needed:
+k8s-openapi types are deeply nested, hard to extend, and pull in a large dependency graph. Our own types are:
 
-| Field | On own type | Written by | Enforced by |
-|---|---|---|---|
-| `assigned_node` | `Pod` | Scheduler only | Epoch check on gossip receive |
-| `scheduler_epoch` | `Pod` | Scheduler only | Reject if < current lease epoch |
-| `status.phase`, `status.pod_ip` | `Pod` | Worker only (if assigned) | Assigned node match + epoch |
+- **~600 lines** vs tens of thousands
+- **Scheduler fields native** — `assigned_node`, `scheduler_epoch` live directly on `Pod`
+- **No conversion layer** — the same struct serializes to redb bytes and to HTTP JSON
+- **Drop-in replacement** — existing handlers that match on `json!()` patterns need updating, but the serde output is identical
 
 ### Single `resources` Table
 
@@ -668,7 +675,7 @@ Until Phase 8, gossip between nodes is **unauthenticated**. Any peer that can re
 |---|---|---|---|
 | **1a** | `StoreBackend` trait + `MemoryBackend` (refactor from `ResourceStore`). API handlers unchanged behind the trait. | `src/store/mod.rs`, `src/store/backend.rs`, `src/types.rs`, `src/api/server.rs`, `src/main.rs` | Medium — mechanical refactor |
 | **1b** | `RedbBackend` + single `resources` table + `nodes` + `leases`. Switchable at startup via config. All redb writes use `spawn_blocking`. | `Cargo.toml` (+redb, +bincode), `src/store/db.rs`, `src/config.rs` (`--data-dir`) | Low — new code, old path unchanged |
-| **1c** | Define own types in `src/store/types.rs`. `StoredResource` enum + conversion layer (`From`/`TryFrom` ↔ k8s-openapi). Gradual migration. | `src/store/types.rs`, `src/store/conversion.rs`, all handlers (one by one) | High — coordinated change across 33 files |
+| **1c** | Define own types in `src/store/types.rs`. `StoredResource` enum replaces `AnyResource`. Replace k8s-openapi types in all handlers with own types. | `src/store/types.rs`, all handlers (~33 files) | High — coordinated change across many files |
 | **2** | `leases` table + heartbeat + scheduler lease acquisition with randomized backoff + epoch | `src/store/leases.rs`, `src/store/scheduler.rs` | Medium |
 | **3** | WebSocket gossip: broadcast writes to peers, receive + apply + dedup | `Cargo.toml` (+tokio-tungstenite), `src/store/ws.rs`, `src/store/gossip.rs` | Medium |
 | **4** | Anti-entropy: periodic xxHash3 checksum + diff exchange | `src/store/anti_entropy.rs` | Low |
@@ -676,4 +683,4 @@ Until Phase 8, gossip between nodes is **unauthenticated**. Any peer that can re
 | **6** | Workers: watch `assigned_node == self`, execute via CRI + NetMux, write status. Route controller. | Worker controller, route controller | Medium |
 | **7** | Events table + retention. Integration tests (3 nodes on same machine). | `src/store/events.rs`, `tests/gossip/` | Low |
 | **8** | Worker auth (token validation on WS connect). `z8s join` CLI. | `src/cli/join.rs`, `src/store/ws.rs` | Low |
-| **9** | Drop `k8s-openapi` if no remaining references. Remove old `ResourceStore` in-memory, old `ProcessTracker` status, old `AnyResource`. | Cleanup sweep (only after tests pass) | Low |
+| **9** | Remove old `ResourceStore` in-memory, old `ProcessTracker` status, old `AnyResource`. Final cleanup. | Cleanup sweep (only after tests pass) | Low |
