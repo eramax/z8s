@@ -454,156 +454,75 @@ z8s --port 8443 --data-dir /tmp/z8s-c \
 | Anti-entropy | Not needed (raft log) | Needed (30s checksum) |
 | Code to write | RaftStorage + RaftNetwork + snapshot | WS broadcast + checksum diff |
 
-## Redb Tables — Canonical Schema (Our Own Types, No k8s-openapi)
+## Redb Tables — Canonical Schema
 
-We define our own minimal types in `src/store/types.rs`. Only the ~90 fields we actually use. No `k8s-openapi` dependency. Each type has scheduler fields natively (no separate `pod_status` table needed).
+### Dual-Type Strategy: k8s-openapi for API, Own Types for Storage
 
-### Type Strategy
+To avoid breaking kubectl compatibility while gaining control over the internal schema:
 
-Replace the `k8s-openapi` crate with hand-written structs in `src/store/types.rs`:
+- **API layer** keeps `k8s-openapi` types for all HTTP responses (kubectl reads these)
+- **Storage layer** uses our own types (`src/store/types.rs`) with `StoredResource` enum for redb
+- **Conversion layer** (`From`/`TryFrom` traits) bridges between the two
 
-```rust
-// src/store/types.rs — our own types, no k8s-openapi
+This allows incremental migration: files that are converted use own types directly. Files that aren't converted yet use the conversion. When nothing references k8s-openapi anymore, we drop the crate.
 
-pub struct ObjectMeta {
-    pub name: String,
-    pub namespace: String,
-    pub uid: Option<String>,
-    pub creation_timestamp: Option<String>,  // RFC3339
-    pub resource_version: Option<String>,
-    pub labels: Option<BTreeMap<String, String>>,
-    pub annotations: Option<BTreeMap<String, String>>,
-    pub owner_references: Option<Vec<OwnerReference>>,
-}
+### Why Our Own Types
 
-pub struct Pod {
-    pub metadata: ObjectMeta,
-    pub spec: PodSpec,
-    pub status: PodStatus,
-    pub assigned_node: Option<String>,      // set by scheduler
-    pub scheduler_epoch: u64,                // lease epoch when assigned
-}
+Our types embed scheduler fields directly — no separate `pod_status` table needed:
 
-pub struct PodSpec {
-    pub containers: Vec<Container>,
-    pub init_containers: Vec<Container>,
-    pub volumes: Vec<Volume>,
-    pub restart_policy: Option<String>,
-    pub node_selector: Option<BTreeMap<String, String>>,
-}
+| Field | On own type | Written by | Enforced by |
+|---|---|---|---|
+| `assigned_node` | `Pod` | Scheduler only | Epoch check on gossip receive |
+| `scheduler_epoch` | `Pod` | Scheduler only | Reject if < current lease epoch |
+| `status.phase`, `status.pod_ip` | `Pod` | Worker only (if assigned) | Assigned node match + epoch |
 
-pub struct PodStatus {
-    pub phase: String,                      // "Pending" | "Running" | "Succeeded" | "Failed"
-    pub host_ip: Option<String>,
-    pub pod_ip: Option<String>,
-    pub start_time: Option<String>,
-    pub conditions: Vec<PodCondition>,
-    pub container_statuses: Vec<ContainerStatus>,
-}
+### Single `resources` Table
 
-pub struct Service {
-    pub metadata: ObjectMeta,
-    pub spec: ServiceSpec,
-}
+One table for all resource types:
 
-pub struct ServiceSpec {
-    pub selector: Option<BTreeMap<String, String>>,
-    pub ports: Vec<ServicePort>,
-    pub cluster_ip: Option<String>,
-    pub type_: Option<String>,
-    pub external_name: Option<String>,
-}
-```
+| Table | Key | Value | Writer class |
+|---|---|---|---|
+| `resources` | `{kind}/{ns}/{name}` | `bincode(StoredResource)` | Varies by field (see above) |
+| `nodes` | `{node_name}` | `bincode(NodeRecord)` | Only that node |
+| `leases` | `scheduler` | `bincode(LeaseRecord)` | Active scheduler only |
+| `routes` | `{peer_node}` | `bincode(RouteRecord)` | Route controller (derived) |
+| `events` | `{kind}/{uid}` | `bincode(EventRecord)` | Any actor (append-only) |
+| `meta` | schema_version | `u64` | System |
 
-...and so on for Deployment, ConfigMap, Secret, PersistentVolume, PersistentVolumeClaim, Ingress, NetworkPolicy, and all the container/probe/volume sub-types.
+Key format: `"Pod/default/my-nginx"`, `"Service/default/my-svc"`, etc. Prefix scan `"Pod/"` gives all pods — same as current `get_by_kind("Pod")`.
 
-**Total: ~600 lines of struct definitions** replaces the entire `k8s-openapi` crate.
+### Partial Updates: Read-Modify-Write
 
-### Table Layout (redb)
-
-All data goes into a single `resources` table as serialized blobs:
-
-| Table | Key | Value | Writer | Owner class |
-|---|---|---|---|---|
-| `resources` | `{kind}/{ns}/{name}` | `bincode(StoredResource)` | API server (create), scheduler (assign), worker (status) | Varies |
-| `nodes` | `{node_name}` | `bincode(NodeRecord)` | **Only that node** | Node |
-| `leases` | `leases/scheduler` | `bincode(LeaseRecord)` | **Active scheduler only** | Scheduler |
-| `routes` | `{peer_node}` | `bincode(RouteRecord)` | Route controller (derived) | Controller |
-| `events` | `{kind}/{uid}` | `bincode(EventRecord)` | Any actor (append-only) | Append-only |
-| `meta` | schema_version, cluster_id, local_node_id | `u64` / string | System | System |
-
-`pods/` and `services/` are not separate tables — they go into the `resources` table alongside ConfigMaps, Secrets, PVs, PVCs, Deployments, etc. The scheduler assignment fields (`assigned_node`, `scheduler_epoch`) live on the Pod struct itself.
-
-`StoredResource` is a wrapper enum:
+A worker updating pod status reads the full record, changes one field, writes it back:
 
 ```rust
-#[derive(Serialize, Deserialize)]
-pub enum StoredResource {
-    Pod(Pod),
-    Deployment(Deployment),
-    Service(Service),
-    ConfigMap(ConfigMap),
-    Secret(Secret),
-    PersistentVolume(PersistentVolume),
-    PersistentVolumeClaim(PersistentVolumeClaim),
-    Ingress(Ingress),
-    NetworkPolicy(NetworkPolicy),
-    // Custom CRDs
-    VNet(crate::netmux::crds::VNet),
-    Subnet(crate::netmux::crds::Subnet),
-    Nsg(crate::netmux::crds::Nsg),
-    RouteTable(crate::netmux::crds::RouteTable),
-}
+let mut pod = db.get("resources", "Pod/default/my-nginx").await?;
+pod.status.phase = "Running".into();
+pod.status.pod_ip = Some("10.42.1.5".into());
+db.apply("resources", &pod).await?;
 ```
 
-This replaces the current `AnyResource` enum. The scheduler reads `Pod` from the `resources` table, sets `assigned_node`, and writes it back. The worker reads the same `Pod`, sees `assigned_node == self`, and executes. Status is written directly on `Pod.status.phase` and `Pod.status.pod_ip`.
+A Pod is ~2KB. Read + write costs <1ms. No contention because only the assigned worker writes status for a given pod. The scheduler only writes assignment. No two actors write the same Pod's overlapping fields.
 
-## Store Module (`src/store/`)
+### Partial Update Safety: Epoch Check
 
-All DB, gossip, and sync code lives under `src/store/`:
+When gossip delivers a write, the receiver:
+1. Deserializes the incoming and current `StoredResource`
+2. If the incoming modified `assigned_node` and `incoming.scheduler_epoch < local.leases/scheduler.epoch` → reject (stale scheduler)
+3. If the incoming modified `status.*` and `incoming.source_node ≠ local.pods/*.assigned_node` → reject (wrong worker)
+4. Otherwise → apply
 
-```
-src/store/
-├── mod.rs          # StoreBackend trait, re-exports
-├── types.rs        # Our own Pod, Service, ObjectMeta, etc. (replaces k8s-openapi)
-├── db.rs           # redb wrapper (tables, read/write, transactions)
-├── gossip.rs       # Gossip protocol (broadcast, dedup, ordering)
-├── ws.rs           # WebSocket server + client
-├── anti_entropy.rs # Periodic checksum + diff sync
-├── events.rs       # Event table with retention
-└── scheduler.rs    # Lease acquisition, scheduling logic
-```
+### redb Concurrency Model
 
-### StoreBackend Trait
+redb supports **a single writer + multiple concurrent readers** via MVCC:
 
-To allow incremental migration, a `StoreBackend` trait abstracts over both the in-memory and redb stores:
+- Read transactions get a snapshot — never block, never stale within the txn
+- Write transactions are serialized — only one at a time
+- Our architecture matches this perfectly: gossip delivers writes sequentially, API handlers and controllers read concurrently
 
-```rust
-#[async_trait]
-pub trait StoreBackend: Send + Sync {
-    async fn apply(&self, resource: StoredResource);
-    async fn delete(&self, kind: &str, ns: &str, name: &str);
-    async fn get(&self, kind: &str, ns: &str, name: &str) -> Option<StoredResource>;
-    async fn list(&self, kind: &str) -> Vec<StoredResource>;
-    async fn list_by_prefix(&self, prefix: &str) -> Vec<StoredResource>;
-}
-```
+All writes use `tokio::task::spawn_blocking` because redb's API is synchronous and `commit()` calls `fsync`. Reads can use `block_in_place` or also `spawn_blocking` — whichever is simpler.
 
-Start with `MemoryBackend` (refactored from current `ResourceStore`), then add `RedbBackend`. API handlers work against the trait — they don't care which backend is active.
-
-### StoredResource Enum — replaces AnyResource
-
-```rust
-// src/store/types.rs
-#[derive(Serialize, Deserialize)]
-pub enum StoredResource {
-    Pod(Pod),
-    Deployment(Deployment),
-    // ... all other types ...
-}
-```
-
-`resources` table key format: `"{kind}/{ns}/{name}"` (e.g., `"Pod/default/my-nginx"`)
+redb already uses XXH3_128 internally for page checksums (same algorithm we planned for anti-entropy). We may reuse it rather than adding a separate xxhash crate.
 
 ### Table Definitions
 
@@ -739,18 +658,22 @@ z8s join ws://10.0.0.1:9876
   → Watch for assigned work
 ```
 
+### Known Gap: No Gossip Authentication (Phases 1-7)
+
+Until Phase 8, gossip between nodes is **unauthenticated**. Any peer that can reach the WebSocket port can inject or read cluster state. This is acceptable for development/testing but **not production-safe**. Phase 8 adds `--join-token` validation (already in `config.rs`).
+
 ## Phases
 
-| Phase | What | Key Files |
-|---|---|---|
-| **1a** | Define own types in `src/store/types.rs` (~600 lines). Drop `k8s-openapi` dep. | `Cargo.toml`, `src/store/mod.rs`, `src/store/types.rs` |
-| **1b** | `StoreBackend` trait + `MemoryBackend` (refactor from current `ResourceStore`). API handlers unchanged. | `src/store/backend.rs`, `src/types.rs`, `src/api/server.rs` |
-| **1c** | `RedbBackend` implementation + `resources` table. Switch at startup via config. | `Cargo.toml` (+redb, +bincode), `src/store/db.rs` |
-| **2** | `nodes` table + `leases` table + heartbeat + scheduler lease acquisition | `src/store/nodes.rs`, `src/store/leases.rs`, `src/store/scheduler.rs` |
-| **3** | WebSocket gossip: broadcast writes to peers, receive + apply + dedup | `src/store/ws.rs`, `src/store/gossip.rs` |
-| **4** | Anti-entropy: periodic xxHash3 checksum + diff exchange | `Cargo.toml` (+xxhash-rust), `src/store/anti_entropy.rs` |
-| **5** | Scheduler: watch unscheduled pods, pick node, write assignment. Deschedule on node death. | `src/store/scheduler.rs` (extend) |
-| **6** | Worker: watch `assigned_to == self`, execute pod via CRI + NetMux, write status | Worker controller (new) |
-| **7** | Events table + retention. Route controller (derived from nodes). | `src/store/events.rs`, route controller |
-| **8** | `z8s join` CLI, worker auth (token). Integration tests (3 nodes on same machine). | `src/cli/join.rs`, `tests/gossip/` |
-| **9** | Remove old `ResourceStore` in-memory, old `ProcessTracker` status, old `AnyResource`. Cleanup. | Cleanup sweep (only after tests pass) |
+| Phase | What | Key Files | Risk |
+|---|---|---|---|
+| **1a** | `StoreBackend` trait + `MemoryBackend` (refactor from `ResourceStore`). API handlers unchanged behind the trait. | `src/store/mod.rs`, `src/store/backend.rs`, `src/types.rs`, `src/api/server.rs`, `src/main.rs` | Medium — mechanical refactor |
+| **1b** | `RedbBackend` + single `resources` table + `nodes` + `leases`. Switchable at startup via config. All redb writes use `spawn_blocking`. | `Cargo.toml` (+redb, +bincode), `src/store/db.rs`, `src/config.rs` (`--data-dir`) | Low — new code, old path unchanged |
+| **1c** | Define own types in `src/store/types.rs`. `StoredResource` enum + conversion layer (`From`/`TryFrom` ↔ k8s-openapi). Gradual migration. | `src/store/types.rs`, `src/store/conversion.rs`, all handlers (one by one) | High — coordinated change across 33 files |
+| **2** | `leases` table + heartbeat + scheduler lease acquisition with randomized backoff + epoch | `src/store/leases.rs`, `src/store/scheduler.rs` | Medium |
+| **3** | WebSocket gossip: broadcast writes to peers, receive + apply + dedup | `Cargo.toml` (+tokio-tungstenite), `src/store/ws.rs`, `src/store/gossip.rs` | Medium |
+| **4** | Anti-entropy: periodic xxHash3 checksum + diff exchange | `src/store/anti_entropy.rs` | Low |
+| **5** | Scheduler: watch unscheduled pods, pick node, write assignment. Deschedule on node death. | `src/store/scheduler.rs` (extend) | Medium |
+| **6** | Workers: watch `assigned_node == self`, execute via CRI + NetMux, write status. Route controller. | Worker controller, route controller | Medium |
+| **7** | Events table + retention. Integration tests (3 nodes on same machine). | `src/store/events.rs`, `tests/gossip/` | Low |
+| **8** | Worker auth (token validation on WS connect). `z8s join` CLI. | `src/cli/join.rs`, `src/store/ws.rs` | Low |
+| **9** | Drop `k8s-openapi` if no remaining references. Remove old `ResourceStore` in-memory, old `ProcessTracker` status, old `AnyResource`. | Cleanup sweep (only after tests pass) | Low |
