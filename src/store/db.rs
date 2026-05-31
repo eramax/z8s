@@ -10,6 +10,8 @@ use crate::store::{AnyResource, ResourceState, ResourceTracker};
 use super::backend::StoreBackend;
 
 const RESOURCES: TableDefinition<&str, &[u8]> = TableDefinition::new("resources");
+const NODES: TableDefinition<&str, &[u8]> = TableDefinition::new("nodes");
+const LEASES: TableDefinition<&str, &[u8]> = TableDefinition::new("leases");
 
 pub struct RedbBackend {
     db: Arc<Database>,
@@ -25,9 +27,19 @@ impl RedbBackend {
         {
             let write_txn = db.begin_write()?;
             write_txn.open_table(RESOURCES)?;
+            write_txn.open_table(NODES)?;
+            write_txn.open_table(LEASES)?;
             write_txn.commit()?;
         }
         Ok(Self { db: Arc::new(db) })
+    }
+
+    pub fn write_lease_epoch(lease: &mut crate::types::LeaseRecord, holder: &str) {
+        lease.epoch += 1;
+        lease.holder = holder.to_string();
+        lease.acquired_at_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
+        lease.expires_at_ms = lease.acquired_at_ms + 30_000;
     }
 }
 
@@ -192,8 +204,65 @@ mod tests {
     }
 
     async fn update_state(&self, _uid: &str, _state: ResourceState) {
-        // State is ephemeral in MemoryBackend — for RedbBackend, state lives on the resource itself.
-        // This will be implemented properly in Phase 1c when we have our own types with status fields.
-        // For now, this is a no-op since the resource's status is updated via apply() from the worker.
+    }
+}
+
+// ── Node/lease operations (not part of StoreBackend trait) ────────────────────
+
+impl RedbBackend {
+    pub async fn read_node(&self, node_name: &str) -> Option<crate::types::NodeRecord> {
+        let db = self.db.clone();
+        let key = node_name.to_string();
+        tokio::task::spawn_blocking(move || {
+            let read_txn = db.begin_read().ok()?;
+            let table = read_txn.open_table(NODES).ok()?;
+            let value = table.get(key.as_str()).ok()??;
+            bincode::deserialize::<crate::types::NodeRecord>(value.value()).ok()
+        })
+        .await
+        .unwrap_or(None)
+    }
+
+    pub async fn write_node(&self, record: &crate::types::NodeRecord) -> anyhow::Result<()> {
+        let db = self.db.clone();
+        let key = record.node_name.clone();
+        let bytes = bincode::serialize(record)?;
+        tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
+            let write_txn = db.begin_write()?;
+            {
+                let mut table = write_txn.open_table(NODES)?;
+                table.insert(key.as_str(), bytes.as_slice())?;
+            }
+            write_txn.commit()?;
+            Ok(())
+        })
+        .await?
+    }
+
+    pub async fn read_lease(&self) -> Option<crate::types::LeaseRecord> {
+        let db = self.db.clone();
+        tokio::task::spawn_blocking(move || {
+            let read_txn = db.begin_read().ok()?;
+            let table = read_txn.open_table(LEASES).ok()?;
+            let value = table.get("scheduler").ok()??;
+            bincode::deserialize::<crate::types::LeaseRecord>(value.value()).ok()
+        })
+        .await
+        .unwrap_or(None)
+    }
+
+    pub async fn write_lease(&self, record: &crate::types::LeaseRecord) -> anyhow::Result<()> {
+        let db = self.db.clone();
+        let bytes = bincode::serialize(record)?;
+        tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
+            let write_txn = db.begin_write()?;
+            {
+                let mut table = write_txn.open_table(LEASES)?;
+                table.insert("scheduler", bytes.as_slice())?;
+            }
+            write_txn.commit()?;
+            Ok(())
+        })
+        .await?
     }
 }
