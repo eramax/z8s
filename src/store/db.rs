@@ -12,6 +12,7 @@ use super::backend::StoreBackend;
 const RESOURCES: TableDefinition<&str, &[u8]> = TableDefinition::new("resources");
 const NODES: TableDefinition<&str, &[u8]> = TableDefinition::new("nodes");
 const LEASES: TableDefinition<&str, &[u8]> = TableDefinition::new("leases");
+const EVENTS: TableDefinition<&str, &[u8]> = TableDefinition::new("events");
 
 pub struct RedbBackend {
     db: Arc<Database>,
@@ -29,6 +30,24 @@ impl RedbBackend {
             write_txn.open_table(RESOURCES)?;
             write_txn.open_table(NODES)?;
             write_txn.open_table(LEASES)?;
+            write_txn.open_table(EVENTS)?;
+            write_txn.commit()?;
+        }
+        Ok(Self { db: Arc::new(db) })
+    }
+
+    pub fn open_at(dir: impl AsRef<Path>, filename: &str) -> anyhow::Result<Self> {
+        let dir = dir.as_ref();
+        std::fs::create_dir_all(dir)?;
+        let db_path = dir.join(filename);
+        info!("Opening redb database at {}", db_path.display());
+        let db = Database::create(&db_path)?;
+        {
+            let write_txn = db.begin_write()?;
+            write_txn.open_table(RESOURCES)?;
+            write_txn.open_table(NODES)?;
+            write_txn.open_table(LEASES)?;
+            write_txn.open_table(EVENTS)?;
             write_txn.commit()?;
         }
         Ok(Self { db: Arc::new(db) })

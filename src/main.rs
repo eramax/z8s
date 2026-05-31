@@ -98,7 +98,23 @@ async fn main() -> Result<()> {
     let store: Arc<dyn StoreBackend>;
     let redb: Option<Arc<crate::store::RedbBackend>>;
 
-    if let Some(ref data_dir) = cfg.data_dir {
+    if let Some(ref db_path) = cfg.db_path {
+        let path = std::path::Path::new(db_path);
+        let parent = path.parent().unwrap_or(std::path::Path::new("/tmp"));
+        match crate::store::RedbBackend::open_at(parent, path.file_name().unwrap().to_str().unwrap()) {
+            Ok(db) => {
+                info!("Using redb database at {}", db_path);
+                let db = Arc::new(db);
+                store = db.clone() as Arc<dyn StoreBackend>;
+                redb = Some(db);
+            }
+            Err(e) => {
+                warn!("Failed to open redb at {}: {}. Falling back to in-memory.", db_path, e);
+                store = Arc::new(MemoryBackend::new());
+                redb = None;
+            }
+        }
+    } else if let Some(ref data_dir) = cfg.data_dir {
         match crate::store::RedbBackend::open(data_dir) {
             Ok(db) => {
                 info!("Using redb database at {}", data_dir);
@@ -297,15 +313,6 @@ async fn main() -> Result<()> {
             crate::scheduler::scheduler::run_scheduler(sched_store, sched_name, sched_db).await;
         });
     }
-
-    // Worker: watch assigned pods on every node
-    let worker_store = store.clone();
-    let worker_name = cfg.node_name.clone();
-    let worker_ctx = ctx.clone();
-    let worker_pt = process_tracker.clone();
-    tokio::spawn(async move {
-        crate::scheduler::worker::run_worker(worker_store, worker_name, worker_ctx, worker_pt).await;
-    });
 
     // L7 ingress HTTP listener
     {

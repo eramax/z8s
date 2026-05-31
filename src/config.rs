@@ -25,6 +25,7 @@ pub struct Config {
     pub dns_port: Option<u16>,
     pub manifests_dir: String,
     pub data_dir: Option<String>,
+    pub db_path: Option<String>,
     pub pod_cidr: String,
     pub vnet_cidr_size: u8,
     pub node_name: String,
@@ -73,6 +74,7 @@ impl Config {
             dns_port: None,
             manifests_dir: "/etc/z8s/manifests".to_string(),
             data_dir: None,
+            db_path: None,
             pod_cidr: "10.100.0.0/16".to_string(),
             vnet_cidr_size: 20,
             node_name: hostname(),
@@ -138,6 +140,12 @@ impl Config {
                     i += 1;
                     if let Some(v) = args.get(i) {
                         cfg.data_dir = Some(v.to_string());
+                    }
+                }
+                "--db-path" => {
+                    i += 1;
+                    if let Some(v) = args.get(i) {
+                        cfg.db_path = Some(v.to_string());
                     }
                 }
                 "--pod-cidr" => {
@@ -269,6 +277,7 @@ OPTIONS:
     --dns-port <PORT>         Force DNS listen port         [default: auto: try 53, then 5353]
     --manifests-dir <PATH>    Manifests directory to watch  [default: /etc/z8s/manifests]
     --data-dir <PATH>         Override data directory       [default: /var/lib/z8s or ~/.local/share/z8s]
+    --db-path <PATH>          Exact path to database file   [default: <data-dir>/z8s.redb]
     --peers <NAME=IP,...>     Other server nodes for gossip  [default: none]
     --join-token <TOKEN>      Token for worker node auth    [default: none]
     --help                    Show this help

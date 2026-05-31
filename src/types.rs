@@ -2156,6 +2156,8 @@ pub enum AnyResource {
     RouteTable(RouteTable),
     Ingress(Ingress),
     NetworkPolicy(NetworkPolicy),
+    Event(Event),
+    StorageClass(StorageClass),
 }
 
 impl AnyResource {
@@ -2174,6 +2176,8 @@ impl AnyResource {
             AnyResource::RouteTable(r) => &r.metadata,
             AnyResource::Ingress(r) => &r.metadata,
             AnyResource::NetworkPolicy(r) => &r.metadata,
+            AnyResource::Event(r) => &r.metadata,
+            AnyResource::StorageClass(r) => &r.metadata,
         }
     }
 
@@ -2192,6 +2196,8 @@ impl AnyResource {
             AnyResource::RouteTable(r) => &mut r.metadata,
             AnyResource::Ingress(r) => &mut r.metadata,
             AnyResource::NetworkPolicy(r) => &mut r.metadata,
+            AnyResource::Event(r) => &mut r.metadata,
+            AnyResource::StorageClass(r) => &mut r.metadata,
         }
     }
 
@@ -2210,6 +2216,8 @@ impl AnyResource {
             AnyResource::RouteTable(_) => "RouteTable",
             AnyResource::Ingress(_) => "Ingress",
             AnyResource::NetworkPolicy(_) => "NetworkPolicy",
+            AnyResource::Event(_) => "Event",
+            AnyResource::StorageClass(_) => "StorageClass",
         }
     }
 
