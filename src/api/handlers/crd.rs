@@ -17,7 +17,7 @@ pub async fn generic_create(s: &AppState, mut resource: AnyResource, kind: &str)
     if meta.uid.is_none() { meta.uid = Some(uuid::Uuid::new_v4().to_string()); }
     if meta.creation_timestamp.is_none() { meta.creation_timestamp = Some(now_time()); }
     let exists = s.store.get_by_kind(kind).await.iter().any(|t| t.resource.name() == resource.name());
-    s.store.apply(resource.clone()).await.map_err(|e| ApiError::bad_request(e.to_string()))?;
+    s.apply_and_broadcast(resource.clone()).await.map_err(|e| ApiError::bad_request(e.to_string()))?;
     s.registry.on_apply(&s.ctx, &resource).await;
     let status = if exists { StatusCode::OK } else { StatusCode::CREATED };
     Ok((status, Json(serde_json::to_value(&resource).unwrap_or_default())).into_response())

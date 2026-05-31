@@ -73,7 +73,7 @@ pub async fn create_secret(
     let resource = AnyResource::Secret(sec);
     let already_exists = state.store.get_by_kind("Secret").await.iter()
         .any(|t| t.resource.name() == resource.name() && t.resource.namespace() == resource.namespace());
-    state.store.apply(resource.clone()).await.map_err(|e| ApiError::bad_request(e.to_string()))?;
+    state.apply_and_broadcast(resource.clone()).await.map_err(|e| ApiError::bad_request(e.to_string()))?;
     let status = if already_exists { StatusCode::OK } else { StatusCode::CREATED };
     Ok((status, Json(serde_json::to_value(&resource).unwrap_or_default())).into_response())
 }
@@ -104,7 +104,7 @@ pub async fn update_secret(
         }
     }
     let resource = AnyResource::Secret(sec);
-    state.store.apply(resource.clone()).await.map_err(|e| ApiError::bad_request(e.to_string()))?;
+    state.apply_and_broadcast(resource.clone()).await.map_err(|e| ApiError::bad_request(e.to_string()))?;
     Ok(Json(serde_json::to_value(&resource).unwrap_or_default()))
 }
 

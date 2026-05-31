@@ -47,7 +47,7 @@ pub async fn create_ingress(
         .any(|t| t.resource.name() == ing.metadata.name.as_deref().unwrap_or("") && t.resource.namespace() == namespace);
 
     let resource = AnyResource::Ingress(ing);
-    state.store.apply(resource.clone()).await.map_err(|e| ApiError::bad_request(e.to_string()))?;
+    state.apply_and_broadcast(resource.clone()).await.map_err(|e| ApiError::bad_request(e.to_string()))?;
 
     state.registry.on_apply(&state.ctx, &resource).await;
 
@@ -85,7 +85,7 @@ pub async fn update_ingress(
     if ing.metadata.namespace.is_none() { ing.metadata.namespace = Some(namespace); }
     if ing.metadata.name.is_none() { ing.metadata.name = Some(name); }
     let resource = AnyResource::Ingress(ing);
-    state.store.apply(resource.clone()).await.map_err(|e| ApiError::bad_request(e.to_string()))?;
+    state.apply_and_broadcast(resource.clone()).await.map_err(|e| ApiError::bad_request(e.to_string()))?;
     state.registry.on_apply(&state.ctx, &resource).await;
     Ok(Json(serde_json::to_value(&resource).unwrap_or_default()))
 }

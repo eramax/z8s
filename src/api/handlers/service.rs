@@ -144,7 +144,7 @@ pub async fn create_service(
         .any(|t| t.resource.name() == svc.metadata.name.as_deref().unwrap_or("") && t.resource.namespace() == namespace);
 
     let resource = AnyResource::Service(svc.clone());
-    state.store.apply(resource.clone()).await.map_err(|e| ApiError::bad_request(e.to_string()))?;
+    state.apply_and_broadcast(resource.clone()).await.map_err(|e| ApiError::bad_request(e.to_string()))?;
 
     state.registry.on_apply(&state.ctx, &resource).await;
 
@@ -179,7 +179,7 @@ pub async fn update_service(
         }
     }
     let resource = AnyResource::Service(svc.clone());
-    state.store.apply(resource.clone()).await.map_err(|e| ApiError::bad_request(e.to_string()))?;
+    state.apply_and_broadcast(resource.clone()).await.map_err(|e| ApiError::bad_request(e.to_string()))?;
     state.registry.on_apply(&state.ctx, &resource).await;
     Ok(Json(serde_json::to_value(&resource).unwrap_or_default()))
 }

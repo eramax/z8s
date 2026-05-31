@@ -45,7 +45,7 @@ pub async fn create_networkpolicy(
         .any(|t| t.resource.name() == np.metadata.name.as_deref().unwrap_or("") && t.resource.namespace() == namespace);
 
     let resource = AnyResource::NetworkPolicy(np);
-    state.store.apply(resource.clone()).await.map_err(|e| ApiError::bad_request(e.to_string()))?;
+    state.apply_and_broadcast(resource.clone()).await.map_err(|e| ApiError::bad_request(e.to_string()))?;
 
     state.registry.on_apply(&state.ctx, &resource).await;
 
@@ -83,7 +83,7 @@ pub async fn update_networkpolicy(
     if np.metadata.namespace.is_none() { np.metadata.namespace = Some(namespace); }
     if np.metadata.name.is_none() { np.metadata.name = Some(name); }
     let resource = AnyResource::NetworkPolicy(np);
-    state.store.apply(resource.clone()).await.map_err(|e| ApiError::bad_request(e.to_string()))?;
+    state.apply_and_broadcast(resource.clone()).await.map_err(|e| ApiError::bad_request(e.to_string()))?;
     state.registry.on_apply(&state.ctx, &resource).await;
     Ok(Json(serde_json::to_value(&resource).unwrap_or_default()))
 }

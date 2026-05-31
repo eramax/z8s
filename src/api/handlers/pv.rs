@@ -42,7 +42,7 @@ pub async fn create_pv(
         pv.metadata.creation_timestamp = Some(now_time());
     }
     let resource = AnyResource::PersistentVolume(pv);
-    state.store.apply(resource.clone()).await.map_err(|e| ApiError::bad_request(e.to_string()))?;
+    state.apply_and_broadcast(resource.clone()).await.map_err(|e| ApiError::bad_request(e.to_string()))?;
     state.registry.on_apply(&state.ctx, &resource).await;
     Ok((StatusCode::CREATED, Json(resource)).into_response())
 }

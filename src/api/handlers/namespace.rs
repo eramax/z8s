@@ -61,7 +61,7 @@ pub async fn create_namespace(
         return Err(ApiError::bad_request(format!("namespace \"{}\" already exists", name)));
     }
 
-    state.store.apply(AnyResource::Namespace(ns.clone())).await
+    state.apply_and_broadcast(AnyResource::Namespace(ns.clone())).await
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
     info!("Created namespace: {} — verifying...", name);
     // Verify by reading back

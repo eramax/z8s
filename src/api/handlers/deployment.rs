@@ -241,7 +241,7 @@ pub async fn patch_deployment_scale(
                 if let Some(spec) = deploy.spec.as_mut() {
                     spec.replicas = Some(replicas);
                     info!("Scaled deployment {}/{} to {} replicas", namespace, name, replicas);
-                    state.store.apply(AnyResource::Deployment(deploy.clone())).await.ok();
+                    state.apply_and_broadcast(AnyResource::Deployment(deploy.clone())).await.ok();
                 }
 
                 let selector = deploy
@@ -287,7 +287,7 @@ pub async fn create_deployment(
     }
     fill_deployment_metadata(&mut deploy);
     let resource = AnyResource::Deployment(deploy);
-    state.store.apply(resource.clone()).await
+    state.apply_and_broadcast(resource.clone()).await
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
     let mut value = serde_json::to_value(&resource).unwrap_or_default();
     value["status"] = serde_json::json!({ "replicas": 0 });
@@ -353,7 +353,7 @@ pub async fn patch_deployment(
     }
     fill_deployment_metadata(&mut deploy);
     let resource = AnyResource::Deployment(deploy);
-    state.store.apply(resource.clone()).await
+    state.apply_and_broadcast(resource.clone()).await
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
     let mut value = serde_json::to_value(&resource).unwrap_or_default();
     value["status"] = serde_json::json!({ "replicas": 0 });

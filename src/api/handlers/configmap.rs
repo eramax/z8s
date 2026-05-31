@@ -47,7 +47,7 @@ pub async fn create_configmap(
     let resource = AnyResource::ConfigMap(cm);
     let already_exists = state.store.get_by_kind("ConfigMap").await.iter()
         .any(|t| t.resource.name() == resource.name() && t.resource.namespace() == resource.namespace());
-    state.store.apply(resource.clone()).await.map_err(|e| ApiError::bad_request(e.to_string()))?;
+    state.apply_and_broadcast(resource.clone()).await.map_err(|e| ApiError::bad_request(e.to_string()))?;
     let status = if already_exists { StatusCode::OK } else { StatusCode::CREATED };
     Ok((status, Json(resource)).into_response())
 }
@@ -69,7 +69,7 @@ pub async fn update_configmap(
     if cm.metadata.namespace.is_none() { cm.metadata.namespace = Some(namespace); }
     if cm.metadata.name.is_none() { cm.metadata.name = Some(name); }
     let resource = AnyResource::ConfigMap(cm);
-    state.store.apply(resource.clone()).await.map_err(|e| ApiError::bad_request(e.to_string()))?;
+    state.apply_and_broadcast(resource.clone()).await.map_err(|e| ApiError::bad_request(e.to_string()))?;
     match resource { AnyResource::ConfigMap(cm) => Ok(Json(cm)), _ => unreachable!() }
 }
 
