@@ -273,8 +273,11 @@ fn main() -> Result<()> {
         // ── Status ──────────────────────────────────────────────────────
         Some("status") => show_status(),
 
-        // ── Default: start z8s (daemon mode) ────────────────────────────
-        _ => default_start(&args),
+        // ── Default: show help ──────────────────────────────────────────
+        _ => {
+            print_help();
+            Ok(())
+        }
     }
 }
 
