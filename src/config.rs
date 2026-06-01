@@ -13,9 +13,22 @@
 //!   --help                    Print this help
 
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::warn;
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
+
+/// Set to true on the node where the scheduler successfully acquires the
+/// cluster-wide lease. Deployment reconciliation only runs on this node.
+pub static IS_SCHEDULER_LEADER: AtomicBool = AtomicBool::new(false);
+
+pub fn set_scheduler_leader(leader: bool) {
+    IS_SCHEDULER_LEADER.store(leader, Ordering::Relaxed);
+}
+
+pub fn is_scheduler_leader() -> bool {
+    IS_SCHEDULER_LEADER.load(Ordering::Relaxed)
+}
 
 pub struct Config {
     pub api_port: u16,

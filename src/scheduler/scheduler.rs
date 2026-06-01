@@ -154,6 +154,7 @@ pub async fn run_scheduler(
     gs: Option<Arc<tokio::sync::Mutex<crate::store::gossip::GossipState>>>,
 ) {
     let mut lease = run_lease_loop(db.clone(), node_name.clone()).await;
+    crate::config::set_scheduler_leader(true);
     info!("Scheduler {} active (epoch {})", node_name, lease.epoch);
 
     loop {
@@ -163,7 +164,9 @@ pub async fn run_scheduler(
             .as_millis() as i64;
 
         if lease.expires_at_ms < now {
+            crate::config::set_scheduler_leader(false);
             lease = run_lease_loop(db.clone(), node_name.clone()).await;
+            crate::config::set_scheduler_leader(true);
             info!(
                 "Scheduler {} re-acquired lease (epoch {})",
                 node_name, lease.epoch
@@ -174,7 +177,9 @@ pub async fn run_scheduler(
             if let Some(l) = renew_lease(db.clone(), &node_name, &lease).await {
                 lease = l;
             } else {
+                crate::config::set_scheduler_leader(false);
                 lease = run_lease_loop(db.clone(), node_name.clone()).await;
+                crate::config::set_scheduler_leader(true);
                 continue;
             }
         }
