@@ -80,7 +80,7 @@ fn main() -> Result<()> {
     }
 
     if cmd == Some("node") && args.get(2).map(|s| s.as_str()) == Some("start") {
-        return node_start(&args);
+        return node_start(&args, 6443);
     }
 
     // Default: spawn a node and exit
@@ -123,13 +123,13 @@ fn restart_z8s(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn node_start(args: &[String]) -> Result<()> {
+fn node_start(args: &[String], main_port: u16) -> Result<()> {
     let node_port = parse_port(args, 7443);
     if std::net::TcpListener::bind(format!("0.0.0.0:{node_port}")).is_err() {
         anyhow::bail!("Port {node_port} is already in use");
     }
     let peer_host = parse_opt_arg(args, "--peer-addr").unwrap_or_else(|| "127.0.0.1".to_string());
-    let self_port = parse_port(args, 6443); // main node's port is the --port before the subcommand
+    let self_port = main_port;
     let mut node_args = vec![
         "run".to_string(),
         "--port".to_string(), node_port.to_string(),
