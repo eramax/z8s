@@ -13,25 +13,39 @@ async fn pick_node(
     db: &Arc<crate::store::RedbBackend>,
 ) -> Option<String> {
     let mut best: Option<(String, u32)> = None;
-    let node_name = crate::config::get().node_name.clone();
-    tracing::info!("pick_node: reading node {}", node_name);
-    if let Some(rec) = db.read_node(&node_name).await {
-        tracing::info!(
-            "pick_node: found node {}, state={:?}, pods={}, last_seen={}",
-            rec.node_name,
-            rec.state,
-            rec.pod_count,
-            rec.last_seen
-        );
-        if rec.state != NodeState::Dead {
-            let count = store.get_by_kind("Pod").await.iter()
-                .filter(|t| matches!(&t.resource, AnyResource::Pod(p) if p.assigned_node.as_deref() == Some(&rec.node_name)))
-                .count() as u32;
-            best = Some((rec.node_name, count));
+    
+    // Always include the local node
+    let mut node_names = vec![crate::config::get().node_name.clone()];
+    
+    // Include all gossiped nodes
+    for t in store.get_by_kind("Node").await {
+        if let AnyResource::Node(n) = t.resource {
+            if let Some(name) = n.metadata.name {
+                if !node_names.contains(&name) {
+                    node_names.push(name);
+                }
+            }
         }
-    } else {
-        tracing::info!("pick_node: no node record found for {}", node_name);
     }
+
+    for node_name in node_names {
+        // Read local state for this node if we have it (e.g. for the local node itself)
+        if let Some(rec) = db.read_node(&node_name).await {
+            if rec.state == NodeState::Dead {
+                continue;
+            }
+        }
+        
+        // Count pods assigned to this node
+        let count = store.get_by_kind("Pod").await.iter()
+            .filter(|t| matches!(&t.resource, AnyResource::Pod(p) if p.assigned_node.as_deref() == Some(node_name.as_str())))
+            .count() as u32;
+
+        if best.is_none() || count < best.as_ref().unwrap().1 {
+            best = Some((node_name, count));
+        }
+    }
+    
     best.map(|(n, _)| n)
 }
 

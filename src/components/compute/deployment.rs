@@ -149,14 +149,6 @@ impl DeploymentResource {
             tracing::info!("Creating pod {} for deployment {}", pod_name, name);
             self.store.apply(resource.clone()).await?;
 
-            if let Err(e) = ctx.process_tracker.start_pod(&resource).await {
-                tracing::error!("Failed to start pod {}: {}", pod_name, e);
-                self.store
-                    .update_state(&resource.uid(), ResourceState::Failed(e.to_string()))
-                    .await;
-                break;
-            }
-
             created_ids.push(pod_name);
         }
 

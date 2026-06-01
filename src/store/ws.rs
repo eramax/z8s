@@ -10,19 +10,44 @@ use crate::store::StoreBackend;
 use crate::store::gossip::{GossipMessage, GossipState, SyncEntry};
 
 /// Handle an incoming WebSocket connection from a peer.
-pub async fn handle_gossip_ws(mut ws: WebSocket, state: Arc<tokio::sync::Mutex<GossipState>>) {
+pub async fn handle_gossip_ws(ws: WebSocket, state: Arc<tokio::sync::Mutex<GossipState>>) {
     info!("Gossip peer connected");
+
+    let (mut ws_sender, mut ws_receiver) = ws.split();
+    let (msg_tx, mut msg_rx) = tokio::sync::mpsc::unbounded_channel::<Message>();
+    let (broadcast_tx, mut broadcast_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+
+    state.lock().await.add_peer(broadcast_tx);
+
+    let msg_tx_clone = msg_tx.clone();
+    tokio::spawn(async move {
+        while let Some(data) = broadcast_rx.recv().await {
+            if let Ok(text) = String::from_utf8(data) {
+                if msg_tx_clone.send(Message::Text(text.into())).is_err() {
+                    break;
+                }
+            }
+        }
+    });
+
+    tokio::spawn(async move {
+        while let Some(msg) = msg_rx.recv().await {
+            if ws_sender.send(msg).await.is_err() {
+                break;
+            }
+        }
+    });
 
     let msg = GossipMessage::SyncRequest { request_id: 0 };
     if let Ok(json) = serde_json::to_string(&msg) {
-        let _ = ws.send(Message::Text(json.into())).await;
+        let _ = msg_tx.send(Message::Text(json.into()));
     }
 
     loop {
-        match ws.recv().await {
+        match ws_receiver.next().await {
             Some(Ok(Message::Text(text))) => {
                 if let Ok(msg) = serde_json::from_str::<GossipMessage>(&text) {
-                    handle_message(msg, &mut ws, &state).await;
+                    handle_message(msg, &msg_tx, &state).await;
                 }
             }
             Some(Ok(Message::Close(_))) => {
@@ -30,7 +55,7 @@ pub async fn handle_gossip_ws(mut ws: WebSocket, state: Arc<tokio::sync::Mutex<G
                 break;
             }
             Some(Ok(Message::Ping(data))) => {
-                let _ = ws.send(Message::Pong(data)).await;
+                let _ = msg_tx.send(Message::Pong(data));
             }
             Some(Err(e)) => {
                 warn!("Gossip WS error: {}", e);
@@ -44,7 +69,7 @@ pub async fn handle_gossip_ws(mut ws: WebSocket, state: Arc<tokio::sync::Mutex<G
 
 async fn handle_message(
     msg: GossipMessage,
-    ws: &mut WebSocket,
+    tx: &tokio::sync::mpsc::UnboundedSender<Message>,
     state: &Arc<tokio::sync::Mutex<GossipState>>,
 ) {
     match msg {
@@ -87,7 +112,7 @@ async fn handle_message(
                 entries,
             };
             if let Ok(json) = serde_json::to_string(&response) {
-                let _ = ws.send(Message::Text(json.into())).await;
+                let _ = tx.send(Message::Text(json.into()));
             }
             info!("Sent sync_full ({} entries)", count);
         }
@@ -107,13 +132,11 @@ async fn handle_message(
             }
         }
         GossipMessage::Heartbeat => {
-            let _ = ws
-                .send(Message::Text(
-                    serde_json::to_string(&GossipMessage::Heartbeat)
-                        .unwrap()
-                        .into(),
-                ))
-                .await;
+            let _ = tx.send(Message::Text(
+                serde_json::to_string(&GossipMessage::Heartbeat)
+                    .unwrap()
+                    .into(),
+            ));
         }
         _ => {}
     }
