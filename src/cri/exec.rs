@@ -1,4 +1,7 @@
 use crate::cri::rootfs;
+use crate::api::server::AppState;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use axum::extract::{Path, State, WebSocketUpgrade};
 use axum::http::request::Parts;
@@ -15,9 +18,7 @@ use std::os::fd::OwnedFd;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::process::Stdio;
-use std::sync::Arc;
 use tokio::process::Command;
-use tokio::sync::Mutex;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::info;
 
@@ -46,10 +47,6 @@ pub struct ExecParams {
     pub stderr: bool,
 }
 
-fn parse_bool(params: &HashMap<String, Vec<String>>, key: &str, default: bool) -> bool {
-    params.get(key).and_then(|v| v.first()).map(|v| v == "true").unwrap_or(default)
-}
-
 impl<S> axum::extract::FromRequestParts<S> for ExecParams
 where
     S: Send + Sync,
@@ -65,10 +62,26 @@ where
             .cloned()
             .unwrap_or_default();
         let container = params.get("container").and_then(|v| v.first()).cloned();
-        let tty = parse_bool(&params, "tty", false);
-        let stdin = parse_bool(&params, "stdin", false);
-        let stdout = parse_bool(&params, "stdout", true);
-        let stderr = parse_bool(&params, "stderr", true);
+        let tty = params
+            .get("tty")
+            .and_then(|v| v.first())
+            .map(|v| v == "true")
+            .unwrap_or(false);
+        let stdin = params
+            .get("stdin")
+            .and_then(|v| v.first())
+            .map(|v| v == "true")
+            .unwrap_or(false);
+        let stdout = params
+            .get("stdout")
+            .and_then(|v| v.first())
+            .map(|v| v == "true")
+            .unwrap_or(true);
+        let stderr = params
+            .get("stderr")
+            .and_then(|v| v.first())
+            .map(|v| v == "true")
+            .unwrap_or(true);
         Ok(ExecParams {
             command,
             container,
@@ -113,7 +126,7 @@ fn parse_query_params(query: &str) -> HashMap<String, Vec<String>> {
 
 pub async fn exec_handler(
     ws: WebSocketUpgrade,
-    State(state): State<ExecState>,
+    State(state): State<AppState>,
     Path((namespace, name)): Path<(String, String)>,
     params: ExecParams,
 ) -> impl IntoResponse {
@@ -132,7 +145,7 @@ pub async fn exec_handler(
 }
 
 pub async fn exec_post_handler(
-    State(_state): State<ExecState>,
+    State(_state): State<AppState>,
     Path((_namespace, name)): Path<(String, String)>,
     params: ExecParams,
 ) -> impl IntoResponse {
@@ -156,27 +169,18 @@ struct ContainerExecInfo {
     isolated_net: bool,
 }
 
-fn is_pid_alive(pid: u32) -> bool {
-    std::path::Path::new(&format!("/proc/{pid}")).exists()
-}
-
 async fn resolve_container(
-    state: &ExecState,
+    state: &AppState,
     pod_name: &str,
     container_name: Option<&str>,
 ) -> Option<ContainerExecInfo> {
-    let running = state.0.lock().await;
+    let running = state.process_tracker.running.lock().await;
     let prefix = format!("{}-", pod_name);
     let rc = if let Some(container) = container_name {
-        let key = format!("{}-{}", pod_name, container);
-        running.get(&key).filter(|rc| rc.instance.pid.map(is_pid_alive).unwrap_or(false))?
+        running.get(&format!("{}-{}", pod_name, container))
     } else {
-        running.iter()
-            .filter(|(k, _)| k.starts_with(&prefix))
-            .filter(|(_, rc)| rc.instance.pid.map(is_pid_alive).unwrap_or(false))
-            .next()
-            .map(|(_, v)| v)?
-    };
+        running.iter().find(|(k, _)| k.starts_with(&prefix)).map(|(_, v)| v)
+    }?;
 
     let env_vars = rc.instance.env_vars.clone();
     let rootfs = rc.instance.rootfs.clone();
@@ -210,14 +214,16 @@ fn spawn_with_pty(
         .open(&slave_name)
         .map_err(|e| format!("open slave {}: {}", slave_name, e))?;
 
-    // Set a clean cooked-mode terminal suitable for an interactive shell.
     if let Ok(mut t) = termios::tcgetattr(&slave) {
-        t.output_flags = OutputFlags::OPOST | OutputFlags::ONLCR | OutputFlags::ONOCR;
-        t.local_flags = LocalFlags::ECHO | LocalFlags::ECHOE | LocalFlags::ECHOK
-            | LocalFlags::ECHOCTL | LocalFlags::ISIG | LocalFlags::ICANON;
-        t.input_flags = InputFlags::ICRNL | InputFlags::IXON | InputFlags::BRKINT
-            | InputFlags::IGNPAR | InputFlags::ISTRIP;
-        t.control_flags = nix::sys::termios::ControlFlags::CS8;
+        termios::cfmakeraw(&mut t);
+        t.output_flags |= OutputFlags::OPOST | OutputFlags::ONLCR | OutputFlags::ONOCR;
+        t.local_flags |= LocalFlags::ECHO
+            | LocalFlags::ECHOE
+            | LocalFlags::ECHOK
+            | LocalFlags::ISIG
+            | LocalFlags::ICANON;
+        t.local_flags &= !LocalFlags::ECHOCTL;
+        t.input_flags |= InputFlags::ICRNL | InputFlags::IXON;
         let _ = termios::tcsetattr(&slave, SetArg::TCSANOW, &t);
     }
     set_winsize(slave.as_raw_fd(), 80, 24);
@@ -226,31 +232,7 @@ fn spawn_with_pty(
         let _ = rootfs::setup_exec_mounts(root);
     }
 
-    let (mut child_cmd, ctx) = build_command(cmd, args, rootfs_pid, env_vars, isolated_net);
-
-    if let Some(ctx) = ctx {
-        unsafe {
-            child_cmd.as_std_mut().pre_exec(move || {
-                exec_container_pre_exec(&ctx)?;
-                let _ = nix::unistd::chdir("/");
-                let _ = nix::unistd::setsid();
-                nix::libc::ioctl(0, nix::libc::TIOCSCTTY as _, 0);
-                nix::libc::tcsetpgrp(0, nix::libc::getpid());
-                for sig in [
-                    nix::libc::SIGINT,
-                    nix::libc::SIGHUP,
-                    nix::libc::SIGTERM,
-                    nix::libc::SIGPIPE,
-                    nix::libc::SIGTSTP,
-                    nix::libc::SIGTTIN,
-                    nix::libc::SIGTTOU,
-                ] {
-                    nix::libc::signal(sig, nix::libc::SIG_DFL);
-                }
-                Ok(())
-            });
-        }
-    }
+    let mut child_cmd = build_command(cmd, args, rootfs_pid, env_vars, isolated_net);
 
     child_cmd
         .stdin(Stdio::from(
@@ -261,6 +243,32 @@ fn spawn_with_pty(
         ))
         .stderr(Stdio::from(slave));
     child_cmd.kill_on_drop(true);
+
+    let ns_fds = rootfs_pid.map(|(_, pid)| try_open_namespace_fds(pid));
+
+    unsafe {
+        child_cmd.as_std_mut().pre_exec(move || {
+            if let Some(ref ns) = ns_fds {
+                let _ = enter_container_namespaces(ns, isolated_net, isolated_net);
+                let _ = nix::unistd::chdir("/");
+            }
+            let _ = nix::unistd::setsid();
+            nix::libc::ioctl(0, nix::libc::TIOCSCTTY as _, 0);
+            nix::libc::tcsetpgrp(0, nix::libc::getpid());
+            for sig in [
+                nix::libc::SIGINT,
+                nix::libc::SIGHUP,
+                nix::libc::SIGTERM,
+                nix::libc::SIGPIPE,
+                nix::libc::SIGTSTP,
+                nix::libc::SIGTTIN,
+                nix::libc::SIGTTOU,
+            ] {
+                nix::libc::signal(sig, nix::libc::SIG_DFL);
+            }
+            Ok(())
+        });
+    }
 
     Ok((master, child_cmd))
 }
@@ -276,15 +284,7 @@ fn spawn_with_pipes(
         let _ = rootfs::setup_exec_mounts(root);
     }
 
-    let (mut child_cmd, ctx) = build_command(cmd, args, rootfs_pid, env_vars, isolated_net);
-
-    if let Some(ctx) = ctx {
-        unsafe {
-            child_cmd.as_std_mut().pre_exec(move || {
-                exec_container_pre_exec(&ctx)
-            });
-        }
-    }
+    let mut child_cmd = build_command(cmd, args, rootfs_pid, env_vars, isolated_net);
 
     child_cmd
         .stdin(Stdio::piped())
@@ -295,20 +295,18 @@ fn spawn_with_pipes(
     Ok(child_cmd)
 }
 
-struct NamespaceFds {
+struct ContainerNamespaces {
     user: Option<OwnedFd>,
     pid: Option<OwnedFd>,
     mnt: Option<OwnedFd>,
     net: Option<OwnedFd>,
 }
 
-/// Try to open each namespace fd independently. Returns whatever we can open
-/// (user namespace often fails for userns containers, but mnt/net may still work).
-fn try_open_namespace_fds(container_pid: u32) -> NamespaceFds {
+fn try_open_namespace_fds(container_pid: u32) -> ContainerNamespaces {
     let open_flags = OFlag::O_RDONLY | OFlag::O_CLOEXEC;
     let mode = nix::sys::stat::Mode::empty();
     let open_one = |path: &str| nix::fcntl::open(path, open_flags, mode).ok();
-    NamespaceFds {
+    ContainerNamespaces {
         user: open_one(&format!("/proc/{}/ns/user", container_pid)),
         pid: open_one(&format!("/proc/{}/ns/pid", container_pid)),
         mnt: open_one(&format!("/proc/{}/ns/mnt", container_pid)),
@@ -316,37 +314,33 @@ fn try_open_namespace_fds(container_pid: u32) -> NamespaceFds {
     }
 }
 
-/// Enter user, mnt, net namespaces and mount a fresh procfs so exec'd
-/// processes have a working /proc. We avoid setns(CLONE_NEWPID) because on
-/// this kernel entering a child PID namespace via setns still shows the
-/// parent namespace's processes in a fresh proc mount — only fork() after
-/// setns gives real isolation, but the fork breaks PTY/TTY exec. The
-/// container's init retains its isolated procfs from mount_filesystems(true).
-fn exec_container_pre_exec(ctx: &ExecCtx) -> Result<(), std::io::Error> {
-    if let Some(ref user) = ctx.ns.user {
+fn enter_container_namespaces(
+    ns: &ContainerNamespaces,
+    isolated_net: bool,
+    use_mnt_ns: bool,
+) -> Result<(), std::io::Error> {
+    if let Some(ref user) = ns.user {
         let _ = nix::sched::setns(user, CloneFlags::CLONE_NEWUSER);
     }
-    if ctx.use_mnt_ns {
-        if let Some(ref mnt) = ctx.ns.mnt {
+    if use_mnt_ns {
+        if let Some(ref mnt) = ns.mnt {
             nix::sched::setns(mnt, CloneFlags::CLONE_NEWNS).map_err(|e| {
                 std::io::Error::new(std::io::ErrorKind::Other, format!("setns(CLONE_NEWNS): {e}"))
             })?;
         }
-        let _ = mount(Some("proc"), "/proc", Some("proc"),
-            MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC | MsFlags::MS_NODEV, None::<&str>);
     }
-    if ctx.iso_net {
-        if let Some(ref net) = ctx.ns.net {
-            let _ = nix::sched::setns(net, CloneFlags::CLONE_NEWNET);
+    if isolated_net {
+        if let Some(ref net) = ns.net {
+            nix::sched::setns(net, CloneFlags::CLONE_NEWNET).map_err(|e| {
+                std::io::Error::new(std::io::ErrorKind::Other, format!("setns(CLONE_NEWNET): {e}"))
+            })?;
         }
     }
-    if let Some(g) = ctx.c_gid {
-        let _ = nix::unistd::setgid(nix::unistd::Gid::from_raw(g));
-    }
-    if let Some(u) = ctx.c_uid {
-        let _ = nix::unistd::setuid(nix::unistd::Uid::from_raw(u));
-    }
     Ok(())
+}
+
+fn is_root() -> bool {
+    rootfs::is_root()
 }
 
 fn read_container_path(pid: u32) -> String {
@@ -362,21 +356,13 @@ fn read_container_path(pid: u32) -> String {
     std::env::var("PATH").unwrap_or_else(|_| "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string())
 }
 
-struct ExecCtx {
-    ns: NamespaceFds,
-    use_mnt_ns: bool,
-    c_uid: Option<u32>,
-    c_gid: Option<u32>,
-    iso_net: bool,
-}
-
 fn build_command(
     cmd: &str,
     args: &[&str],
     rootfs_pid: Option<(&str, u32)>,
     env_vars: &[(String, String)],
     isolated_net: bool,
-) -> (Command, Option<ExecCtx>) {
+) -> Command {
     let apply_env = |c: &mut Command| {
         c.env_clear();
         let mut has_path = false;
@@ -405,8 +391,8 @@ fn build_command(
             (None, None)
         };
 
-        let ns = try_open_namespace_fds(container_pid);
-        let can_enter_mnt = ns.mnt.is_some();
+        let ns_fds = try_open_namespace_fds(container_pid);
+        let can_enter_mnt = ns_fds.mnt.is_some();
         let (exec_path, prog_args) = if can_enter_mnt {
             rootfs::build_container_argv_in_mount_ns(cmd, &args_owned, root)
         } else {
@@ -416,7 +402,7 @@ fn build_command(
         // container rootfs — don't enter the mount namespace so the host PATH
         // is searched instead (e.g. wget in a scratch/minimal image).
         let binary_in_rootfs = exec_path.contains('/');
-        let use_mnt_ns = binary_in_rootfs && can_enter_mnt;
+        let use_mnt_ns = can_enter_mnt && binary_in_rootfs;
         let (program, prog_args) = if use_mnt_ns {
             (exec_path, prog_args)
         } else {
@@ -428,24 +414,44 @@ fn build_command(
             c.arg(a);
         }
         apply_env(&mut c);
-        // When using the dynamic linker fallback (no mount namespace entry),
-        // set LD_LIBRARY_PATH so libraries in the rootfs can be found.
-        if !use_mnt_ns {
-            let r = root.trim_end_matches('/');
-            if program.starts_with(r) {
-                let ld_path = format!("{r}/usr/local/lib:{r}/usr/lib:{r}/lib");
-                c.env("LD_LIBRARY_PATH", ld_path);
-            }
-        }
 
-        (c, Some(ExecCtx { ns, use_mnt_ns, c_uid, c_gid, iso_net: isolated_net }))
+        let iso_net = isolated_net;
+        unsafe {
+            c.as_std_mut().pre_exec(move || {
+                let _ = enter_container_namespaces(&ns_fds, iso_net, use_mnt_ns);
+                if use_mnt_ns {
+                    if let Some(ref pid) = ns_fds.pid {
+                        let _ = nix::sched::setns(pid, CloneFlags::CLONE_NEWPID);
+                        let child = nix::libc::fork();
+                        if child > 0 {
+                            // Parent exits immediately — no waitpid (would block tokio).
+                            nix::libc::_exit(0);
+                        }
+                        // Child: mount fresh procfs scoped to this PID namespace.
+                        let _ = mount(
+                            Some("proc"), "/proc", Some("proc"),
+                            MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC | MsFlags::MS_NODEV,
+                            None::<&str>,
+                        );
+                    }
+                }
+                if let Some(g) = c_gid {
+                    let _ = nix::unistd::setgid(nix::unistd::Gid::from_raw(g));
+                }
+                if let Some(u) = c_uid {
+                    let _ = nix::unistd::setuid(nix::unistd::Uid::from_raw(u));
+                }
+                Ok(())
+            });
+        }
+        c
     } else {
         let mut c = Command::new(cmd);
         for a in args {
             c.arg(a);
         }
         apply_env(&mut c);
-        (c, None)
+        c
     }
 }
 
@@ -476,14 +482,18 @@ async fn exec_ws(
     }
 }
 
-async fn send_error_and_close(ws_tx: &mut futures_util::stream::SplitSink<WebSocket, Message>, msg: &str) {
-    send_exit_status_msg(ws_tx, 1, Some(msg)).await;
+fn error_frame(msg: &str) -> Message {
+    let status_json = serde_json::json!({
+        "kind": "Status", "apiVersion": "v1", "metadata": {},
+        "status": "Failure", "message": msg, "code": 500
+    });
+    let mut frame = vec![3u8];
+    frame.extend_from_slice(serde_json::to_string(&status_json).unwrap_or_default().as_bytes());
+    Message::Binary(axum::body::Bytes::from(frame))
 }
 
-fn ws_frame(tag: u8, payload: &[u8]) -> Message {
-    let mut frame = vec![tag];
-    frame.extend_from_slice(payload);
-    Message::Binary(axum::body::Bytes::from(frame))
+async fn send_error_and_close(ws_tx: &mut futures_util::stream::SplitSink<WebSocket, Message>, msg: &str) {
+    send_exit_status_msg(ws_tx, 1, Some(msg)).await;
 }
 
 async fn exec_ws_tty(socket: WebSocket, cmd: &str, args: &[&str], rootfs_pid: Option<(&str, u32)>, env_vars: &[(String, String)], isolated_net: bool) {
@@ -508,13 +518,8 @@ async fn exec_ws_tty(socket: WebSocket, cmd: &str, args: &[&str], rootfs_pid: Op
 
     info!("Exec WS TTY: child PID {:?}", child.id());
 
-    let async_master = match tokio::io::unix::AsyncFd::new(master) {
-            Ok(fd) => fd,
-            Err(e) => {
-                tracing::warn!("AsyncFd for PTY master: {}", e);
-                return;
-            }
-        };
+    let async_master =
+        tokio::io::unix::AsyncFd::new(master).expect("AsyncFd for PTY master");
     let mut read_buf = vec![0u8; 4096];
 
     loop {
@@ -527,7 +532,9 @@ async fn exec_ws_tty(socket: WebSocket, cmd: &str, args: &[&str], rootfs_pid: Op
                 }) {
                     Ok(Ok(0)) => break,
                     Ok(Ok(n)) => {
-                        if ws_tx.send(ws_frame(1u8, &read_buf[..n])).await.is_err() {
+                        let mut frame = vec![1u8];
+                        frame.extend_from_slice(&read_buf[..n]);
+                        if ws_tx.send(Message::Binary(axum::body::Bytes::from(frame))).await.is_err() {
                             break;
                         }
                     }
@@ -541,10 +548,7 @@ async fn exec_ws_tty(socket: WebSocket, cmd: &str, args: &[&str], rootfs_pid: Op
                     Some(Ok(Message::Binary(data))) if !data.is_empty() => {
                         match data[0] {
                             0 if data.len() > 1 => {
-                                let mut guard = match async_master.writable().await {
-                                    Ok(g) => g,
-                                    Err(_) => break,
-                                };
+                                let mut guard = async_master.writable().await.unwrap();
                                 let _ = guard.try_io(|inner| {
                                     nix::unistd::write(inner, &data[1..])
                                         .map(|_| 0usize)
@@ -572,7 +576,7 @@ async fn exec_ws_tty(socket: WebSocket, cmd: &str, args: &[&str], rootfs_pid: Op
     }
 
     let exit_code = child.wait().await.ok().and_then(|s| s.code()).unwrap_or(0);
-    send_exit_status_msg(&mut ws_tx, exit_code, None).await;
+    send_exit_status(&mut ws_tx, exit_code).await;
 }
 
 async fn exec_ws_pipes(
@@ -625,7 +629,9 @@ async fn exec_ws_pipes(
                 match stdout.read(&mut buf).await {
                     Ok(0) => break,
                     Ok(n) => {
-                        if out_tx.send(ws_frame(1u8, &buf[..n])).await.is_err() {
+                        let mut frame = vec![1u8];
+                        frame.extend_from_slice(&buf[..n]);
+                        if out_tx.send(Message::Binary(axum::body::Bytes::from(frame))).await.is_err() {
                             break;
                         }
                     }
@@ -644,7 +650,9 @@ async fn exec_ws_pipes(
                 match stderr.read(&mut buf).await {
                     Ok(0) => break,
                     Ok(n) => {
-                        if out_tx.send(ws_frame(2u8, &buf[..n])).await.is_err() {
+                        let mut frame = vec![2u8];
+                        frame.extend_from_slice(&buf[..n]);
+                        if out_tx.send(Message::Binary(axum::body::Bytes::from(frame))).await.is_err() {
                             break;
                         }
                     }
@@ -721,7 +729,11 @@ async fn exec_ws_pipes(
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), forwarder).await;
 
     let mut tx = ws_tx.lock().await;
-    send_exit_status_msg(&mut tx, exit_code, None).await;
+    send_exit_status(&mut tx, exit_code).await;
+}
+
+async fn send_exit_status(ws_tx: &mut futures_util::stream::SplitSink<WebSocket, Message>, exit_code: i32) {
+    send_exit_status_msg(ws_tx, exit_code, None).await;
 }
 
 async fn send_exit_status_msg(
@@ -741,7 +753,9 @@ async fn send_exit_status_msg(
         "status": status_str, "message": message,
         "details": { "exitCode": exit_code }
     });
-    let _ = ws_tx.send(ws_frame(3u8, serde_json::to_string(&status_json).unwrap_or_default().as_bytes())).await;
+    let mut frame = vec![3u8];
+    frame.extend_from_slice(serde_json::to_string(&status_json).unwrap_or_default().as_bytes());
+    let _ = ws_tx.send(Message::Binary(axum::body::Bytes::from(frame))).await;
     let _ = ws_tx
         .send(Message::Close(Some(CloseFrame {
             code: 1000,
