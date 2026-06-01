@@ -346,18 +346,29 @@ pub async fn run_node(
     let resources = store.get_all().await;
     for tracker in &resources {
         let spec = crate::components::compute::spec_builder::build_spec(&tracker.resource, store.as_ref()).await;
-        let _ = crate::cri::RuntimeProvider::stop_pod(cri.as_ref(), &spec).await;
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            crate::cri::RuntimeProvider::stop_pod(cri.as_ref(), &spec),
+        ).await;
     }
 
     // ── Cleanup: remove nftables rules ────────────────────────────────
-    if let Err(e) = netmux.nft.cleanup().await {
-        warn!("Failed to cleanup nftables rules: {}", e);
-    }
+    // Must have a timeout: batch.send() uses spawn_blocking which blocks
+    // in kernel netlink I/O. If the kernel doesn't respond, the thread
+    // enters D-state and can't even be killed by SIGKILL.
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        netmux.nft.cleanup(),
+    ).await;
 
     // ── Cleanup: remove orphan veths created by this instance ─────────
-    if let Err(e) = netmux.clean_orphan_veths(&[]) {
-        warn!("Failed to clean orphan veths: {}", e);
-    }
+    let netmux_for_veths = netmux.clone();
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        tokio::task::spawn_blocking(move || {
+            let _ = netmux_for_veths.clean_orphan_veths(&[]);
+        }),
+    ).await;
 
     // Lock files are cleaned up automatically when the process exits
     // (flock is released when the fd is closed).

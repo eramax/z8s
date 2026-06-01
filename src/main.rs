@@ -117,14 +117,17 @@ fn scan_lock_files() -> Vec<(u16, i32)> {
 }
 
 /// Check if a PID is alive (tries direct, then sudo).
-/// Also verifies it's not a zombie (state Z in /proc).
+/// Also verifies it's not a zombie (state Z) or D-state (uninterruptible).
+/// D-state processes are effectively dead — they hold resources but can't
+/// process signals or be killed. We treat them as dead for lock purposes
+/// so their resources can be reclaimed.
 fn is_pid_alive(pid: i32) -> bool {
-    // Check if it's a zombie — zombies respond to kill -0 but aren't useful
+    // Check for unrecoverable states (Z = zombie, D = uninterruptible sleep)
     if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/status")) {
         for line in stat.lines() {
             if line.starts_with("State:") {
-                if line.contains("(Z") {
-                    return false; // zombie
+                if line.contains("(Z") || line.contains("(D") {
+                    return false;
                 }
                 break;
             }
@@ -157,11 +160,38 @@ fn is_pid_dstate(pid: i32) -> bool {
 
 // ── CLI dispatch ─────────────────────────────────────────────────────
 
+fn print_help() {
+    if let Ok(path) = std::env::current_exe() {
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        eprintln!("Usage: {name} [SUBCOMMAND] [OPTIONS]
+
+Commands:
+  run          Start the node server (called internally by spawner)
+  join <url>   Join a cluster as a worker node
+  node start   Start a peer node
+  node stop    Stop a peer node
+  node list    List all running nodes
+  stop         Stop the main z8s instance
+  restart      Restart the main z8s instance
+  status       Show running z8s processes
+
+Options:
+  --port <PORT>  API server listen port     [default: 6443]
+  -h, --help     Show this help message");
+    }
+}
+
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let cmd = args.get(1).map(|s| s.as_str());
 
     match cmd {
+        // ── Help ────────────────────────────────────────────────────────
+        Some("--help") | Some("-h") => {
+            print_help();
+            Ok(())
+        }
+
         // ── Run as the actual server (called by daemon spawner) ────────
         Some("run") => {
             crate::config::init();
@@ -332,13 +362,25 @@ fn send_shutdown(pid: i32) {
     // Wait up to 5 seconds
     for _ in 0..50 {
         if !is_pid_alive(pid) {
-            eprintln!("z8s stopped.");
+            if is_pid_dstate(pid) {
+                // Process entered D-state during shutdown cleanup
+                eprintln!("Process {pid} entered D-state during shutdown (unrecoverable).");
+                cleanup_external(pid);
+            } else {
+                eprintln!("z8s stopped.");
+            }
             return;
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
 
-    // Force kill
+    // Still alive after SIGTERM — try force kill
+    if is_pid_dstate(pid) {
+        eprintln!("Process {pid} entered D-state (unrecoverable).");
+        cleanup_external(pid);
+        return;
+    }
+
     eprintln!("Force killing z8s (PID {pid})...");
     let _ = nix::sys::signal::kill(
         nix::unistd::Pid::from_raw(pid),
@@ -355,7 +397,38 @@ fn send_shutdown(pid: i32) {
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
-    eprintln!("Process {pid} may be stuck in D-state (unrecoverable).");
+    if is_pid_dstate(pid) {
+        eprintln!("Process {pid} stuck in D-state after SIGKILL (unrecoverable).");
+        cleanup_external(pid);
+    } else {
+        eprintln!("Process {pid} is still alive after SIGKILL.");
+    }
+}
+
+/// Clean up resources held by an unrecoverable process from outside.
+/// Removes stale lock files and z8s nftables tables.
+fn cleanup_external(pid: i32) {
+    // Remove stale lock files for this PID
+    let Ok(entries) = std::fs::read_dir(Z8S_RUN_DIR) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name == "z8s.lock" || name.starts_with("z8s-") {
+            if let Some(lock_pid) = read_lock_pid(&entry.path().to_string_lossy()) {
+                if lock_pid == pid {
+                    eprintln!("Removing stale lock file: {}", entry.path().display());
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
+
+    // Remove z8s nftables tables from outside (the stuck process can't do it)
+    eprintln!("Cleaning up nftables from external process...");
+    for table in ["z8s_nat", "z8s_filter"] {
+        let _ = std::process::Command::new("sudo")
+            .args(["nft", "delete", "table", "ip", table])
+            .output();
+    }
 }
 
 fn restart_z8s(args: &[String]) -> Result<()> {
