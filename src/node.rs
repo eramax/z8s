@@ -117,15 +117,21 @@ pub async fn run_node(port: u16, lock_file: std::fs::File) -> Result<()> {
         redb = None;
     };
 
-    let cgroup_manager = Arc::new(CgroupManager::new().unwrap_or_else(|e| {
-        warn!("Cgroups not available: {}. Running without resource limits.", e);
-        CgroupManager::new().expect("cgroup manager init failed twice")
-    }));
+    let cgroup_manager = match CgroupManager::new() {
+        Ok(m) => Arc::new(m),
+        Err(e) => {
+            warn!("Cgroups not available: {}. Running without resource limits.", e);
+            Arc::new(CgroupManager::new().expect("cgroup manager init failed twice"))
+        }
+    };
 
-    let image_manager = Arc::new(ImageManager::new().unwrap_or_else(|e| {
-        warn!("Image manager init failed: {}. Running without image pulling.", e);
-        ImageManager::new().expect("Failed to create image manager")
-    }));
+    let image_manager = match ImageManager::new() {
+        Ok(m) => Arc::new(m),
+        Err(e) => {
+            warn!("Image manager init failed: {}. Running without image pulling.", e);
+            Arc::new(ImageManager::new().expect("Failed to create image manager"))
+        }
+    };
 
     let netmux = Arc::new(crate::netmux::NetMux::new(&cfg.pod_cidr).unwrap_or_else(|e| {
         panic!("Failed to create NetMux with pod CIDR {}: {}", cfg.pod_cidr, e);

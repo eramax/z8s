@@ -94,20 +94,25 @@ where
 }
 
 fn url_decode(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
+    let mut bytes: Vec<u8> = Vec::with_capacity(s.len());
     let mut chars = s.chars();
     while let Some(c) = chars.next() {
         match c {
-            '+' => result.push(' '),
+            '+' => bytes.push(b' '),
             '%' => {
-                let hi = chars.next().and_then(|c| c.to_digit(16)).unwrap_or(0);
-                let lo = chars.next().and_then(|c| c.to_digit(16)).unwrap_or(0);
-                result.push((hi as u8 * 16 + lo as u8) as char);
+                let hi = chars.next().and_then(|c| c.to_digit(16)).unwrap_or(0) as u8;
+                let lo = chars.next().and_then(|c| c.to_digit(16)).unwrap_or(0) as u8;
+                bytes.push(hi * 16 + lo);
             }
-            _ => result.push(c),
+            c if c.is_ascii() => bytes.push(c as u8),
+            _ => {
+                let mut buf = [0u8; 4];
+                let encoded = c.encode_utf8(&mut buf);
+                bytes.extend_from_slice(encoded.as_bytes());
+            }
         }
     }
-    result
+    String::from_utf8(bytes).unwrap_or_default()
 }
 
 fn parse_query_params(query: &str) -> HashMap<String, Vec<String>> {
@@ -245,11 +250,12 @@ fn spawn_with_pty(
     child_cmd.kill_on_drop(true);
 
     let ns_fds = rootfs_pid.map(|(_, pid)| try_open_namespace_fds(pid));
+    let use_mnt_for_pty = ns_fds.as_ref().map_or(false, |n| n.mnt.is_some());
 
     unsafe {
         child_cmd.as_std_mut().pre_exec(move || {
             if let Some(ref ns) = ns_fds {
-                let _ = enter_container_namespaces(ns, isolated_net, isolated_net);
+                let _ = enter_container_namespaces(ns, isolated_net, use_mnt_for_pty);
                 let _ = nix::unistd::chdir("/");
             }
             let _ = nix::unistd::setsid();
@@ -428,18 +434,22 @@ fn build_command(
                             nix::libc::_exit(0);
                         }
                         // Child: mount fresh procfs scoped to this PID namespace.
-                        let _ = mount(
+                        if let Err(e) = mount(
                             Some("proc"), "/proc", Some("proc"),
                             MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC | MsFlags::MS_NODEV,
                             None::<&str>,
-                        );
+                        ) {
+                            tracing::warn!("exec: mount proc failed: {e}");
+                        }
                     }
                 }
-                if let Some(g) = c_gid {
-                    let _ = nix::unistd::setgid(nix::unistd::Gid::from_raw(g));
+                // Use container-side UID (0 = root inside container). The host UID
+                // from /proc/<pid> metadata would be wrong inside a user namespace.
+                if let Err(e) = nix::unistd::setgid(nix::unistd::Gid::from_raw(0)) {
+                    tracing::warn!("exec: setgid(0) failed: {e}");
                 }
-                if let Some(u) = c_uid {
-                    let _ = nix::unistd::setuid(nix::unistd::Uid::from_raw(u));
+                if let Err(e) = nix::unistd::setuid(nix::unistd::Uid::from_raw(0)) {
+                    tracing::warn!("exec: setuid(0) failed: {e}");
                 }
                 Ok(())
             });
@@ -548,12 +558,22 @@ async fn exec_ws_tty(socket: WebSocket, cmd: &str, args: &[&str], rootfs_pid: Op
                     Some(Ok(Message::Binary(data))) if !data.is_empty() => {
                         match data[0] {
                             0 if data.len() > 1 => {
-                                let mut guard = async_master.writable().await.unwrap();
-                                let _ = guard.try_io(|inner| {
-                                    nix::unistd::write(inner, &data[1..])
-                                        .map(|_| 0usize)
-                                        .map_err(std::io::Error::other)
-                                });
+                                let buf = &data[1..];
+                                let mut written = 0;
+                                while written < buf.len() {
+                                    let mut guard = match async_master.writable().await {
+                                        Ok(g) => g,
+                                        Err(e) => { tracing::warn!("PTY writable: {e}"); break; }
+                                    };
+                                    match guard.try_io(|inner| {
+                                        nix::unistd::write(inner, &buf[written..])
+                                            .map_err(|e| std::io::Error::from_raw_os_error(e as i32))
+                                    }) {
+                                        Ok(Ok(0)) => break,
+                                        Ok(Ok(n)) => written += n,
+                                        _ => break,
+                                    }
+                                }
                             }
                             4 if data.len() > 1 => {
                                 if let Ok(r) = serde_json::from_slice::<serde_json::Value>(&data[1..]) {

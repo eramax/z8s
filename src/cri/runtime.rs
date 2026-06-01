@@ -676,7 +676,7 @@ impl ProcessSupervisor {
                 // This puts future children in a new PID namespace.
                 if let Err(e) = rootfs::unshare_container_ns(isolate_net, pod_hostname, true) {
                     error!("z8s: namespace setup failed: {}", e);
-                    std::process::exit(1);
+                    unsafe { nix::libc::_exit(1); }
                 }
 
                 // Fork #2 BEFORE closing fds — grandchild inherits all open fds.
@@ -700,7 +700,7 @@ impl ProcessSupervisor {
                         let _ = nix::unistd::write(&gc_pid_w, &gc_pid.to_ne_bytes());
                         drop(gc_pid_w);
 
-                        std::process::exit(0);
+                        unsafe { nix::libc::_exit(0); }
                     }
                     Ok(nix::unistd::ForkResult::Child) => {
                         // ── Grandchild (PID 1 in new PID ns) ───────────────────
@@ -716,7 +716,7 @@ impl ProcessSupervisor {
                             Ok(i) => i,
                             Err(e) => {
                                 error!("z8s: rootfs setup failed: {}", e);
-                                std::process::exit(1);
+                                unsafe { nix::libc::_exit(1); }
                             }
                         };
 
@@ -741,7 +741,7 @@ impl ProcessSupervisor {
                     }
                     Err(e) => {
                         error!("z8s: second fork failed: {}", e);
-                        std::process::exit(1);
+                        unsafe { nix::libc::_exit(1); }
                     }
                 }
             }
@@ -808,7 +808,7 @@ impl ProcessSupervisor {
 
         let e = nix::unistd::execvpe(&argv[0], &argv, &envp).expect_err("execvpe returned unexpectedly");
         error!("z8s: execvpe({}) failed: {}", argv[0].to_str().unwrap_or("?"), e);
-        std::process::exit(1);
+        unsafe { nix::libc::_exit(1); }
     }
 
     async fn spawn_userns_container(
@@ -899,7 +899,7 @@ impl ProcessSupervisor {
                     Ok(i) => i,
                     Err(e) => {
                         error!("z8s: namespace setup failed: {:#}", e);
-                        std::process::exit(1);
+                        unsafe { nix::libc::_exit(1); }
                     }
                 };
 

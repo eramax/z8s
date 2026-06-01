@@ -18,14 +18,18 @@ fn lock_file_path(port: u16) -> String {
 }
 
 fn acquire_port_lock(port: u16) -> Result<std::fs::File> {
+    use std::io::Write;
     use std::os::unix::io::AsRawFd;
     let path = lock_file_path(port);
-    let file = std::fs::File::create(&path)
+    let mut file = std::fs::File::create(&path)
         .map_err(|e| anyhow::anyhow!("Failed to create lock file {path}: {e}"))?;
     let ret = unsafe { nix::libc::flock(file.as_raw_fd(), nix::libc::LOCK_EX | nix::libc::LOCK_NB) };
     if ret != 0 {
         anyhow::bail!("z8s is already running on port {port} (lock held). If stale, remove {path} and retry.");
     }
+    file.set_len(0).ok();
+    write!(file, "{}\n", std::process::id()).ok();
+    file.flush().ok();
     Ok(file)
 }
 
