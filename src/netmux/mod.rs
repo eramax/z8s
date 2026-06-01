@@ -61,11 +61,11 @@ pub struct NetMux {
 }
 
 impl NetMux {
-    pub fn new(pod_cidr: &str) -> Result<Self> {
+    pub fn new(pod_cidr: &str, node_name: &str) -> Result<Self> {
         let cidr = Ipv4Cidr::parse(pod_cidr)
             .context("Invalid pod CIDR")?;
         let gateway = Self::derive_gateway(&cidr)?;
-        let nft = NftEngine::new();
+        let nft = NftEngine::new(node_name);
         let ingress_state = Arc::new(crate::netmux::ingress::IngressState::new());
         let dns_records = crate::netmux::dns::new_dns_records();
         Ok(Self {

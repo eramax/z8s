@@ -279,7 +279,7 @@ fn default_start(args: &[String]) -> Result<()> {
         anyhow::bail!("Port {port} is already in use");
     }
 
-    let child = spawn_daemon(&["run", "--port", &port.to_string()])?;
+    let child = spawn_daemon(&["run", "--port", &port.to_string()], port)?;
     let pid = child.id() as i32;
 
     // Poll the global lock PID. The child (main) writes its PID to the global
@@ -301,7 +301,7 @@ fn default_start(args: &[String]) -> Result<()> {
     }
 
     // Child failed or died. Read daemon log for reason.
-    let log_path = format!("{Z8S_RUN_DIR}/z8s-daemon.log");
+    let log_path = format!("{Z8S_RUN_DIR}/z8s-daemon-{port}.log");
     if let Ok(log) = std::fs::read_to_string(&log_path) {
         for line in log.lines().rev().take(5) {
             if line.contains("Error") || line.contains("error") || line.contains("panicked") {
@@ -428,10 +428,17 @@ fn cleanup_external(pid: i32) {
 
     // Remove z8s nftables tables from outside (the stuck process can't do it)
     eprintln!("Cleaning up nftables from external process...");
-    for table in ["z8s_nat", "z8s_filter"] {
-        let _ = std::process::Command::new("sudo")
-            .args(["nft", "delete", "table", "ip", table])
-            .output();
+    if let Ok(output) = std::process::Command::new("sudo").args(["nft", "list", "tables", "ip"]).output() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            if line.starts_with("table ip z8s_nat") || line.starts_with("table ip z8s_filter") {
+                if let Some(table) = line.split_whitespace().nth(2) {
+                    let _ = std::process::Command::new("sudo")
+                        .args(["nft", "delete", "table", "ip", table])
+                        .output();
+                }
+            }
+        }
     }
 }
 
@@ -513,7 +520,14 @@ fn node_start(args: &[String]) -> Result<()> {
         "--port".to_string(), node_port.to_string(),
         "--node-name".to_string(), format!("node-{}", node_port),
         "--peers".to_string(), format!("main={}:{}", peer_host, main_port),
+        "--db-path".to_string(), format!("{Z8S_RUN_DIR}/z8s-node-{node_port}.redb"),
+        "--data-dir".to_string(), format!("{Z8S_RUN_DIR}/z8s-node-{node_port}-data"),
+        "--manifests-dir".to_string(), format!("{Z8S_RUN_DIR}/z8s-node-{node_port}-manifests"),
     ];
+    // Create the directories
+    std::fs::create_dir_all(format!("{Z8S_RUN_DIR}/z8s-node-{node_port}-data")).ok();
+    std::fs::create_dir_all(format!("{Z8S_RUN_DIR}/z8s-node-{node_port}-manifests")).ok();
+
     if let Some(cidr) = parse_opt_arg(args, "--service-cidr") {
         node_args.push("--service-cidr".to_string());
         node_args.push(cidr);
@@ -525,7 +539,7 @@ fn node_start(args: &[String]) -> Result<()> {
 
     eprintln!("Starting node on port {node_port}...");
     let refs: Vec<&str> = node_args.iter().map(|s| s.as_str()).collect();
-    let child = spawn_daemon(&refs)?;
+    let child = spawn_daemon(&refs, node_port)?;
     let pid = child.id() as i32;
 
     // Poll for node startup (port lock PID matches child PID)
@@ -541,7 +555,7 @@ fn node_start(args: &[String]) -> Result<()> {
     }
 
     // Check daemon log for reason
-    let log_path = format!("{Z8S_RUN_DIR}/z8s-daemon.log");
+    let log_path = format!("{Z8S_RUN_DIR}/z8s-daemon-{node_port}.log");
     if let Ok(log) = std::fs::read_to_string(&log_path) {
         for line in log.lines().rev().take(5) {
             if line.contains("Error") || line.contains("error") || line.contains("panicked") {
@@ -607,9 +621,9 @@ fn find_z8s_pids() -> Vec<i32> {
 }
 
 /// Spawn a z8s process in the background (detached, no stdio).
-fn spawn_daemon(args: &[&str]) -> Result<std::process::Child> {
+fn spawn_daemon(args: &[&str], port: u16) -> Result<std::process::Child> {
     let self_path = std::env::current_exe()?;
-    let log_path = format!("{Z8S_RUN_DIR}/z8s-daemon.log");
+    let log_path = format!("{Z8S_RUN_DIR}/z8s-daemon-{port}.log");
     let log_file = std::fs::File::create(&log_path)
         .map_err(|e| anyhow::anyhow!("Cannot create log file {log_path}: {e}"))?;
     let log_file_err = log_file.try_clone()

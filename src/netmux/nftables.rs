@@ -13,8 +13,12 @@ use rustables::expr::{
     TCPHeaderField, TransportHeaderField,
 };
 
-pub const NAT_TABLE: &str = "z8s_nat";
-pub const FILTER_TABLE: &str = "z8s_filter";
+pub fn nat_table(node_name: &str) -> String {
+    format!("z8s_nat_{}", node_name.replace('-', "_"))
+}
+pub fn filter_table(node_name: &str) -> String {
+    format!("z8s_filter_{}", node_name.replace('-', "_"))
+}
 
 const HOOK_PRIO_NAT: i32 = -100;
 const HOOK_PRIO_FILTER: i32 = 0;
@@ -28,14 +32,18 @@ pub struct NftEngine {
     writer: tokio::sync::Mutex<()>,
     jump_track: tokio::sync::Mutex<Vec<(Ipv4Addr, u16)>>,
     nodeport_jump_track: tokio::sync::Mutex<Vec<u16>>,
+    nat_table: String,
+    filter_table: String,
 }
 
 impl NftEngine {
-    pub fn new() -> Self {
+    pub fn new(node_name: &str) -> Self {
         Self {
             writer: tokio::sync::Mutex::new(()),
             jump_track: tokio::sync::Mutex::new(Vec::new()),
             nodeport_jump_track: tokio::sync::Mutex::new(Vec::new()),
+            nat_table: nat_table(node_name),
+            filter_table: filter_table(node_name),
         }
     }
 
@@ -66,22 +74,22 @@ impl NftEngine {
         // NOTE: Only touches our own tables (z8s_nat, z8s_filter).
         // Never flush the entire ruleset — that would destroy k3s's kube-* tables
         // and require a reboot to recover (see incident.md).
-        for tbl in [NAT_TABLE, FILTER_TABLE] {
+        for tbl in [&self.nat_table, &self.filter_table] {
             let t = Table::new(ProtocolFamily::Ipv4).with_name(tbl);
-            let mut d = Batch::new(); d.add(&t, rustables::MsgType::Del); self.send(d).await?;
+            let mut d = Batch::new(); d.add(&t, rustables::MsgType::Del); self.send(d).await.ok();
             let mut a = Batch::new(); a.add(&t, rustables::MsgType::Add); self.send(a).await?;
         }
         self.jump_track.lock().await.clear();
         self.nodeport_jump_track.lock().await.clear();
 
-        let nat = Table::new(ProtocolFamily::Ipv4).with_name(NAT_TABLE);
+        let nat = Table::new(ProtocolFamily::Ipv4).with_name(&self.nat_table);
         let mut nb = Batch::new();
         for (n, h) in [("prerouting", HookClass::PreRouting), ("postrouting", HookClass::PostRouting), ("output", HookClass::Out)] {
             nb.add(&Chain::new(&nat).with_name(n).with_type(ChainType::Nat).with_hook(Hook::new(h, HOOK_PRIO_NAT)).with_policy(ChainPolicy::Accept), rustables::MsgType::Add);
         }
         self.send(nb).await?;
 
-        let filter = Table::new(ProtocolFamily::Ipv4).with_name(FILTER_TABLE);
+        let filter = Table::new(ProtocolFamily::Ipv4).with_name(&self.filter_table);
         let mut fb = Batch::new();
         fb.add(&Chain::new(&filter).with_name("forward").with_type(ChainType::Filter).with_hook(Hook::new(HookClass::Forward, HOOK_PRIO_FILTER)).with_policy(ChainPolicy::Accept), rustables::MsgType::Add);
         fb.add(&Chain::new(&filter).with_name("input").with_type(ChainType::Filter).with_hook(Hook::new(HookClass::In, HOOK_PRIO_FILTER)).with_policy(ChainPolicy::Accept), rustables::MsgType::Add);
@@ -105,7 +113,7 @@ impl NftEngine {
     pub async fn add_snat(&self, _vnet_name: &str, vnet_cidr: &str) -> Result<()> {
         let cidr: IpNetwork = vnet_cidr.parse()?;
         let mut b = Batch::new();
-        b.add(&Rule::new(&Chain::new(&Table::new(ProtocolFamily::Ipv4).with_name(NAT_TABLE)).with_name("postrouting"))?.snetwork(cidr)?.masquerade(), rustables::MsgType::Add);
+        b.add(&Rule::new(&Chain::new(&Table::new(ProtocolFamily::Ipv4).with_name(&self.nat_table)).with_name("postrouting"))?.snetwork(cidr)?.masquerade(), rustables::MsgType::Add);
         self.send(b).await?;
         debug!("SNAT added for {}", vnet_cidr);
         Ok(())
@@ -126,7 +134,7 @@ impl NftEngine {
     }
 
     async fn update_dnat_chain(&self, svc: &str, backends: &[(Ipv4Addr, u16)], matches: &[(rustables::expr::Payload, Vec<u8>)]) -> Result<()> {
-        let nat = Table::new(ProtocolFamily::Ipv4).with_name(NAT_TABLE);
+        let nat = Table::new(ProtocolFamily::Ipv4).with_name(&self.nat_table);
         let mut b = Batch::new();
         b.add(&Chain::new(&nat).with_name(svc), rustables::MsgType::Add);
         self.send(b).await?;
@@ -139,7 +147,7 @@ impl NftEngine {
     }
 
     async fn add_jump_rules(&self, svc: &str, hooks: &[&str]) -> Result<()> {
-        let nat = Table::new(ProtocolFamily::Ipv4).with_name(NAT_TABLE);
+        let nat = Table::new(ProtocolFamily::Ipv4).with_name(&self.nat_table);
         for h in hooks {
             let mut b = Batch::new();
             let mut r = Rule::new(&Chain::new(&nat).with_name(*h)).map_err(|e| anyhow::anyhow!("{:?}", e))?;
@@ -170,7 +178,7 @@ impl NftEngine {
 
     pub async fn remove_dnat(&self, cluster_ip: Ipv4Addr, port: u16) -> Result<()> {
         let svc = chain_name(cluster_ip, port);
-        let nat = Table::new(ProtocolFamily::Ipv4).with_name(NAT_TABLE);
+        let nat = Table::new(ProtocolFamily::Ipv4).with_name(&self.nat_table);
         let mut b = Batch::new();
         b.add(&Chain::new(&nat).with_name(&svc), rustables::MsgType::Del);
         self.send(b).await?;
@@ -199,7 +207,7 @@ impl NftEngine {
 
     pub async fn remove_nodeport_dnat(&self, node_port: u16) -> Result<()> {
         let svc = format!("np-{:04x}", node_port);
-        let nat = Table::new(ProtocolFamily::Ipv4).with_name(NAT_TABLE);
+        let nat = Table::new(ProtocolFamily::Ipv4).with_name(&self.nat_table);
         let mut b = Batch::new();
         b.add(&Chain::new(&nat).with_name(&svc), rustables::MsgType::Del);
         self.send(b).await?;
@@ -211,23 +219,23 @@ impl NftEngine {
     // ── Forward chain NSG rules ────────────────────────────────────
 
     pub async fn add_forward_allow(&self, src_cidr: &str, dst_cidr: &str) -> Result<()> {
-        let nsg = Chain::new(&Table::new(ProtocolFamily::Ipv4).with_name(FILTER_TABLE)).with_name("nsg-rules");
+        let nsg = Chain::new(&Table::new(ProtocolFamily::Ipv4).with_name(&self.filter_table)).with_name("nsg-rules");
         let mut b = Batch::new();
         b.add(&Rule::new(&nsg)?.snetwork(src_cidr.parse()?)?.dnetwork(dst_cidr.parse()?)?.accept(), rustables::MsgType::Add);
         self.send(b).await
     }
 
     pub async fn add_forward_deny(&self, src_cidr: &str, dst_cidr: &str) -> Result<()> {
-        let nsg = Chain::new(&Table::new(ProtocolFamily::Ipv4).with_name(FILTER_TABLE)).with_name("nsg-rules");
+        let nsg = Chain::new(&Table::new(ProtocolFamily::Ipv4).with_name(&self.filter_table)).with_name("nsg-rules");
         let mut b = Batch::new();
         b.add(&Rule::new(&nsg)?.snetwork(src_cidr.parse()?)?.dnetwork(dst_cidr.parse()?)?.drop(), rustables::MsgType::Add);
         self.send(b).await
     }
 
     pub async fn add_forward_allow_set_src(&self, set_name: &str, dst_cidr: &str) -> Result<()> {
-        let nsg = Chain::new(&Table::new(ProtocolFamily::Ipv4).with_name(FILTER_TABLE)).with_name("nsg-rules");
+        let nsg = Chain::new(&Table::new(ProtocolFamily::Ipv4).with_name(&self.filter_table)).with_name("nsg-rules");
         let mut b = Batch::new();
-        let mut s = rustables::Set::default(); s.family = ProtocolFamily::Ipv4; s = s.with_table(FILTER_TABLE).with_name(set_name);
+        let mut s = rustables::Set::default(); s.family = ProtocolFamily::Ipv4; s = s.with_table(&self.filter_table).with_name(set_name);
         let mut r = Rule::new(&nsg).map_err(|e| anyhow::anyhow!("{:?}", e))?;
         r.add_expr(rustables::expr::Lookup::new(&s).map_err(|e| anyhow::anyhow!("{:?}", e))?);
         b.add(&r.dnetwork(dst_cidr.parse()?)?.accept(), rustables::MsgType::Add);
@@ -235,7 +243,7 @@ impl NftEngine {
     }
 
     pub async fn reset_nsg_rules(&self) -> Result<()> {
-        let nsg = Chain::new(&Table::new(ProtocolFamily::Ipv4).with_name(FILTER_TABLE)).with_name("nsg-rules");
+        let nsg = Chain::new(&Table::new(ProtocolFamily::Ipv4).with_name(&self.filter_table)).with_name("nsg-rules");
         let mut d = Batch::new(); d.add(&nsg, rustables::MsgType::Del); self.send(d).await?;
         let mut a = Batch::new(); a.add(&nsg, rustables::MsgType::Add); self.send(a).await
     }
@@ -243,7 +251,7 @@ impl NftEngine {
     // ── Catch-all chain ────────────────────────────────────────────
 
     pub async fn add_forward_catchall(&self, pod_cidr: &str) -> Result<()> {
-        let filter = Table::new(ProtocolFamily::Ipv4).with_name(FILTER_TABLE);
+        let filter = Table::new(ProtocolFamily::Ipv4).with_name(&self.filter_table);
         let mut b = Batch::new();
         b.add(&Chain::new(&filter).with_name("catch-all"), rustables::MsgType::Add);
         b.add(&Rule::new(&Chain::new(&filter).with_name("catch-all"))?.dnetwork(pod_cidr.parse()?)?.accept(), rustables::MsgType::Add);
@@ -257,7 +265,7 @@ impl NftEngine {
     // ── Sets (NetworkPolicy) ───────────────────────────────────────
 
     pub async fn create_set(&self, name: &str, initial_ips: &[Ipv4Addr]) -> Result<()> {
-        let table = Table::new(ProtocolFamily::Ipv4).with_name(FILTER_TABLE);
+        let table = Table::new(ProtocolFamily::Ipv4).with_name(&self.filter_table);
         let mut builder = rustables::set::SetBuilder::<Ipv4Addr>::new(name, &table).map_err(|e| anyhow::anyhow!("{:?}", e))?;
         for ip in initial_ips { builder.add(ip); }
         let (set, elem) = builder.finish();
@@ -272,7 +280,7 @@ impl NftEngine {
     /// Remove all z8s nftables tables. Called during shutdown.
     pub async fn cleanup(&self) -> Result<()> {
         info!("Cleaning up nftables rules...");
-        for tbl in [NAT_TABLE, FILTER_TABLE] {
+        for tbl in [&self.nat_table, &self.filter_table] {
             let t = Table::new(ProtocolFamily::Ipv4).with_name(tbl);
             let mut d = Batch::new();
             d.add(&t, rustables::MsgType::Del);

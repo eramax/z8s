@@ -139,7 +139,7 @@ pub async fn run_node(
         }
     };
 
-    let netmux = Arc::new(crate::netmux::NetMux::new(&cfg.pod_cidr).unwrap_or_else(|e| {
+    let netmux = Arc::new(crate::netmux::NetMux::new(&cfg.pod_cidr, &cfg.node_name).unwrap_or_else(|e| {
         panic!("Failed to create NetMux with pod CIDR {}: {}", cfg.pod_cidr, e);
     }));
 

@@ -46,10 +46,18 @@ async fn handle_message(msg: GossipMessage, ws: &mut WebSocket, state: &Arc<toki
     match msg {
         GossipMessage::Gossip { key, value, term, source: _ } => {
             tracing::info!("handle_message Gossip: key={}", key);
-            let mut st = state.lock().await;
-            if st.dedup(&key, term) {
-                st.apply(&key, &value, term).await;
-                debug!("Gossip: applied {}", key);
+            let (should_apply, db) = {
+                let mut st = state.lock().await;
+                (st.dedup(&key, term), st.db.clone())
+            };
+            if should_apply {
+                if let Ok(resource) = serde_json::from_slice::<crate::store::AnyResource>(&value) {
+                    if let Err(e) = db.apply(resource).await {
+                        tracing::warn!("Failed to apply gossiped resource {}: {}", key, e);
+                    } else {
+                        tracing::debug!("Applied gossiped resource {} (term {})", key, term);
+                    }
+                }
             }
         }
         GossipMessage::SyncRequest { request_id } => {
@@ -69,10 +77,12 @@ async fn handle_message(msg: GossipMessage, ws: &mut WebSocket, state: &Arc<toki
             info!("Sent sync_full ({} entries)", count);
         }
         GossipMessage::SyncFull { ref entries, .. } => {
-            let mut st = state.lock().await;
+            let db = state.lock().await.db.clone();
             for entry in entries.iter() {
-                st.apply(&entry.key, &entry.value, entry.term);
-                st.seen.insert(entry.key.clone(), entry.term);
+                if let Ok(resource) = serde_json::from_slice::<crate::store::AnyResource>(&entry.value) {
+                    db.apply(resource).await.ok();
+                }
+                state.lock().await.seen.insert(entry.key.clone(), entry.term);
             }
         }
         GossipMessage::Heartbeat => {
@@ -106,21 +116,30 @@ pub async fn run_gossip_client(
                             match msg {
                                 Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) => {
                                     if let Ok(gmsg) = serde_json::from_str::<GossipMessage>(&text) {
-                                        let mut st = state.lock().await;
                                         match gmsg {
                                             GossipMessage::Gossip { key, value, term, source: _ } => {
                                                 tracing::info!("Client received Gossip: key={}", key);
-                                                if st.dedup(&key, term) {
-                                                    st.apply(&key, &value, term).await;
+                                                let (should_apply, db) = {
+                                                    let mut st = state.lock().await;
+                                                    (st.dedup(&key, term), st.db.clone())
+                                                };
+                                                if should_apply {
+                                                    if let Ok(resource) = serde_json::from_slice::<crate::store::AnyResource>(&value) {
+                                                        db.apply(resource).await.ok();
+                                                    }
                                                 }
                                             }
                                             GossipMessage::SyncFull { ref entries, .. } => {
+                                                let db = { state.lock().await.db.clone() };
                                                 for entry in entries.iter() {
-                                                    st.apply(&entry.key, &entry.value, entry.term);
-                                                    st.seen.insert(entry.key.clone(), entry.term);
+                                                    if let Ok(resource) = serde_json::from_slice::<crate::store::AnyResource>(&entry.value) {
+                                                        db.apply(resource).await.ok();
+                                                    }
+                                                    state.lock().await.seen.insert(entry.key.clone(), entry.term);
                                                 }
                                             }
                                             GossipMessage::SyncRequest { request_id } => {
+                                                let st = state.lock().await;
                                                 let resources = st.db.get_all().await;
                                                 let entries: Vec<SyncEntry> = resources.into_iter().map(|t| {
                                                     let key = t.resource.uid();
