@@ -1,5 +1,5 @@
-use anyhow::{Context, Result};
 use crate::types::{PersistentVolume, PersistentVolumeClaim};
+use anyhow::{Context, Result};
 use std::path::Path;
 use tracing::{info, warn};
 
@@ -8,8 +8,15 @@ use super::StorageClass;
 pub struct LoopProvisioner;
 
 impl LoopProvisioner {
-    pub async fn provision(&self, pv: &mut PersistentVolume, _pvc: &PersistentVolumeClaim, _class: &StorageClass) -> Result<()> {
-        let host_path = match pv.spec.as_ref()
+    pub async fn provision(
+        &self,
+        pv: &mut PersistentVolume,
+        _pvc: &PersistentVolumeClaim,
+        _class: &StorageClass,
+    ) -> Result<()> {
+        let host_path = match pv
+            .spec
+            .as_ref()
             .and_then(|s| s.host_path.as_ref())
             .map(|h| h.path.clone())
         {
@@ -21,14 +28,23 @@ impl LoopProvisioner {
 
         if Path::new(&host_path).exists() {
             if is_mounted(&host_path) {
-                info!("Loop PV {} already mounted at {}", pv.metadata.name.as_deref().unwrap_or("?"), host_path);
+                info!(
+                    "Loop PV {} already mounted at {}",
+                    pv.metadata.name.as_deref().unwrap_or("?"),
+                    host_path
+                );
                 return Ok(());
             }
-            info!("Loop PV {} hostPath exists but not mounted, re-provisioning", pv.metadata.name.as_deref().unwrap_or("?"));
+            info!(
+                "Loop PV {} hostPath exists but not mounted, re-provisioning",
+                pv.metadata.name.as_deref().unwrap_or("?")
+            );
             let _ = std::fs::remove_dir_all(&host_path);
         }
 
-        let capacity = pv.spec.as_ref()
+        let capacity = pv
+            .spec
+            .as_ref()
             .and_then(|s| s.capacity.as_ref())
             .and_then(|m| m.get("storage"))
             .map(|q| crate::store::parse_quantity_bytes(q))
@@ -38,10 +54,10 @@ impl LoopProvisioner {
             anyhow::bail!("loop provisioner requires non-zero capacity");
         }
 
-        let parent = Path::new(&img_path).parent()
+        let parent = Path::new(&img_path)
+            .parent()
             .context("image path has no parent directory")?;
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create {}", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
 
         std::fs::create_dir_all(&host_path)
             .with_context(|| format!("create mount dir {}", host_path))?;
@@ -53,9 +69,8 @@ impl LoopProvisioner {
         run("mkfs.ext4", &["-F", &img_path])?;
 
         info!("Attaching loop device for {}", img_path);
-        let loop_dev = String::from_utf8(
-            run_with_output("losetup", &["-f", "--show", &img_path])?
-        ).map_err(|e| anyhow::anyhow!("invalid losetup output: {}", e))?;
+        let loop_dev = String::from_utf8(run_with_output("losetup", &["-f", "--show", &img_path])?)
+            .map_err(|e| anyhow::anyhow!("invalid losetup output: {}", e))?;
         let loop_dev = loop_dev.trim().to_string();
         if loop_dev.is_empty() {
             cleanup_file(&img_path);
@@ -85,7 +100,9 @@ impl LoopProvisioner {
             Some(a) => a,
             None => return Ok(()),
         };
-        let host_path = match pv.spec.as_ref()
+        let host_path = match pv
+            .spec
+            .as_ref()
             .and_then(|s| s.host_path.as_ref())
             .map(|h| h.path.as_str())
         {
@@ -97,17 +114,28 @@ impl LoopProvisioner {
             return Ok(());
         }
 
-        let img_path = annotations.get("z8s.io/image-path").cloned().unwrap_or_default();
+        let img_path = annotations
+            .get("z8s.io/image-path")
+            .cloned()
+            .unwrap_or_default();
 
         if let Some(loop_dev) = annotations.get("z8s.io/loop-device") {
             if is_mounted(host_path) {
-                info!("Unmounting {} for PV {}", host_path, pv.metadata.name.as_deref().unwrap_or("?"));
+                info!(
+                    "Unmounting {} for PV {}",
+                    host_path,
+                    pv.metadata.name.as_deref().unwrap_or("?")
+                );
                 if let Err(e) = run("umount", &[host_path]) {
                     warn!("umount {} failed ({}), trying lazy umount", host_path, e);
                     let _ = run("umount", &["-l", host_path]);
                 }
             }
-            info!("Detaching loop device {} for PV {}", loop_dev, pv.metadata.name.as_deref().unwrap_or("?"));
+            info!(
+                "Detaching loop device {} for PV {}",
+                loop_dev,
+                pv.metadata.name.as_deref().unwrap_or("?")
+            );
             if let Err(e) = run("losetup", &["-d", loop_dev]) {
                 warn!("losetup -d {} failed: {}", loop_dev, e);
             }

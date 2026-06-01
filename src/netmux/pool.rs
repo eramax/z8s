@@ -123,7 +123,11 @@ impl IpPool {
             if (start & (subnet_size - 1)) != 0 {
                 continue;
             }
-            if window.iter().enumerate().all(|(i, &v)| v == start + i as u32) {
+            if window
+                .iter()
+                .enumerate()
+                .all(|(i, &v)| v == start + i as u32)
+            {
                 for ip in start..start + subnet_size {
                     self.free.remove(&ip);
                 }

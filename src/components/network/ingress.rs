@@ -1,10 +1,10 @@
-use std::sync::Arc;
-use async_trait::async_trait;
-use anyhow::Result;
-use tracing::info;
-use crate::store::{AnyResource, ResourceTracker};
 use crate::components::{Component, ReconcileContext, ResourceCategory};
 use crate::netmux::NetMux;
+use crate::store::{AnyResource, ResourceTracker};
+use anyhow::Result;
+use async_trait::async_trait;
+use std::sync::Arc;
+use tracing::info;
 
 pub struct IngressResource {
     pub store: Arc<dyn crate::store::StoreBackend>,
@@ -19,9 +19,15 @@ impl IngressResource {
 
 #[async_trait]
 impl Component for IngressResource {
-    fn kind(&self) -> &'static str { "Ingress" }
-    fn category(&self) -> ResourceCategory { ResourceCategory::Network }
-    async fn reconcile(&self, _ctx: &ReconcileContext, _tracker: &ResourceTracker) -> Result<()> { Ok(()) }
+    fn kind(&self) -> &'static str {
+        "Ingress"
+    }
+    fn category(&self) -> ResourceCategory {
+        ResourceCategory::Network
+    }
+    async fn reconcile(&self, _ctx: &ReconcileContext, _tracker: &ResourceTracker) -> Result<()> {
+        Ok(())
+    }
 
     async fn on_apply(&self, _ctx: &ReconcileContext, resource: &AnyResource) -> Result<()> {
         if let AnyResource::Ingress(ing) = resource {
@@ -30,7 +36,10 @@ impl Component for IngressResource {
             let gw = self.netmux.gateway;
             if let Some(spec) = &ing.spec {
                 if let Some(rules) = &spec.rules {
-                    let mut records = self.netmux.dns_records.write().unwrap_or_else(|e| { tracing::warn!("dns_records lock poisoned"); e.into_inner() });
+                    let mut records = self.netmux.dns_records.write().unwrap_or_else(|e| {
+                        tracing::warn!("dns_records lock poisoned");
+                        e.into_inner()
+                    });
                     for rule in rules {
                         if let Some(host) = &rule.host {
                             if !host.is_empty() {
@@ -41,7 +50,11 @@ impl Component for IngressResource {
                     }
                 }
             }
-            info!("Ingress '{}/{}' applied", ing.metadata.namespace.as_deref().unwrap_or("default"), ing.metadata.name.as_deref().unwrap_or("?"));
+            info!(
+                "Ingress '{}/{}' applied",
+                ing.metadata.namespace.as_deref().unwrap_or("default"),
+                ing.metadata.name.as_deref().unwrap_or("?")
+            );
         }
         Ok(())
     }
@@ -52,7 +65,10 @@ impl Component for IngressResource {
             // Remove DNS records for ingress hosts
             if let Some(spec) = &ing.spec {
                 if let Some(rules) = &spec.rules {
-                    let mut records = self.netmux.dns_records.write().unwrap_or_else(|e| { tracing::warn!("dns_records lock poisoned"); e.into_inner() });
+                    let mut records = self.netmux.dns_records.write().unwrap_or_else(|e| {
+                        tracing::warn!("dns_records lock poisoned");
+                        e.into_inner()
+                    });
                     for rule in rules {
                         if let Some(host) = &rule.host {
                             records.remove(host);
@@ -61,7 +77,11 @@ impl Component for IngressResource {
                     }
                 }
             }
-            info!("Ingress '{}/{}' removed", ing.metadata.namespace.as_deref().unwrap_or("default"), ing.metadata.name.as_deref().unwrap_or("?"));
+            info!(
+                "Ingress '{}/{}' removed",
+                ing.metadata.namespace.as_deref().unwrap_or("default"),
+                ing.metadata.name.as_deref().unwrap_or("?")
+            );
         }
         Ok(())
     }

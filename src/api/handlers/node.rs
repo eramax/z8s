@@ -1,7 +1,7 @@
-use axum::Router;
-use axum::routing::get;
 use crate::api::server::*;
 use crate::store::ResourceTracker;
+use axum::Router;
+use axum::routing::get;
 
 pub async fn list_nodes(
     State(state): State<AppState>,
@@ -23,17 +23,27 @@ pub async fn list_nodes(
         let pods = state.store.get_by_kind("Pod").await;
         let svc_count = state.store.get_by_kind("Service").await.len();
         // Pre-compute running pods
-        let running: Vec<String> = futures_util::future::join_all(
-            pods.iter().map(|t| async {
-                if let AnyResource::Pod(p) = &t.resource {
-                    if state.process_tracker.is_running(p.metadata.name.as_deref().unwrap_or("")).await {
-                        return p.metadata.name.clone().unwrap_or_default();
-                    }
+        let running: Vec<String> = futures_util::future::join_all(pods.iter().map(|t| async {
+            if let AnyResource::Pod(p) = &t.resource {
+                if state
+                    .process_tracker
+                    .is_running(p.metadata.name.as_deref().unwrap_or(""))
+                    .await
+                {
+                    return p.metadata.name.clone().unwrap_or_default();
                 }
-                String::new()
-            })
-        ).await.into_iter().filter(|n| !n.is_empty()).collect();
-        return (StatusCode::OK, Json(node_list_to_table(&nodes, &pods, svc_count, &running))).into_response();
+            }
+            String::new()
+        }))
+        .await
+        .into_iter()
+        .filter(|n| !n.is_empty())
+        .collect();
+        return (
+            StatusCode::OK,
+            Json(node_list_to_table(&nodes, &pods, svc_count, &running)),
+        )
+            .into_response();
     }
 
     Json(List {
@@ -41,7 +51,8 @@ pub async fn list_nodes(
         api_version: None,
         items: nodes,
         metadata: make_list_meta(),
-    }).into_response()
+    })
+    .into_response()
 }
 
 pub async fn get_node(
@@ -62,7 +73,12 @@ pub async fn get_node(
     Err(ApiError::not_found(format!("node \"{}\" not found", name)))
 }
 
-fn node_list_to_table(nodes: &[Node], pods: &[ResourceTracker], svc_count: usize, running: &[String]) -> serde_json::Value {
+fn node_list_to_table(
+    nodes: &[Node],
+    pods: &[ResourceTracker],
+    svc_count: usize,
+    running: &[String],
+) -> serde_json::Value {
     let columns = serde_json::json!([
         {"name": "Name", "type": "string", "format": "name", "priority": 0},
         {"name": "Status", "type": "string", "priority": 0},
@@ -77,59 +93,103 @@ fn node_list_to_table(nodes: &[Node], pods: &[ResourceTracker], svc_count: usize
     // Pre-count pods per node and total services
 
     let now = std::time::SystemTime::now();
-    let rows: Vec<serde_json::Value> = nodes.iter().map(|node| {
-        let name = node.metadata.name.as_deref().unwrap_or("");
-        let age = node.metadata.creation_timestamp.as_ref()
-            .map(|t| crate::api::server::format_ts_relative(&t.0, now))
-            .unwrap_or_else(|| "<unknown>".into());
+    let rows: Vec<serde_json::Value> = nodes
+        .iter()
+        .map(|node| {
+            let name = node.metadata.name.as_deref().unwrap_or("");
+            let age = node
+                .metadata
+                .creation_timestamp
+                .as_ref()
+                .map(|t| crate::api::server::format_ts_relative(&t.0, now))
+                .unwrap_or_else(|| "<unknown>".into());
 
-        let ready = node.status.as_ref()
-            .and_then(|s| s.conditions.as_ref())
-            .and_then(|cs| cs.iter().find(|c| c.type_ == "Ready"))
-            .map(|c| if c.status == "True" { "Ready" } else { "NotReady" })
-            .unwrap_or("Unknown");
+            let ready = node
+                .status
+                .as_ref()
+                .and_then(|s| s.conditions.as_ref())
+                .and_then(|cs| cs.iter().find(|c| c.type_ == "Ready"))
+                .map(|c| {
+                    if c.status == "True" {
+                        "Ready"
+                    } else {
+                        "NotReady"
+                    }
+                })
+                .unwrap_or("Unknown");
 
-        let cpu_cap = node.status.as_ref()
-            .and_then(|s| s.capacity.as_ref())
-            .and_then(|c| c.get("cpu")).map(|q| {
-                let v: f64 = q.0.trim_end_matches(|c: char| !c.is_ascii_digit()).parse().unwrap_or(0.0);
-                format!("{}", v as u64)
-            }).unwrap_or_else(|| "?".into());
+            let cpu_cap = node
+                .status
+                .as_ref()
+                .and_then(|s| s.capacity.as_ref())
+                .and_then(|c| c.get("cpu"))
+                .map(|q| {
+                    let v: f64 =
+                        q.0.trim_end_matches(|c: char| !c.is_ascii_digit())
+                            .parse()
+                            .unwrap_or(0.0);
+                    format!("{}", v as u64)
+                })
+                .unwrap_or_else(|| "?".into());
 
-        let mem_cap = node.status.as_ref()
-            .and_then(|s| s.capacity.as_ref())
-            .and_then(|c| c.get("memory")).map(|q| {
-                let v = parse_ki(&q.0);
-                if v >= 1024*1024*1024 { format!("{:.1}Gi", v as f64 / (1024.0*1024.0*1024.0)) }
-                else if v >= 1024*1024 { format!("{:.0}Mi", v / (1024*1024)) }
-                else { format!("{:.0}Ki", v / 1024) }
-            }).unwrap_or_else(|| "?".into());
+            let mem_cap = node
+                .status
+                .as_ref()
+                .and_then(|s| s.capacity.as_ref())
+                .and_then(|c| c.get("memory"))
+                .map(|q| {
+                    let v = parse_ki(&q.0);
+                    if v >= 1024 * 1024 * 1024 {
+                        format!("{:.1}Gi", v as f64 / (1024.0 * 1024.0 * 1024.0))
+                    } else if v >= 1024 * 1024 {
+                        format!("{:.0}Mi", v / (1024 * 1024))
+                    } else {
+                        format!("{:.0}Ki", v / 1024)
+                    }
+                })
+                .unwrap_or_else(|| "?".into());
 
-        let total = pods.iter().filter(|t| {
-            if let AnyResource::Pod(p) = &t.resource {
-                let match_name = p.assigned_node.as_deref() == Some(name);
-                if match_name {
-                    tracing::info!("    node {} matched pod {}", name, p.metadata.name.as_deref().unwrap_or("?"));
-                }
-                match_name
-            } else { false }
-        }).count();
-        let ready_pods = pods.iter().filter(|t| {
-            if let AnyResource::Pod(p) = &t.resource {
-                p.assigned_node.as_deref() == Some(name)
-                    && running.contains(&p.metadata.name.as_deref().unwrap_or("").to_string())
-            } else { false }
-        }).count();
-        let pod_str = format!("{}/{}", ready_pods, total);
-        if total > 0 || ready_pods > 0 {
-            tracing::info!("    node {} total={} ready={}", name, total, ready_pods);
-        }
+            let total = pods
+                .iter()
+                .filter(|t| {
+                    if let AnyResource::Pod(p) = &t.resource {
+                        let match_name = p.assigned_node.as_deref() == Some(name);
+                        if match_name {
+                            tracing::info!(
+                                "    node {} matched pod {}",
+                                name,
+                                p.metadata.name.as_deref().unwrap_or("?")
+                            );
+                        }
+                        match_name
+                    } else {
+                        false
+                    }
+                })
+                .count();
+            let ready_pods = pods
+                .iter()
+                .filter(|t| {
+                    if let AnyResource::Pod(p) = &t.resource {
+                        p.assigned_node.as_deref() == Some(name)
+                            && running
+                                .contains(&p.metadata.name.as_deref().unwrap_or("").to_string())
+                    } else {
+                        false
+                    }
+                })
+                .count();
+            let pod_str = format!("{}/{}", ready_pods, total);
+            if total > 0 || ready_pods > 0 {
+                tracing::info!("    node {} total={} ready={}", name, total, ready_pods);
+            }
 
-        serde_json::json!({
-            "cells": [name, ready, "worker", age, cpu_cap, mem_cap, pod_str, svc_count],
-            "object": node,
+            serde_json::json!({
+                "cells": [name, ready, "worker", age, cpu_cap, mem_cap, pod_str, svc_count],
+                "object": node,
+            })
         })
-    }).collect();
+        .collect();
 
     crate::api::server::make_table(columns, rows)
 }
@@ -178,11 +238,19 @@ pub fn make_local_node() -> Node {
                 ..Default::default()
             }]),
             addresses: Some(vec![
-                NodeAddress { type_: "InternalIP".into(), address: cfg.node_ip.clone() },
-                NodeAddress { type_: "Hostname".into(), address: cfg.node_name.clone() },
+                NodeAddress {
+                    type_: "InternalIP".into(),
+                    address: cfg.node_ip.clone(),
+                },
+                NodeAddress {
+                    type_: "Hostname".into(),
+                    address: cfg.node_name.clone(),
+                },
             ]),
             daemon_endpoints: Some(NodeDaemonEndpoints {
-                kubelet_endpoint: Some(DaemonEndpoint { port: z8s_port() as i32 }),
+                kubelet_endpoint: Some(DaemonEndpoint {
+                    port: z8s_port() as i32,
+                }),
             }),
             node_info: Some(NodeSystemInfo {
                 machine_id: format!("z8s-{}", cfg.node_name),
@@ -225,10 +293,15 @@ fn host_memory_ki() -> String {
 
 fn parse_ki(s: &str) -> u64 {
     let s = s.trim();
-    if let Some(rest) = s.strip_suffix("Ki") { rest.parse().unwrap_or(0) * 1024 }
-    else if let Some(rest) = s.strip_suffix("Mi") { rest.parse().unwrap_or(0) * 1024 * 1024 }
-    else if let Some(rest) = s.strip_suffix("Gi") { rest.parse().unwrap_or(0) * 1024 * 1024 * 1024 }
-    else { s.parse().unwrap_or(0) }
+    if let Some(rest) = s.strip_suffix("Ki") {
+        rest.parse().unwrap_or(0) * 1024
+    } else if let Some(rest) = s.strip_suffix("Mi") {
+        rest.parse().unwrap_or(0) * 1024 * 1024
+    } else if let Some(rest) = s.strip_suffix("Gi") {
+        rest.parse().unwrap_or(0) * 1024 * 1024 * 1024
+    } else {
+        s.parse().unwrap_or(0)
+    }
 }
 
 pub fn routes() -> Router<AppState> {

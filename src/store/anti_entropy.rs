@@ -4,8 +4,8 @@ use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, info};
 
-use crate::store::gossip::GossipState;
 use crate::store::StoreBackend;
+use crate::store::gossip::GossipState;
 
 const ANTI_ENTROPY_INTERVAL: Duration = Duration::from_secs(30);
 

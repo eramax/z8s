@@ -825,7 +825,15 @@ impl Default for Pod {
 
 impl Pod {
     pub fn new(metadata: ObjectMeta, spec: Option<PodSpec>) -> Self {
-        Self { api_version: "v1".into(), kind: "Pod".into(), metadata, spec, status: None, assigned_node: None, scheduler_epoch: 0 }
+        Self {
+            api_version: "v1".into(),
+            kind: "Pod".into(),
+            metadata,
+            spec,
+            status: None,
+            assigned_node: None,
+            scheduler_epoch: 0,
+        }
     }
 }
 
@@ -1069,7 +1077,10 @@ pub struct PersistentVolumeStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PersistentVolume {
-    #[serde(rename = "apiVersion", default = "default_persistentvolume_api_version")]
+    #[serde(
+        rename = "apiVersion",
+        default = "default_persistentvolume_api_version"
+    )]
     pub api_version: String,
     #[serde(default = "default_persistentvolume_kind")]
     pub kind: String,
@@ -1127,7 +1138,10 @@ pub struct PersistentVolumeClaimStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PersistentVolumeClaim {
-    #[serde(rename = "apiVersion", default = "default_persistentvolumeclaim_api_version")]
+    #[serde(
+        rename = "apiVersion",
+        default = "default_persistentvolumeclaim_api_version"
+    )]
     pub api_version: String,
     #[serde(default = "default_persistentvolumeclaim_kind")]
     pub kind: String,
@@ -1974,44 +1988,114 @@ pub struct List<T> {
 // CRD types — custom resource definitions using our ObjectMeta
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn default_api_version() -> String { "z8s.io/v1".to_string() }
-fn default_true() -> bool { true }
-fn default_role() -> String { "spoke".to_string() }
-fn default_priority() -> u32 { 1000 }
-fn default_header_operator() -> String { "eq".to_string() }
+fn default_api_version() -> String {
+    "z8s.io/v1".to_string()
+}
+fn default_true() -> bool {
+    true
+}
+fn default_role() -> String {
+    "spoke".to_string()
+}
+fn default_priority() -> u32 {
+    1000
+}
+fn default_header_operator() -> String {
+    "eq".to_string()
+}
 
 // ── Standard k8s default functions ─────────────────────────────────────────
 
-fn default_pod_api_version() -> String { "v1".to_string() }
-fn default_pod_kind() -> String { "Pod".to_string() }
-fn default_service_api_version() -> String { "v1".to_string() }
-fn default_service_kind() -> String { "Service".to_string() }
-fn default_configmap_api_version() -> String { "v1".to_string() }
-fn default_configmap_kind() -> String { "ConfigMap".to_string() }
-fn default_secret_api_version() -> String { "v1".to_string() }
-fn default_secret_kind() -> String { "Secret".to_string() }
-fn default_persistentvolume_api_version() -> String { "v1".to_string() }
-fn default_persistentvolume_kind() -> String { "PersistentVolume".to_string() }
-fn default_persistentvolumeclaim_api_version() -> String { "v1".to_string() }
-fn default_persistentvolumeclaim_kind() -> String { "PersistentVolumeClaim".to_string() }
-fn default_deployment_api_version() -> String { "apps/v1".to_string() }
-fn default_deployment_kind() -> String { "Deployment".to_string() }
-fn default_ingress_api_version() -> String { "networking.k8s.io/v1".to_string() }
-fn default_ingress_kind() -> String { "Ingress".to_string() }
-fn default_networkpolicy_api_version() -> String { "networking.k8s.io/v1".to_string() }
-fn default_networkpolicy_kind() -> String { "NetworkPolicy".to_string() }
-fn default_namespace_api_version() -> String { "v1".to_string() }
-fn default_namespace_kind() -> String { "Namespace".to_string() }
-fn default_node_api_version() -> String { "v1".to_string() }
-fn default_node_kind() -> String { "Node".to_string() }
-fn default_endpoints_api_version() -> String { "v1".to_string() }
-fn default_endpoints_kind() -> String { "Endpoints".to_string() }
-fn default_endpointslice_api_version() -> String { "discovery.k8s.io/v1".to_string() }
-fn default_endpointslice_kind() -> String { "EndpointSlice".to_string() }
-fn default_event_api_version() -> String { "v1".to_string() }
-fn default_event_kind() -> String { "Event".to_string() }
-fn default_storageclass_api_version() -> String { "storage.k8s.io/v1".to_string() }
-fn default_storageclass_kind() -> String { "StorageClass".to_string() }
+fn default_pod_api_version() -> String {
+    "v1".to_string()
+}
+fn default_pod_kind() -> String {
+    "Pod".to_string()
+}
+fn default_service_api_version() -> String {
+    "v1".to_string()
+}
+fn default_service_kind() -> String {
+    "Service".to_string()
+}
+fn default_configmap_api_version() -> String {
+    "v1".to_string()
+}
+fn default_configmap_kind() -> String {
+    "ConfigMap".to_string()
+}
+fn default_secret_api_version() -> String {
+    "v1".to_string()
+}
+fn default_secret_kind() -> String {
+    "Secret".to_string()
+}
+fn default_persistentvolume_api_version() -> String {
+    "v1".to_string()
+}
+fn default_persistentvolume_kind() -> String {
+    "PersistentVolume".to_string()
+}
+fn default_persistentvolumeclaim_api_version() -> String {
+    "v1".to_string()
+}
+fn default_persistentvolumeclaim_kind() -> String {
+    "PersistentVolumeClaim".to_string()
+}
+fn default_deployment_api_version() -> String {
+    "apps/v1".to_string()
+}
+fn default_deployment_kind() -> String {
+    "Deployment".to_string()
+}
+fn default_ingress_api_version() -> String {
+    "networking.k8s.io/v1".to_string()
+}
+fn default_ingress_kind() -> String {
+    "Ingress".to_string()
+}
+fn default_networkpolicy_api_version() -> String {
+    "networking.k8s.io/v1".to_string()
+}
+fn default_networkpolicy_kind() -> String {
+    "NetworkPolicy".to_string()
+}
+fn default_namespace_api_version() -> String {
+    "v1".to_string()
+}
+fn default_namespace_kind() -> String {
+    "Namespace".to_string()
+}
+fn default_node_api_version() -> String {
+    "v1".to_string()
+}
+fn default_node_kind() -> String {
+    "Node".to_string()
+}
+fn default_endpoints_api_version() -> String {
+    "v1".to_string()
+}
+fn default_endpoints_kind() -> String {
+    "Endpoints".to_string()
+}
+fn default_endpointslice_api_version() -> String {
+    "discovery.k8s.io/v1".to_string()
+}
+fn default_endpointslice_kind() -> String {
+    "EndpointSlice".to_string()
+}
+fn default_event_api_version() -> String {
+    "v1".to_string()
+}
+fn default_event_kind() -> String {
+    "Event".to_string()
+}
+fn default_storageclass_api_version() -> String {
+    "storage.k8s.io/v1".to_string()
+}
+fn default_storageclass_kind() -> String {
+    "StorageClass".to_string()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct VNet {
@@ -2025,7 +2109,9 @@ pub struct VNet {
     pub status: Option<VNetStatus>,
 }
 
-fn default_vnet_kind() -> String { "VNet".to_string() }
+fn default_vnet_kind() -> String {
+    "VNet".to_string()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct VNetSpec {
@@ -2054,7 +2140,9 @@ pub struct Subnet {
     pub spec: SubnetSpec,
 }
 
-fn default_subnet_kind() -> String { "Subnet".to_string() }
+fn default_subnet_kind() -> String {
+    "Subnet".to_string()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SubnetSpec {
@@ -2072,7 +2160,9 @@ pub struct Nsg {
     pub spec: NsgSpec,
 }
 
-fn default_nsg_kind() -> String { "NSG".to_string() }
+fn default_nsg_kind() -> String {
+    "NSG".to_string()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct NsgSpec {
@@ -2107,7 +2197,9 @@ pub struct RouteTable {
     pub spec: RouteTableSpec,
 }
 
-fn default_routetable_kind() -> String { "RouteTable".to_string() }
+fn default_routetable_kind() -> String {
+    "RouteTable".to_string()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct RouteTableSpec {
@@ -2307,7 +2399,9 @@ pub enum NodeState {
 }
 
 impl Default for NodeState {
-    fn default() -> Self { NodeState::Active }
+    fn default() -> Self {
+        NodeState::Active
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -2439,9 +2533,9 @@ pub fn parse_manifest_yaml(yaml: &str) -> anyhow::Result<Vec<AnyResource>> {
             .context("Missing 'kind' field in YAML")?;
 
         let resource = match kind {
-            "Pod" => AnyResource::Pod(
-                serde_yaml::from_value(value).context("Failed to parse Pod")?,
-            ),
+            "Pod" => {
+                AnyResource::Pod(serde_yaml::from_value(value).context("Failed to parse Pod")?)
+            }
             "Deployment" => AnyResource::Deployment(
                 serde_yaml::from_value(value).context("Failed to parse Deployment")?,
             ),
@@ -2460,15 +2554,15 @@ pub fn parse_manifest_yaml(yaml: &str) -> anyhow::Result<Vec<AnyResource>> {
             "PersistentVolumeClaim" => AnyResource::PersistentVolumeClaim(
                 serde_yaml::from_value(value).context("Failed to parse PersistentVolumeClaim")?,
             ),
-            "VNet" => AnyResource::VNet(
-                serde_yaml::from_value(value).context("Failed to parse VNet")?,
-            ),
+            "VNet" => {
+                AnyResource::VNet(serde_yaml::from_value(value).context("Failed to parse VNet")?)
+            }
             "Subnet" => AnyResource::Subnet(
                 serde_yaml::from_value(value).context("Failed to parse Subnet")?,
             ),
-            "NSG" => AnyResource::Nsg(
-                serde_yaml::from_value(value).context("Failed to parse NSG")?,
-            ),
+            "NSG" => {
+                AnyResource::Nsg(serde_yaml::from_value(value).context("Failed to parse NSG")?)
+            }
             "RouteTable" => AnyResource::RouteTable(
                 serde_yaml::from_value(value).context("Failed to parse RouteTable")?,
             ),
@@ -2676,7 +2770,10 @@ spec:
         let resources = parse_manifest_yaml(yaml).unwrap();
         assert_eq!(resources.len(), 2);
         assert!(matches!(&resources[0], AnyResource::PersistentVolume(_)));
-        assert!(matches!(&resources[1], AnyResource::PersistentVolumeClaim(_)));
+        assert!(matches!(
+            &resources[1],
+            AnyResource::PersistentVolumeClaim(_)
+        ));
     }
 
     #[test]
@@ -2721,12 +2818,18 @@ spec:
 
     #[test]
     fn parse_quantity_mi() {
-        assert_eq!(parse_quantity_bytes(&Quantity("256Mi".into())), 256 * 1024 * 1024);
+        assert_eq!(
+            parse_quantity_bytes(&Quantity("256Mi".into())),
+            256 * 1024 * 1024
+        );
     }
 
     #[test]
     fn parse_quantity_gi() {
-        assert_eq!(parse_quantity_bytes(&Quantity("1Gi".into())), 1024 * 1024 * 1024);
+        assert_eq!(
+            parse_quantity_bytes(&Quantity("1Gi".into())),
+            1024 * 1024 * 1024
+        );
     }
 
     #[test]

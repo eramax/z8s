@@ -1,5 +1,5 @@
-use anyhow::{Context, Result};
 use crate::types::{PersistentVolume, PersistentVolumeClaim};
+use anyhow::{Context, Result};
 use std::path::Path;
 use tracing::info;
 
@@ -8,8 +8,15 @@ use super::StorageClass;
 pub struct HostPathProvisioner;
 
 impl HostPathProvisioner {
-    pub async fn provision(&self, pv: &mut PersistentVolume, _pvc: &PersistentVolumeClaim, _class: &StorageClass) -> Result<()> {
-        let host_path = pv.spec.as_ref()
+    pub async fn provision(
+        &self,
+        pv: &mut PersistentVolume,
+        _pvc: &PersistentVolumeClaim,
+        _class: &StorageClass,
+    ) -> Result<()> {
+        let host_path = pv
+            .spec
+            .as_ref()
             .and_then(|s| s.host_path.as_ref())
             .map(|h| h.path.as_str())
             .context("PV has no hostPath")?;

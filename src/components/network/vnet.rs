@@ -1,10 +1,10 @@
-use std::sync::Arc;
-use async_trait::async_trait;
-use anyhow::Result;
-use tracing::info;
-use crate::store::{AnyResource, ResourceTracker};
 use crate::components::{Component, ReconcileContext, ResourceCategory};
 use crate::netmux::NetMux;
+use crate::store::{AnyResource, ResourceTracker};
+use anyhow::Result;
+use async_trait::async_trait;
+use std::sync::Arc;
+use tracing::info;
 
 pub struct VNetResource {
     pub netmux: Arc<NetMux>,
@@ -18,8 +18,12 @@ impl VNetResource {
 
 #[async_trait]
 impl Component for VNetResource {
-    fn kind(&self) -> &'static str { "VNet" }
-    fn category(&self) -> ResourceCategory { ResourceCategory::Network }
+    fn kind(&self) -> &'static str {
+        "VNet"
+    }
+    fn category(&self) -> ResourceCategory {
+        ResourceCategory::Network
+    }
 
     async fn reconcile(&self, _ctx: &ReconcileContext, _tracker: &ResourceTracker) -> Result<()> {
         Ok(())
@@ -30,9 +34,16 @@ impl Component for VNetResource {
             let cidr = vnet.spec.cidr.as_deref().unwrap_or("10.42.0.0/20");
             self.netmux.apply_vnet(vnet, cidr).await?;
             if vnet.spec.internet_access {
-                self.netmux.nft.add_snat(vnet.metadata.name.as_deref().unwrap_or("vnet"), cidr).await?;
+                self.netmux
+                    .nft
+                    .add_snat(vnet.metadata.name.as_deref().unwrap_or("vnet"), cidr)
+                    .await?;
             }
-            info!("VNet '{}' applied (CIDR {})", vnet.metadata.name.as_deref().unwrap_or("?"), cidr);
+            info!(
+                "VNet '{}' applied (CIDR {})",
+                vnet.metadata.name.as_deref().unwrap_or("?"),
+                cidr
+            );
         }
         Ok(())
     }

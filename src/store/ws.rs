@@ -6,8 +6,8 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
-use crate::store::gossip::{GossipMessage, GossipState, SyncEntry};
 use crate::store::StoreBackend;
+use crate::store::gossip::{GossipMessage, GossipState, SyncEntry};
 
 /// Handle an incoming WebSocket connection from a peer.
 pub async fn handle_gossip_ws(mut ws: WebSocket, state: Arc<tokio::sync::Mutex<GossipState>>) {
@@ -42,9 +42,18 @@ pub async fn handle_gossip_ws(mut ws: WebSocket, state: Arc<tokio::sync::Mutex<G
     }
 }
 
-async fn handle_message(msg: GossipMessage, ws: &mut WebSocket, state: &Arc<tokio::sync::Mutex<GossipState>>) {
+async fn handle_message(
+    msg: GossipMessage,
+    ws: &mut WebSocket,
+    state: &Arc<tokio::sync::Mutex<GossipState>>,
+) {
     match msg {
-        GossipMessage::Gossip { key, value, term, source: _ } => {
+        GossipMessage::Gossip {
+            key,
+            value,
+            term,
+            source: _,
+        } => {
             tracing::info!("handle_message Gossip: key={}", key);
             let (should_apply, db) = {
                 let mut st = state.lock().await;
@@ -63,14 +72,20 @@ async fn handle_message(msg: GossipMessage, ws: &mut WebSocket, state: &Arc<toki
         GossipMessage::SyncRequest { request_id } => {
             let st = state.lock().await;
             let resources = st.db.get_all().await;
-            let entries: Vec<SyncEntry> = resources.into_iter().map(|t| {
-                let key = t.resource.uid();
-                let term = st.seen.get(&key).copied().unwrap_or(0);
-                let value = serde_json::to_vec(&t.resource).unwrap_or_default();
-                SyncEntry { key, value, term }
-            }).collect();
+            let entries: Vec<SyncEntry> = resources
+                .into_iter()
+                .map(|t| {
+                    let key = t.resource.uid();
+                    let term = st.seen.get(&key).copied().unwrap_or(0);
+                    let value = serde_json::to_vec(&t.resource).unwrap_or_default();
+                    SyncEntry { key, value, term }
+                })
+                .collect();
             let count = entries.len();
-            let response = GossipMessage::SyncFull { request_id, entries };
+            let response = GossipMessage::SyncFull {
+                request_id,
+                entries,
+            };
             if let Ok(json) = serde_json::to_string(&response) {
                 let _ = ws.send(Message::Text(json.into())).await;
             }
@@ -79,14 +94,26 @@ async fn handle_message(msg: GossipMessage, ws: &mut WebSocket, state: &Arc<toki
         GossipMessage::SyncFull { ref entries, .. } => {
             let db = state.lock().await.db.clone();
             for entry in entries.iter() {
-                if let Ok(resource) = serde_json::from_slice::<crate::store::AnyResource>(&entry.value) {
+                if let Ok(resource) =
+                    serde_json::from_slice::<crate::store::AnyResource>(&entry.value)
+                {
                     db.apply(resource).await.ok();
                 }
-                state.lock().await.seen.insert(entry.key.clone(), entry.term);
+                state
+                    .lock()
+                    .await
+                    .seen
+                    .insert(entry.key.clone(), entry.term);
             }
         }
         GossipMessage::Heartbeat => {
-            let _ = ws.send(Message::Text(serde_json::to_string(&GossipMessage::Heartbeat).unwrap().into())).await;
+            let _ = ws
+                .send(Message::Text(
+                    serde_json::to_string(&GossipMessage::Heartbeat)
+                        .unwrap()
+                        .into(),
+                ))
+                .await;
         }
         _ => {}
     }
@@ -107,7 +134,9 @@ pub async fn run_gossip_client(
 
                 let msg = GossipMessage::SyncRequest { request_id: 0 };
                 if let Ok(json) = serde_json::to_string(&msg) {
-                    let _ = write.send(tokio_tungstenite::tungstenite::Message::Text(json.into())).await;
+                    let _ = write
+                        .send(tokio_tungstenite::tungstenite::Message::Text(json.into()))
+                        .await;
                 }
 
                 loop {
@@ -185,11 +214,13 @@ pub async fn run_gossip_client(
                 }
             }
             Err(e) => {
-                warn!("Failed to connect to peer {} ({}): {}. Retrying in 5s...", peer_name, peer_url, e);
+                warn!(
+                    "Failed to connect to peer {} ({}): {}. Retrying in 5s...",
+                    peer_name, peer_url, e
+                );
                 sleep(Duration::from_secs(5)).await;
             }
         }
         sleep(Duration::from_secs(5)).await;
     }
 }
-

@@ -1,20 +1,20 @@
-pub mod pool;
+pub mod dns;
+pub mod ingress;
 pub mod netlink;
+pub mod network;
 pub mod nftables;
 pub mod np_controller;
-pub mod ingress;
-pub mod dns;
-pub mod network;
+pub mod pool;
 
+use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex};
-use anyhow::{Context, Result};
 use tracing::{info, warn};
 
-pub use pool::Ipv4Cidr;
-use pool::IpPool;
 pub use nftables::NftEngine;
+use pool::IpPool;
+pub use pool::Ipv4Cidr;
 
 /// Drop guard that restores the host network namespace when the current
 /// function scope exits, even on early returns or panics.
@@ -30,10 +30,12 @@ impl NetNsGuard {
                 nix::fcntl::OFlag::O_RDONLY | nix::fcntl::OFlag::O_CLOEXEC,
                 nix::sys::stat::Mode::empty(),
             )
-        }.context("open host netns for guard")?;
-        Ok(Self { host_fd: Some(host_fd) })
+        }
+        .context("open host netns for guard")?;
+        Ok(Self {
+            host_fd: Some(host_fd),
+        })
     }
-
 }
 
 impl Drop for NetNsGuard {
@@ -62,8 +64,7 @@ pub struct NetMux {
 
 impl NetMux {
     pub fn new(pod_cidr: &str, node_name: &str) -> Result<Self> {
-        let cidr = Ipv4Cidr::parse(pod_cidr)
-            .context("Invalid pod CIDR")?;
+        let cidr = Ipv4Cidr::parse(pod_cidr).context("Invalid pod CIDR")?;
         let gateway = Self::derive_gateway(&cidr)?;
         let nft = NftEngine::new(node_name);
         let ingress_state = Arc::new(crate::netmux::ingress::IngressState::new());
@@ -95,12 +96,27 @@ impl NetMux {
 
     pub fn allocate_ip(&self) -> Option<Ipv4Addr> {
         // SAFETY: lock only held briefly, no .await, panic only on poison
-        self.pool.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() }).allocate()
+        self.pool
+            .lock()
+            .unwrap_or_else(|e| {
+                tracing::warn!("mutex poisoned");
+                e.into_inner()
+            })
+            .allocate()
     }
 
     pub fn release_ip(&self, ip: Ipv4Addr) {
-        self.pool.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() }).release(ip);
-        let mut pools = self.subnet_pools.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() });
+        self.pool
+            .lock()
+            .unwrap_or_else(|e| {
+                tracing::warn!("mutex poisoned");
+                e.into_inner()
+            })
+            .release(ip);
+        let mut pools = self.subnet_pools.lock().unwrap_or_else(|e| {
+            tracing::warn!("mutex poisoned");
+            e.into_inner()
+        });
         for pool in pools.values_mut() {
             if pool.cidr().contains(&ip) {
                 pool.release(ip);
@@ -110,36 +126,57 @@ impl NetMux {
     }
 
     pub fn count_free(&self) -> usize {
-        self.pool.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() }).count_free()
+        self.pool
+            .lock()
+            .unwrap_or_else(|e| {
+                tracing::warn!("mutex poisoned");
+                e.into_inner()
+            })
+            .count_free()
     }
 
     pub fn allocate_subnet(&self, prefix: u8) -> Option<Ipv4Cidr> {
-        self.pool.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() }).allocate_subnet(prefix)
+        self.pool
+            .lock()
+            .unwrap_or_else(|e| {
+                tracing::warn!("mutex poisoned");
+                e.into_inner()
+            })
+            .allocate_subnet(prefix)
     }
 
     pub fn register_subnet_cidr(&self, name: &str, cidr_str: &str) -> Result<()> {
-        let cidr = Ipv4Cidr::parse(cidr_str)
-            .context("Invalid subnet CIDR")?;
-        let mut pools = self.subnet_pools.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() });
+        let cidr = Ipv4Cidr::parse(cidr_str).context("Invalid subnet CIDR")?;
+        let mut pools = self.subnet_pools.lock().unwrap_or_else(|e| {
+            tracing::warn!("mutex poisoned");
+            e.into_inner()
+        });
         pools.insert(name.to_string(), IpPool::new(cidr));
         info!("Registered subnet '{}' with CIDR {}", name, cidr_str);
         Ok(())
     }
 
-    pub fn attach_pod(&self, pod_uid: &str, container_pid: Option<u32>, subnet: Option<&str>) -> Result<(Ipv4Addr, u32, u32)> {
+    pub fn attach_pod(
+        &self,
+        pod_uid: &str,
+        container_pid: Option<u32>,
+        subnet: Option<&str>,
+    ) -> Result<(Ipv4Addr, u32, u32)> {
         let pod_ip = if let Some(subnet_name) = subnet {
-            let mut pools = self.subnet_pools.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() });
-            pools.get_mut(subnet_name)
+            let mut pools = self.subnet_pools.lock().unwrap_or_else(|e| {
+                tracing::warn!("mutex poisoned");
+                e.into_inner()
+            });
+            pools
+                .get_mut(subnet_name)
                 .and_then(|p| p.allocate())
                 .context(format!("No IPs available in subnet '{}'", subnet_name))?
         } else {
-            self.allocate_ip()
-                .context("No IPs available in pod CIDR")?
+            self.allocate_ip().context("No IPs available in pod CIDR")?
         };
 
         let (host_name, _peer_name, host_idx, peer_idx) =
-            create_pod_veth(pod_uid, container_pid)
-                .context("create_pod_veth")?;
+            create_pod_veth(pod_uid, container_pid).context("create_pod_veth")?;
 
         if let Err(e) = bring_up_veth(host_idx) {
             self.rollback_veth(pod_uid, &pod_ip, host_idx);
@@ -197,8 +234,7 @@ impl NetMux {
 
         // If peer was created in host netns, move it to pod's netns first
         if peer_ifindex != 0 {
-            move_peer_to_netns(peer_ifindex, container_pid)
-                .context("move_peer_to_netns")?;
+            move_peer_to_netns(peer_ifindex, container_pid).context("move_peer_to_netns")?;
         }
 
         // NetNsGuard covers all subsequent setns calls — ensures we always
@@ -214,20 +250,24 @@ impl NetMux {
                     nix::fcntl::OFlag::O_RDONLY | nix::fcntl::OFlag::O_CLOEXEC,
                     nix::sys::stat::Mode::empty(),
                 )
-            }.context("open pod netns")?;
-            unsafe { nix::sched::setns(&fd, nix::sched::CloneFlags::CLONE_NEWNET)
-                .context("setns into pod netns")?; }
+            }
+            .context("open pod netns")?;
+            unsafe {
+                nix::sched::setns(&fd, nix::sched::CloneFlags::CLONE_NEWNET)
+                    .context("setns into pod netns")?;
+            }
             let hex: Vec<char> = pod_uid.chars().filter(|c| c.is_ascii_hexdigit()).collect();
             let start = hex.len().saturating_sub(8);
             let in_pod_name = format!("zeth-{}", hex[start..].iter().collect::<String>());
-            let idx = netlink::get_ifindex(&in_pod_name)
-                .context("get_ifindex zeth-* in pod netns")?;
+            let idx =
+                netlink::get_ifindex(&in_pod_name).context("get_ifindex zeth-* in pod netns")?;
             unsafe {
                 let host_fd = nix::fcntl::open(
                     "/proc/1/ns/net",
                     nix::fcntl::OFlag::O_RDONLY | nix::fcntl::OFlag::O_CLOEXEC,
                     nix::sys::stat::Mode::empty(),
-                ).context("open host netns")?;
+                )
+                .context("open host netns")?;
                 nix::sched::setns(&host_fd, nix::sched::CloneFlags::CLONE_NEWNET)
                     .context("setns back to host")?;
             }
@@ -243,7 +283,8 @@ impl NetMux {
                 nix::fcntl::OFlag::O_RDONLY | nix::fcntl::OFlag::O_CLOEXEC,
                 nix::sys::stat::Mode::empty(),
             )
-        }.context("open pod netns")?;
+        }
+        .context("open pod netns")?;
 
         unsafe {
             nix::sched::setns(&netns_fd, nix::sched::CloneFlags::CLONE_NEWNET)
@@ -251,12 +292,10 @@ impl NetMux {
         }
 
         // Assign IP to peer inside the pod's netns
-        assign_ip(target_ifindex, pod_ip, 32)
-            .context("assign_ip in pod netns")?;
+        assign_ip(target_ifindex, pod_ip, 32).context("assign_ip in pod netns")?;
 
         // Bring up peer inside pod netns
-        netlink::set_link_up(target_ifindex)
-            .context("set_link_up peer in pod netns")?;
+        netlink::set_link_up(target_ifindex).context("set_link_up peer in pod netns")?;
 
         // Add default route inside pod netns (via gateway)
         add_default_route(target_ifindex, &self.gateway)
@@ -270,7 +309,12 @@ impl NetMux {
         if !vnet.spec.internet_access {
             self.nft.add_forward_deny(cidr, "0.0.0.0/0").await?;
         }
-        info!("VNet '{}': internet_access={}, CIDR {}", vnet.metadata.name.as_deref().unwrap_or("?"), vnet.spec.internet_access, cidr);
+        info!(
+            "VNet '{}': internet_access={}, CIDR {}",
+            vnet.metadata.name.as_deref().unwrap_or("?"),
+            vnet.spec.internet_access,
+            cidr
+        );
         Ok(())
     }
 
@@ -280,8 +324,20 @@ impl NetMux {
         sorted.sort_by_key(|r| r.priority);
         for rule in &sorted {
             match rule.action.as_str() {
-                "deny" => for src in &rule.srcCIDRs { for dst in &rule.dstCIDRs { self.nft.add_forward_deny(src, dst).await?; } }
-                "allow" => for src in &rule.srcCIDRs { for dst in &rule.dstCIDRs { self.nft.add_forward_allow(src, dst).await?; } }
+                "deny" => {
+                    for src in &rule.srcCIDRs {
+                        for dst in &rule.dstCIDRs {
+                            self.nft.add_forward_deny(src, dst).await?;
+                        }
+                    }
+                }
+                "allow" => {
+                    for src in &rule.srcCIDRs {
+                        for dst in &rule.dstCIDRs {
+                            self.nft.add_forward_allow(src, dst).await?;
+                        }
+                    }
+                }
                 other => tracing::warn!("NSG rule '{}' unknown action '{}'", rule.name, other),
             }
         }
@@ -296,8 +352,12 @@ impl NetMux {
         clean_orphan_veths(active_uids)
     }
 
-    pub fn enable_ip_forward() -> Result<()> { netlink::enable_ip_forward() }
-    pub fn ensure_loopback_up() -> Result<()> { netlink::ensure_loopback_up() }
+    pub fn enable_ip_forward() -> Result<()> {
+        netlink::enable_ip_forward()
+    }
+    pub fn ensure_loopback_up() -> Result<()> {
+        netlink::ensure_loopback_up()
+    }
 
     /// Rollback partially-created veth resources on failure.
     fn rollback_veth(&self, pod_uid: &str, pod_ip: &Ipv4Addr, host_ifindex: u32) {
@@ -308,8 +368,6 @@ impl NetMux {
         warn!("Rolled back veth for {}", pod_uid);
     }
 }
-
-
 
 /// Veth naming: `veth-<uid8>` where `<uid8>` = last 8 hex chars of pod UID.
 /// Linux interface name limit is 15 chars.
@@ -333,9 +391,12 @@ pub fn create_pod_veth(pod_uid: &str, peer_pid: Option<u32>) -> Result<(String, 
     let start = hex.len().saturating_sub(8);
     let peer_name = format!("zeth-{}", hex[start..].iter().collect::<String>());
 
-    let (host_idx, peer_idx) = netlink::create_veth_pair(&host_name, &peer_name, peer_pid)
-        .context("create_veth_pair")?;
-    info!("Created veth pair: {} (idx {}) <-> {} (idx {})", host_name, host_idx, peer_name, peer_idx);
+    let (host_idx, peer_idx) =
+        netlink::create_veth_pair(&host_name, &peer_name, peer_pid).context("create_veth_pair")?;
+    info!(
+        "Created veth pair: {} (idx {}) <-> {} (idx {})",
+        host_name, host_idx, peer_name, peer_idx
+    );
 
     Ok((host_name, peer_name.to_string(), host_idx, peer_idx))
 }
@@ -353,17 +414,21 @@ pub fn assign_gateway(gateway: &Ipv4Addr, host_veth_ifindex: u32) -> Result<()> 
 
 /// Add a /32 route on the host for the pod IP via the host veth.
 pub fn add_pod_host_route(pod_ip: &Ipv4Addr, host_veth_ifindex: u32) -> Result<()> {
-    netlink::add_route(pod_ip, 32, None, Some(host_veth_ifindex))
-        .context("add_pod_route")?;
-    info!("Host route: {} -> dev veth (ifindex {})", pod_ip, host_veth_ifindex);
+    netlink::add_route(pod_ip, 32, None, Some(host_veth_ifindex)).context("add_pod_route")?;
+    info!(
+        "Host route: {} -> dev veth (ifindex {})",
+        pod_ip, host_veth_ifindex
+    );
     Ok(())
 }
 
 /// Delete a /32 route on the host for the pod IP.
 pub fn del_pod_host_route(pod_ip: &Ipv4Addr, host_veth_ifindex: u32) -> Result<()> {
-    netlink::del_route(pod_ip, 32, None, Some(host_veth_ifindex))
-        .context("del_pod_route")?;
-    info!("Host route removed: {} -> dev veth (ifindex {})", pod_ip, host_veth_ifindex);
+    netlink::del_route(pod_ip, 32, None, Some(host_veth_ifindex)).context("del_pod_route")?;
+    info!(
+        "Host route removed: {} -> dev veth (ifindex {})",
+        pod_ip, host_veth_ifindex
+    );
     Ok(())
 }
 
@@ -378,7 +443,10 @@ pub fn assign_ip(ifindex: u32, ip: &Ipv4Addr, prefix: u8) -> Result<()> {
 pub fn add_default_route(peer_ifindex: u32, gateway: &Ipv4Addr) -> Result<()> {
     netlink::add_route(&Ipv4Addr::UNSPECIFIED, 0, Some(gateway), Some(peer_ifindex))
         .context("add_default_route")?;
-    info!("Default route: 0.0.0.0/0 via {} dev ifindex {}", gateway, peer_ifindex);
+    info!(
+        "Default route: 0.0.0.0/0 via {} dev ifindex {}",
+        gateway, peer_ifindex
+    );
     Ok(())
 }
 
@@ -424,7 +492,7 @@ pub fn move_peer_to_netns(peer_ifindex: u32, pid: u32) -> Result<()> {
     buf[28..32].copy_from_slice(&0u32.to_ne_bytes());
 
     let offset = 32;
-    buf[offset..offset+ns_pid_attr.len()].copy_from_slice(&ns_pid_attr);
+    buf[offset..offset + ns_pid_attr.len()].copy_from_slice(&ns_pid_attr);
 
     netlink::send_nlmsg(&fd, &buf)?;
     let resp = netlink::recv_nlmsg(&fd)?;
@@ -435,7 +503,10 @@ pub fn move_peer_to_netns(peer_ifindex: u32, pid: u32) -> Result<()> {
             if resp.len() >= 20 {
                 let err_code = i32::from_ne_bytes([resp[16], resp[17], resp[18], resp[19]]);
                 if err_code != 0 {
-                    return Err(anyhow::anyhow!("move_peer_to_netns: netlink error {}", err_code));
+                    return Err(anyhow::anyhow!(
+                        "move_peer_to_netns: netlink error {}",
+                        err_code
+                    ));
                 }
             }
         }
@@ -463,14 +534,20 @@ pub fn list_veth_interfaces() -> Result<Vec<(String, u32)>> {
 fn get_ifindex_from_sys(name: &str) -> Result<u32> {
     let path = format!("/sys/class/net/{}/ifindex", name);
     let content = std::fs::read_to_string(&path)?;
-    content.trim().parse::<u32>().map_err(|e| anyhow::anyhow!("parse ifindex: {}", e))
+    content
+        .trim()
+        .parse::<u32>()
+        .map_err(|e| anyhow::anyhow!("parse ifindex: {}", e))
 }
 
 /// Clean up orphaned veth-* interfaces (those with no matching pod).
 /// This is called at startup to remove stale veths from crashes.
 pub fn clean_orphan_veths(active_uids: &[String]) -> Result<()> {
     let veths = list_veth_interfaces()?;
-    let active_names: Vec<String> = active_uids.iter().map(|uid| veth_name_from_uid(uid)).collect();
+    let active_names: Vec<String> = active_uids
+        .iter()
+        .map(|uid| veth_name_from_uid(uid))
+        .collect();
 
     for (name, idx) in &veths {
         if !active_names.contains(name) {

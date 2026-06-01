@@ -8,8 +8,8 @@ pub mod runtime;
 pub mod spec;
 pub mod volumes;
 
-use async_trait::async_trait;
 use anyhow::Result;
+use async_trait::async_trait;
 use std::collections::HashMap;
 
 use crate::cri::spec::ContainerSpec;
@@ -28,4 +28,3 @@ pub trait RuntimeProvider: Send + Sync {
     fn create_pod_cgroup(&self, pod_uid: &str) -> Result<String>;
     fn remove_cgroup(&self, pod_uid: &str) -> Result<()>;
 }
-

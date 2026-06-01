@@ -4,8 +4,8 @@ use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
-use crate::types::{LeaseRecord, NodeRecord, NodeState};
 use crate::store::RedbBackend;
+use crate::types::{LeaseRecord, NodeRecord, NodeState};
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 const LEASE_TTL_MS: i64 = 30_000;
@@ -16,7 +16,9 @@ pub async fn run_heartbeat(db: Arc<RedbBackend>, node_name: String, node_ip: Str
     info!("Heartbeat started for {} ({})", node_name, node_ip);
     loop {
         let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
         let record = NodeRecord {
             node_name: node_name.clone(),
             node_ip: node_ip.clone(),
@@ -38,7 +40,9 @@ pub async fn run_heartbeat(db: Arc<RedbBackend>, node_name: String, node_ip: Str
 pub async fn run_lease_loop(db: Arc<RedbBackend>, node_name: String) -> LeaseRecord {
     loop {
         let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
 
         let mut lease = db.read_lease().await.unwrap_or(LeaseRecord {
             holder: String::new(),
@@ -77,9 +81,15 @@ pub async fn run_lease_loop(db: Arc<RedbBackend>, node_name: String) -> LeaseRec
 }
 
 /// Renew an already-held lease. Returns the updated lease, or None if lost.
-pub async fn renew_lease(db: Arc<RedbBackend>, node_name: &str, current: &LeaseRecord) -> Option<LeaseRecord> {
+pub async fn renew_lease(
+    db: Arc<RedbBackend>,
+    node_name: &str,
+    current: &LeaseRecord,
+) -> Option<LeaseRecord> {
     let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
 
     let mut lease = current.clone();
     if lease.holder != node_name {
@@ -100,11 +110,16 @@ pub async fn renew_lease(db: Arc<RedbBackend>, node_name: &str, current: &LeaseR
 pub async fn run_lease_renewal(db: Arc<RedbBackend>, node_name: String) {
     // First, acquire the lease
     let mut lease = run_lease_loop(db.clone(), node_name.clone()).await;
-    info!("Scheduler lease held by {} (epoch {})", node_name, lease.epoch);
+    info!(
+        "Scheduler lease held by {} (epoch {})",
+        node_name, lease.epoch
+    );
 
     loop {
         let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
         let until_expiry = lease.expires_at_ms - now_ms;
 
         if until_expiry < LEASE_RENEW_BEFORE_MS {

@@ -1,8 +1,8 @@
-use async_trait::async_trait;
-use anyhow::Result;
-use tracing::info;
-use crate::store::{AnyResource, ResourceTracker};
 use crate::components::{Component, ReconcileContext, ResourceCategory};
+use crate::store::{AnyResource, ResourceTracker};
+use anyhow::Result;
+use async_trait::async_trait;
+use tracing::info;
 
 pub struct RouteTableResource;
 
@@ -14,8 +14,12 @@ impl RouteTableResource {
 
 #[async_trait]
 impl Component for RouteTableResource {
-    fn kind(&self) -> &'static str { "RouteTable" }
-    fn category(&self) -> ResourceCategory { ResourceCategory::Network }
+    fn kind(&self) -> &'static str {
+        "RouteTable"
+    }
+    fn category(&self) -> ResourceCategory {
+        ResourceCategory::Network
+    }
 
     async fn reconcile(&self, _ctx: &ReconcileContext, _tracker: &ResourceTracker) -> Result<()> {
         Ok(())
@@ -23,15 +27,21 @@ impl Component for RouteTableResource {
 
     async fn on_apply(&self, _ctx: &ReconcileContext, resource: &AnyResource) -> Result<()> {
         if let AnyResource::RouteTable(rt) = resource {
-            info!("RouteTable '{}' applied with {} rule(s)",
+            info!(
+                "RouteTable '{}' applied with {} rule(s)",
                 rt.metadata.name.as_deref().unwrap_or("?"),
-                rt.spec.rules.len());
+                rt.spec.rules.len()
+            );
         }
         Ok(())
     }
 
     async fn on_delete(&self, _ctx: &ReconcileContext, resource: &AnyResource) -> Result<()> {
-        info!("RouteTable removed: {} {}", resource.namespace(), resource.name());
+        info!(
+            "RouteTable removed: {} {}",
+            resource.namespace(),
+            resource.name()
+        );
         Ok(())
     }
 }

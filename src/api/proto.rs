@@ -98,10 +98,18 @@ fn parse_object_meta(msg: &[u8], field: u32) -> serde_json::Value {
     }
 
     let mut out = serde_json::json!({ "name": name });
-    if !generate_name.is_empty() { out["generateName"] = serde_json::json!(generate_name); }
-    if !namespace.is_empty()     { out["namespace"]     = serde_json::json!(namespace); }
-    if !uid.is_empty()           { out["uid"]           = serde_json::json!(uid); }
-    if !labels.is_empty()        { out["labels"]        = serde_json::Value::Object(labels); }
+    if !generate_name.is_empty() {
+        out["generateName"] = serde_json::json!(generate_name);
+    }
+    if !namespace.is_empty() {
+        out["namespace"] = serde_json::json!(namespace);
+    }
+    if !uid.is_empty() {
+        out["uid"] = serde_json::json!(uid);
+    }
+    if !labels.is_empty() {
+        out["labels"] = serde_json::Value::Object(labels);
+    }
     out
 }
 
@@ -208,10 +216,18 @@ fn parse_container(msg: &[u8]) -> serde_json::Value {
     }
 
     let mut c = serde_json::json!({ "name": name, "image": image });
-    if !command.is_empty() { c["command"] = serde_json::json!(command); }
-    if !args.is_empty()    { c["args"]    = serde_json::json!(args); }
-    if !env.is_empty()     { c["env"]     = serde_json::json!(env); }
-    if !ports.is_empty()   { c["ports"]   = serde_json::json!(ports); }
+    if !command.is_empty() {
+        c["command"] = serde_json::json!(command);
+    }
+    if !args.is_empty() {
+        c["args"] = serde_json::json!(args);
+    }
+    if !env.is_empty() {
+        c["env"] = serde_json::json!(env);
+    }
+    if !ports.is_empty() {
+        c["ports"] = serde_json::json!(ports);
+    }
     c
 }
 
@@ -276,7 +292,9 @@ impl<'a> Parser<'a> {
                 Some((field, Value::Varint(n)))
             }
             1 => {
-                if self.pos + 8 > self.data.len() { return None; }
+                if self.pos + 8 > self.data.len() {
+                    return None;
+                }
                 let bytes = &self.data[self.pos..self.pos + 8];
                 self.pos += 8;
                 let v = u64::from_le_bytes(bytes.try_into().ok()?);
@@ -284,13 +302,17 @@ impl<'a> Parser<'a> {
             }
             2 => {
                 let len = self.read_varint()? as usize;
-                if self.pos + len > self.data.len() { return None; }
+                if self.pos + len > self.data.len() {
+                    return None;
+                }
                 let bytes = &self.data[self.pos..self.pos + len];
                 self.pos += len;
                 Some((field, Value::Bytes(bytes)))
             }
             5 => {
-                if self.pos + 4 > self.data.len() { return None; }
+                if self.pos + 4 > self.data.len() {
+                    return None;
+                }
                 let bytes = &self.data[self.pos..self.pos + 4];
                 self.pos += 4;
                 let v = u32::from_le_bytes(bytes.try_into().ok()?);
@@ -304,13 +326,19 @@ impl<'a> Parser<'a> {
         let mut result: u64 = 0;
         let mut shift = 0u32;
         loop {
-            if self.pos >= self.data.len() { return None; }
+            if self.pos >= self.data.len() {
+                return None;
+            }
             let b = self.data[self.pos];
             self.pos += 1;
             result |= ((b & 0x7f) as u64) << shift;
-            if b & 0x80 == 0 { return Some(result); }
+            if b & 0x80 == 0 {
+                return Some(result);
+            }
             shift += 7;
-            if shift >= 64 { return None; }
+            if shift >= 64 {
+                return None;
+            }
         }
     }
 }

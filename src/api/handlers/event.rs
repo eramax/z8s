@@ -1,12 +1,15 @@
+use crate::api::server::*;
 use axum::Router;
 use axum::routing::get;
-use crate::api::server::*;
 
 pub async fn list_events_all(State(state): State<AppState>) -> Json<List<Event>> {
     let trackers = state.store.get_by_kind("Event").await;
     let items: Vec<Event> = trackers
         .into_iter()
-        .filter_map(|t| match t.resource { AnyResource::Event(e) => Some(e), _ => None })
+        .filter_map(|t| match t.resource {
+            AnyResource::Event(e) => Some(e),
+            _ => None,
+        })
         .collect();
     Json(List {
         kind: Some("EventList".into()),

@@ -1,13 +1,13 @@
 use anyhow::{Context, Result};
-use nix::mount::{umount2, MntFlags};
+use nix::mount::{MntFlags, umount2};
+use oci_distribution::Reference;
 use oci_distribution::client::{Client, ClientConfig, ImageLayer};
 use oci_distribution::config::ConfigFile;
 use oci_distribution::secrets::RegistryAuth;
-use oci_distribution::Reference;
 use std::path::Path;
 use tracing::{debug, info};
 
-use crate::cri::oci::{save_image_config, OCI_CONFIG_FILE};
+use crate::cri::oci::{OCI_CONFIG_FILE, save_image_config};
 
 const ACCEPTED_LAYER_TYPES: &[&str] = &[
     "application/vnd.docker.image.rootfs.diff.tar.gzip",
@@ -24,7 +24,10 @@ fn z8s_base_dir() -> String {
     if nix::unistd::Uid::effective().is_root() {
         "/var/lib/z8s".to_string()
     } else {
-        format!("{}/.local/share/z8s", std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string()))
+        format!(
+            "{}/.local/share/z8s",
+            std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string())
+        )
     }
 }
 
@@ -42,10 +45,8 @@ impl ImageManager {
         let cache_dir = format!("{}/images", base);
         let rootfs_dir = format!("{}/rootfs", base);
 
-        std::fs::create_dir_all(&cache_dir)
-            .context("Failed to create image cache directory")?;
-        std::fs::create_dir_all(&rootfs_dir)
-            .context("Failed to create rootfs directory")?;
+        std::fs::create_dir_all(&cache_dir).context("Failed to create image cache directory")?;
+        std::fs::create_dir_all(&rootfs_dir).context("Failed to create rootfs directory")?;
 
         Ok(Self {
             client,
@@ -129,7 +130,10 @@ impl ImageManager {
         if Path::new(&container_rootfs).exists() && Path::new(&meta_path).exists() {
             if let Ok(cached_ref) = std::fs::read_to_string(&meta_path) {
                 if cached_ref.trim() == image_ref {
-                    info!("Reusing cached rootfs for {} at {}", image_ref, container_rootfs);
+                    info!(
+                        "Reusing cached rootfs for {} at {}",
+                        image_ref, container_rootfs
+                    );
                     return Ok(container_rootfs);
                 }
             }
@@ -141,8 +145,16 @@ impl ImageManager {
         if Path::new(&cache_path).exists() && Path::new(&cache_meta).exists() {
             if let Ok(cached_ref) = std::fs::read_to_string(&cache_meta) {
                 if cached_ref.trim() == image_ref {
-                    info!("Copying cached rootfs for {} to {}", image_ref, container_rootfs);
-                    return Self::copy_cache_to_container(&cache_path, &container_rootfs, &meta_path, image_ref);
+                    info!(
+                        "Copying cached rootfs for {} to {}",
+                        image_ref, container_rootfs
+                    );
+                    return Self::copy_cache_to_container(
+                        &cache_path,
+                        &container_rootfs,
+                        &meta_path,
+                        image_ref,
+                    );
                 }
             }
         }
@@ -150,13 +162,21 @@ impl ImageManager {
         let reference: Reference = image_ref.parse().context("Invalid image reference")?;
         let auth = RegistryAuth::Anonymous;
 
-        info!("Pulling and unpacking image: {} -> {}", image_ref, container_id);
-        let image_data = match self.client.pull(&reference, &auth, ACCEPTED_LAYER_TYPES.to_vec()).await {
+        info!(
+            "Pulling and unpacking image: {} -> {}",
+            image_ref, container_id
+        );
+        let image_data = match self
+            .client
+            .pull(&reference, &auth, ACCEPTED_LAYER_TYPES.to_vec())
+            .await
+        {
             Ok(data) => data,
             Err(e) => {
                 anyhow::bail!(
                     "Failed to pull image '{}': {:#}. Check network connectivity, image name, and registry auth.",
-                    image_ref, e
+                    image_ref,
+                    e
                 );
             }
         };
@@ -166,7 +186,12 @@ impl ImageManager {
             if let Ok(cached_ref) = std::fs::read_to_string(&cache_meta) {
                 if cached_ref.trim() == image_ref {
                     info!("Cache populated by concurrent pull for {}", image_ref);
-                    return Self::copy_cache_to_container(&cache_path, &container_rootfs, &meta_path, image_ref);
+                    return Self::copy_cache_to_container(
+                        &cache_path,
+                        &container_rootfs,
+                        &meta_path,
+                        image_ref,
+                    );
                 }
             }
         }
@@ -182,7 +207,8 @@ impl ImageManager {
         // that base layers are extracted before dependent layers.
         let mut image_data = image_data;
         if let Some(manifest) = &image_data.manifest {
-            let mut by_digest: std::collections::HashMap<String, ImageLayer> = std::collections::HashMap::new();
+            let mut by_digest: std::collections::HashMap<String, ImageLayer> =
+                std::collections::HashMap::new();
             for layer in image_data.layers {
                 by_digest.insert(layer.sha256_digest(), layer);
             }
@@ -210,26 +236,48 @@ impl ImageManager {
         let (image_ep, image_cmd, image_env, image_wd) = config_file
             .config
             .as_ref()
-            .map(|c| (c.entrypoint.clone(), c.cmd.clone(), c.env.clone(), c.working_dir.clone()))
+            .map(|c| {
+                (
+                    c.entrypoint.clone(),
+                    c.cmd.clone(),
+                    c.env.clone(),
+                    c.working_dir.clone(),
+                )
+            })
             .unwrap_or((None, None, None, None));
         save_image_config(&cache_path, image_ep, image_cmd, image_env, image_wd);
 
         for (i, layer) in layers.iter().enumerate() {
-            self.unpack_layer(layer, &cache_path, i)
-                .with_context(|| format!("Failed to unpack layer {}/{} ({})", i + 1, layers.len(), layer.media_type))?;
+            self.unpack_layer(layer, &cache_path, i).with_context(|| {
+                format!(
+                    "Failed to unpack layer {}/{} ({})",
+                    i + 1,
+                    layers.len(),
+                    layer.media_type
+                )
+            })?;
         }
-        std::fs::write(&cache_meta, image_ref)
-            .context("Failed to write cache metadata")?;
+        std::fs::write(&cache_meta, image_ref).context("Failed to write cache metadata")?;
 
         Self::copy_cache_to_container(&cache_path, &container_rootfs, &meta_path, image_ref)
             .context("Failed to copy image cache to container rootfs")
     }
 
-    fn mount_overlay_rootfs(cache_path: &str, container_rootfs: &str, meta_path: &str, image_ref: &str) -> Result<String> {
+    fn mount_overlay_rootfs(
+        cache_path: &str,
+        container_rootfs: &str,
+        meta_path: &str,
+        image_ref: &str,
+    ) -> Result<String> {
         Self::copy_cache_to_container(cache_path, container_rootfs, meta_path, image_ref)
-}
+    }
 
-fn copy_cache_to_container(cache_path: &str, container_rootfs: &str, meta_path: &str, image_ref: &str) -> Result<String> {
+    fn copy_cache_to_container(
+        cache_path: &str,
+        container_rootfs: &str,
+        meta_path: &str,
+        image_ref: &str,
+    ) -> Result<String> {
         if Path::new(container_rootfs).exists() {
             // Attempt to remove stale rootfs (may fail if live mounts from crashed containers).
             // If removal fails we overwrite in-place via copy_dir.
@@ -254,12 +302,11 @@ fn copy_cache_to_container(cache_path: &str, container_rootfs: &str, meta_path: 
 
     fn backfill_oci_config(cache_path: &str, container_rootfs: &str) {
         let oci_cfg = Path::new(cache_path).join(OCI_CONFIG_FILE);
-        let needs_guess = !oci_cfg.exists()
-            || {
-                let cfg = crate::cri::oci::read_image_config(cache_path);
-                cfg.entrypoint.as_ref().is_none_or(|ep| ep.is_empty())
-                    && cfg.cmd.as_ref().is_none_or(|c| c.is_empty())
-            };
+        let needs_guess = !oci_cfg.exists() || {
+            let cfg = crate::cri::oci::read_image_config(cache_path);
+            cfg.entrypoint.as_ref().is_none_or(|ep| ep.is_empty())
+                && cfg.cmd.as_ref().is_none_or(|c| c.is_empty())
+        };
         if needs_guess {
             let guessed = crate::cri::oci::guess_image_config(cache_path);
             save_image_config(
@@ -281,14 +328,12 @@ fn copy_cache_to_container(cache_path: &str, container_rootfs: &str, meta_path: 
         let layer_data = &layer.data;
         debug!("Unpacking layer {} ({} bytes)", index, layer_data.len());
 
-        let mut decompressed: Box<dyn Read> = if layer_data.len() > 2
-            && layer_data[0] == 0x1f
-            && layer_data[1] == 0x8b
-        {
-            Box::new(GzDecoder::new(layer_data.as_slice()))
-        } else {
-            Box::new(layer_data.as_slice())
-        };
+        let mut decompressed: Box<dyn Read> =
+            if layer_data.len() > 2 && layer_data[0] == 0x1f && layer_data[1] == 0x8b {
+                Box::new(GzDecoder::new(layer_data.as_slice()))
+            } else {
+                Box::new(layer_data.as_slice())
+            };
 
         let mut archive = Archive::new(&mut decompressed);
         archive.set_overwrite(true);
@@ -301,11 +346,14 @@ fn copy_cache_to_container(cache_path: &str, container_rootfs: &str, meta_path: 
         // Whiteout files encode layer deletions from the overlayfs model:
         //   .wh.<name>        — delete <name> (file or directory) from lower layers
         //   .wh..wh..opq      — opaque: delete all non-whiteout children in this dir
-        for entry_result in archive.entries().context(format!("Failed to read layer {} archive", index))? {
-            let mut entry = entry_result
-                .context(format!("Corrupt entry in layer {}", index))?;
+        for entry_result in archive
+            .entries()
+            .context(format!("Failed to read layer {} archive", index))?
+        {
+            let mut entry = entry_result.context(format!("Corrupt entry in layer {}", index))?;
 
-            let path = entry.path()
+            let path = entry
+                .path()
                 .context("Entry has non-UTF8 path")?
                 .into_owned();
 
@@ -316,7 +364,10 @@ fn copy_cache_to_container(cache_path: &str, container_rootfs: &str, meta_path: 
 
             if filename == ".wh..wh..opq" {
                 // Opaque whiteout: clear the directory (except other .wh. markers)
-                let dir = path.parent().map(|p| target_path.join(p)).unwrap_or_else(|| target_path.to_path_buf());
+                let dir = path
+                    .parent()
+                    .map(|p| target_path.join(p))
+                    .unwrap_or_else(|| target_path.to_path_buf());
                 if let Ok(children) = std::fs::read_dir(&dir) {
                     for child in children.flatten() {
                         if !child.file_name().to_string_lossy().starts_with(".wh.") {
@@ -331,7 +382,10 @@ fn copy_cache_to_container(cache_path: &str, container_rootfs: &str, meta_path: 
                 }
             } else if let Some(real_name) = filename.strip_prefix(".wh.") {
                 // File/dir whiteout: delete the named path from lower layers
-                let dir = path.parent().map(|p| target_path.join(p)).unwrap_or_else(|| target_path.to_path_buf());
+                let dir = path
+                    .parent()
+                    .map(|p| target_path.join(p))
+                    .unwrap_or_else(|| target_path.to_path_buf());
                 let real = dir.join(real_name);
                 if real.is_dir() {
                     std::fs::remove_dir_all(&real).ok();
@@ -340,12 +394,12 @@ fn copy_cache_to_container(cache_path: &str, container_rootfs: &str, meta_path: 
                 }
             } else {
                 // Normal entry: extract relative to target (strips leading '/' for safety)
-                entry.unpack_in(target)
+                entry
+                    .unpack_in(target)
                     .with_context(|| format!("Failed to unpack {:?} in layer {}", path, index))?;
             }
         }
 
         Ok(())
     }
-
 }

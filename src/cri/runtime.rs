@@ -1,28 +1,25 @@
+use crate::cri::RuntimeProvider;
 use crate::cri::cgroup::CgroupManager;
 use crate::cri::health::{HealthChecker, HealthStatus, ProbeAction, ProbeConfig};
 use crate::cri::image::ImageManager;
 use crate::cri::rootfs;
+use crate::cri::spec::ContainerSpec;
 use anyhow::{Context, Result};
-use nix::sys::signal::{kill, Signal};
+use async_trait::async_trait;
+use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 use std::collections::HashMap;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
-use async_trait::async_trait;
-use crate::cri::spec::ContainerSpec;
-use crate::cri::RuntimeProvider;
-
-
-
 
 fn raise_nproc_limit() {
-    use nix::sys::resource::{getrlimit, setrlimit, Resource};
+    use nix::sys::resource::{Resource, getrlimit, setrlimit};
     if let Ok((soft, hard)) = getrlimit(Resource::RLIMIT_NPROC) {
         let target: u64 = 65535;
         if soft < target {
@@ -32,14 +29,15 @@ fn raise_nproc_limit() {
     }
 }
 
-
-
-
 struct StdPipes {
-    stdout_r: std::os::fd::OwnedFd, stdout_w: std::os::fd::OwnedFd,
-    stderr_r: std::os::fd::OwnedFd, stderr_w: std::os::fd::OwnedFd,
-    sync_r: std::os::fd::OwnedFd, sync_w: std::os::fd::OwnedFd,
-    ack_r: std::os::fd::OwnedFd, ack_w: std::os::fd::OwnedFd,
+    stdout_r: std::os::fd::OwnedFd,
+    stdout_w: std::os::fd::OwnedFd,
+    stderr_r: std::os::fd::OwnedFd,
+    stderr_w: std::os::fd::OwnedFd,
+    sync_r: std::os::fd::OwnedFd,
+    sync_w: std::os::fd::OwnedFd,
+    ack_r: std::os::fd::OwnedFd,
+    ack_w: std::os::fd::OwnedFd,
 }
 
 fn create_std_pipes() -> anyhow::Result<StdPipes> {
@@ -47,8 +45,16 @@ fn create_std_pipes() -> anyhow::Result<StdPipes> {
     let p2 = nix::unistd::pipe().context("stderr pipe")?;
     let p3 = nix::unistd::pipe().context("sync pipe")?;
     let p4 = nix::unistd::pipe().context("ack pipe")?;
-    Ok(StdPipes { stdout_r: p1.0, stdout_w: p1.1, stderr_r: p2.0, stderr_w: p2.1,
-                  sync_r: p3.0, sync_w: p3.1, ack_r: p4.0, ack_w: p4.1 })
+    Ok(StdPipes {
+        stdout_r: p1.0,
+        stdout_w: p1.1,
+        stderr_r: p2.0,
+        stderr_w: p2.1,
+        sync_r: p3.0,
+        sync_w: p3.1,
+        ack_r: p4.0,
+        ack_w: p4.1,
+    })
 }
 
 struct ContainerSpawnCtx<'a> {
@@ -108,8 +114,6 @@ pub struct ProcessSupervisor {
     pub netmux: Arc<crate::netmux::NetMux>,
 }
 
-
-
 impl ProcessSupervisor {
     pub fn new(
         image_manager: Arc<ImageManager>,
@@ -119,7 +123,10 @@ impl ProcessSupervisor {
         let base = if rootfs::is_root() {
             "/var/lib/z8s".to_string()
         } else {
-            format!("{}/.local/share/z8s", std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string()))
+            format!(
+                "{}/.local/share/z8s",
+                std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string())
+            )
         };
         std::fs::create_dir_all(format!("{}/containers", base)).ok();
         Self {
@@ -130,7 +137,6 @@ impl ProcessSupervisor {
             netmux,
         }
     }
-
 
     // ── ContainerSpec-based spawn pipeline (§7.5) ──────────────────────────
 
@@ -156,9 +162,7 @@ impl ProcessSupervisor {
                     let mut args = oci_cmd;
                     (ep, args)
                 }
-                (Some(ep), false) => {
-                    (ep, cfg.args.clone())
-                }
+                (Some(ep), false) => (ep, cfg.args.clone()),
                 (None, _) if !oci_cmd.is_empty() => {
                     let prog = oci_cmd[0].clone();
                     let args: Vec<String> = oci_cmd[1..].to_vec();
@@ -167,9 +171,7 @@ impl ProcessSupervisor {
                 (None, false) if !cfg.args.is_empty() => {
                     (cfg.args[0].clone(), cfg.args[1..].to_vec())
                 }
-                (None, _) => {
-                    (cfg.entrypoint.clone(), cfg.args.clone())
-                }
+                (None, _) => (cfg.entrypoint.clone(), cfg.args.clone()),
             }
         } else {
             (cfg.entrypoint.clone(), cfg.args.clone())
@@ -233,13 +235,28 @@ impl ProcessSupervisor {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
 
-        let child = child_cmd.spawn().context("Failed to spawn container process")?;
-        let pid = child.id().ok_or_else(|| anyhow::anyhow!("Child process exited before PID was read"))?;
+        let child = child_cmd
+            .spawn()
+            .context("Failed to spawn container process")?;
+        let pid = child
+            .id()
+            .ok_or_else(|| anyhow::anyhow!("Child process exited before PID was read"))?;
         info!("Container {} started with PID {}", container_id, pid);
 
         self.cgroup_manager.add_pid_to_cgroup(pod_uid, pid)?;
 
-        self.build_running_container(child, container_id, rootfs_path, image, &cfg.container_name, env_vars, isolate_net, &published_ports_data, &cfg.probes).await
+        self.build_running_container(
+            child,
+            container_id,
+            rootfs_path,
+            image,
+            &cfg.container_name,
+            env_vars,
+            isolate_net,
+            &published_ports_data,
+            &cfg.probes,
+        )
+        .await
     }
 
     pub async fn start_pod_from_spec(&self, spec: &crate::cri::spec::ContainerSpec) -> Result<()> {
@@ -254,7 +271,11 @@ impl ProcessSupervisor {
 
         let placeholders = self.insert_placeholders(spec).await;
 
-        info!("Starting pod {} ({} container(s))", pod_name, spec.containers.len());
+        info!(
+            "Starting pod {} ({} container(s))",
+            pod_name,
+            spec.containers.len()
+        );
 
         if let Err(e) = self.cgroup_manager.create_pod_cgroup(pod_uid) {
             Self::remove_placeholders(&self.running, &placeholders).await;
@@ -275,35 +296,44 @@ impl ProcessSupervisor {
 
     async fn check_duplicate_start(&self, pod_name: &str) -> bool {
         let running = self.running.lock().await;
-        running.keys().any(|cid| cid.starts_with(&format!("{}-", pod_name)))
+        running
+            .keys()
+            .any(|cid| cid.starts_with(&format!("{}-", pod_name)))
     }
 
     async fn insert_placeholders(&self, spec: &crate::cri::spec::ContainerSpec) -> Vec<String> {
         let mut running = self.running.lock().await;
-        let ids: Vec<String> = spec.containers.iter().map(|c| c.container_id.clone()).collect();
+        let ids: Vec<String> = spec
+            .containers
+            .iter()
+            .map(|c| c.container_id.clone())
+            .collect();
         for cfg in &spec.containers {
             let cid = &cfg.container_id;
             if !running.contains_key(cid.as_str()) {
-                running.insert(cid.clone(), RunningContainer {
-                    child: None,
-                    instance: ContainerInstance {
-                        container_id: cid.clone(),
-                        container_name: cfg.container_name.clone(),
-                        image: cfg.image.clone(),
-                        pid: None,
-                        rootfs: String::new(),
-                        started_at: None,
-                        env_vars: Vec::new(),
-                        published_ports: std::collections::HashMap::new(),
-                        isolated_net: false,
-                        pod_ip: None,
-                        host_veth_ifindex: None,
+                running.insert(
+                    cid.clone(),
+                    RunningContainer {
+                        child: None,
+                        instance: ContainerInstance {
+                            container_id: cid.clone(),
+                            container_name: cfg.container_name.clone(),
+                            image: cfg.image.clone(),
+                            pid: None,
+                            rootfs: String::new(),
+                            started_at: None,
+                            env_vars: Vec::new(),
+                            published_ports: std::collections::HashMap::new(),
+                            isolated_net: false,
+                            pod_ip: None,
+                            host_veth_ifindex: None,
+                        },
+                        restart_count: 0,
+                        log_buffer: Arc::new(Mutex::new(Vec::new())),
+                        ready: Arc::new(AtomicBool::new(false)),
+                        healthy: Arc::new(Mutex::new(true)),
                     },
-                    restart_count: 0,
-                    log_buffer: Arc::new(Mutex::new(Vec::new())),
-                    ready: Arc::new(AtomicBool::new(false)),
-                    healthy: Arc::new(Mutex::new(true)),
-                });
+                );
             }
         }
         ids
@@ -324,7 +354,9 @@ impl ProcessSupervisor {
             if let Some(quota) = cfg.cpu_quota {
                 if let Some(period) = cfg.cpu_period {
                     if quota > 0 && period > 0 {
-                        self.cgroup_manager.set_cpu_limit(pod_uid, quota, period).ok();
+                        self.cgroup_manager
+                            .set_cpu_limit(pod_uid, quota, period)
+                            .ok();
                     }
                 }
             }
@@ -349,12 +381,18 @@ impl ProcessSupervisor {
         let mut prepared: Vec<(String, RunningContainer)> = Vec::new();
         for cfg in &spec.containers {
             let rootfs_path = self.prepare_rootfs(spec, cfg).await?;
-            let rc = match self.spawn_container_from_config(cfg, &rootfs_path, &spec.pod_uid, spec.subnet.clone()).await {
+            let rc = match self
+                .spawn_container_from_config(cfg, &rootfs_path, &spec.pod_uid, spec.subnet.clone())
+                .await
+            {
                 Ok(rc) => rc,
                 Err(e) => {
                     Self::remove_placeholders(&self.running, placeholders).await;
                     Self::cleanup_orphan_containers(&prepared).await;
-                    return Err(e.context(format!("Failed to spawn container {}/{}", spec.pod_name, cfg.container_name)));
+                    return Err(e.context(format!(
+                        "Failed to spawn container {}/{}",
+                        spec.pod_name, cfg.container_name
+                    )));
                 }
             };
             prepared.push((cfg.container_id.clone(), rc));
@@ -368,11 +406,19 @@ impl ProcessSupervisor {
         cfg: &crate::cri::spec::ContainerConfig,
     ) -> Result<String> {
         if cfg.is_native {
-            info!("Native process {}/{} (no OCI image)", spec.pod_name, cfg.container_name);
+            info!(
+                "Native process {}/{} (no OCI image)",
+                spec.pod_name, cfg.container_name
+            );
             return Ok(String::new());
         }
-        self.image_manager.unpack_image(&cfg.image, &cfg.container_id).await
-            .context(format!("Failed to prepare image {} for {}", cfg.image, cfg.container_name))
+        self.image_manager
+            .unpack_image(&cfg.image, &cfg.container_id)
+            .await
+            .context(format!(
+                "Failed to prepare image {} for {}",
+                cfg.image, cfg.container_name
+            ))
     }
 
     async fn cleanup_orphan_containers(prepared: &[(String, RunningContainer)]) {
@@ -408,7 +454,11 @@ impl ProcessSupervisor {
                 loop {
                     let status = match &config.action {
                         ProbeAction::Exec(exec) => {
-                            HealthChecker::check_exec(exec.command.as_deref().unwrap_or(&[]), config.timeout()).await
+                            HealthChecker::check_exec(
+                                exec.command.as_deref().unwrap_or(&[]),
+                                config.timeout(),
+                            )
+                            .await
                         }
                         ProbeAction::HTTPGet(http) => {
                             let mut h = http.clone();
@@ -428,7 +478,9 @@ impl ProcessSupervisor {
                     let ok = matches!(status, HealthStatus::Healthy);
                     p_ready.store(ok, Ordering::SeqCst);
                     *p_healthy.lock().await = ok;
-                    if !ok { warn!("Probe for {} failed", cid); }
+                    if !ok {
+                        warn!("Probe for {} failed", cid);
+                    }
                     tokio::time::sleep(Duration::from_secs(config.period_seconds as u64)).await;
                 }
             }
@@ -437,7 +489,9 @@ impl ProcessSupervisor {
     }
 
     fn merge_env(env_vars: &[(String, String)], rootfs: &str) -> Vec<(String, String)> {
-        let oci_env = crate::cri::oci::read_image_config(rootfs).env.unwrap_or_default();
+        let oci_env = crate::cri::oci::read_image_config(rootfs)
+            .env
+            .unwrap_or_default();
         let mut env_owned: Vec<(String, String)> = Vec::new();
         let mut seen = std::collections::HashSet::new();
         for (k, v) in env_vars {
@@ -448,7 +502,7 @@ impl ProcessSupervisor {
         for entry in &oci_env {
             if let Some(eq) = entry.find('=') {
                 let key = entry[..eq].to_string();
-                let val = entry[eq+1..].to_string();
+                let val = entry[eq + 1..].to_string();
                 if seen.insert(key.clone()) {
                     env_owned.push((key, val));
                 }
@@ -500,7 +554,9 @@ impl ProcessSupervisor {
                 while let Ok(Some(line)) = lines.next_line().await {
                     let mut log = buf.lock().await;
                     log.push(format!("[stdout] {}", line));
-                    if log.len() > 1000 { log.remove(0); }
+                    if log.len() > 1000 {
+                        log.remove(0);
+                    }
                 }
             });
         }
@@ -512,7 +568,9 @@ impl ProcessSupervisor {
                 while let Ok(Some(line)) = lines.next_line().await {
                     let mut log = buf.lock().await;
                     log.push(format!("[stderr] {}", line));
-                    if log.len() > 1000 { log.remove(0); }
+                    if log.len() > 1000 {
+                        log.remove(0);
+                    }
                 }
             });
         }
@@ -601,7 +659,8 @@ impl ProcessSupervisor {
         log_buffer: Arc<Mutex<Vec<String>>>,
         probes: &[ProbeConfig],
     ) -> RunningContainer {
-        let (ready, healthy) = Self::spawn_probes(probes, &instance.container_id, &instance.published_ports);
+        let (ready, healthy) =
+            Self::spawn_probes(probes, &instance.container_id, &instance.published_ports);
         RunningContainer {
             child: None,
             instance,
@@ -616,11 +675,38 @@ impl ProcessSupervisor {
         &self,
         ctx: ContainerSpawnCtx<'_>,
     ) -> Result<RunningContainer> {
-        let ContainerSpawnCtx { entrypoint, cmd_args, env_vars, rootfs_path, container_id, pod_uid, image, container_name, volumes, run_as_user, run_as_group, isolate_net, privileged, extra_caps, working_dir, probes, subnet } = ctx;
+        let ContainerSpawnCtx {
+            entrypoint,
+            cmd_args,
+            env_vars,
+            rootfs_path,
+            container_id,
+            pod_uid,
+            image,
+            container_name,
+            volumes,
+            run_as_user,
+            run_as_group,
+            isolate_net,
+            privileged,
+            extra_caps,
+            working_dir,
+            probes,
+            subnet,
+        } = ctx;
         let pipes = create_std_pipes()?;
-        let StdPipes { stdout_r, stdout_w, stderr_r, stderr_w, sync_r, sync_w, ack_r, ack_w } = pipes;
-        let (gc_pid_r, gc_pid_w) = nix::unistd::pipe()
-            .context("Failed to create grandchild PID pipe")?;
+        let StdPipes {
+            stdout_r,
+            stdout_w,
+            stderr_r,
+            stderr_w,
+            sync_r,
+            sync_w,
+            ack_r,
+            ack_w,
+        } = pipes;
+        let (gc_pid_r, gc_pid_w) =
+            nix::unistd::pipe().context("Failed to create grandchild PID pipe")?;
         let rootfs_owned = rootfs_path.to_string();
         let entrypoint_owned = entrypoint.to_string();
         let args_owned = cmd_args.to_vec();
@@ -629,7 +715,9 @@ impl ProcessSupervisor {
         // Fork #1: create intermediate child that will unshare namespaces (including PID)
         // and then fork #2 to place the grandchild (actual container) in the new PID ns.
         match unsafe { nix::unistd::fork() } {
-            Ok(nix::unistd::ForkResult::Parent { child: _intermediate }) => {
+            Ok(nix::unistd::ForkResult::Parent {
+                child: _intermediate,
+            }) => {
                 // Parent: close write ends and unused fds
                 drop(stdout_w);
                 drop(stderr_w);
@@ -647,12 +735,22 @@ impl ProcessSupervisor {
                 let pid = u32::from_ne_bytes(buf);
                 drop(gc_pid_r);
 
-                info!("Container {} started with PID {} (root ns, pid ns)", container_id, pid);
+                info!(
+                    "Container {} started with PID {} (root ns, pid ns)",
+                    container_id, pid
+                );
                 self.cgroup_manager.add_pid_to_cgroup(pod_uid, pid)?;
 
                 // handle_veth_netns reads the sync byte from grandchild via sync_r
                 // and configures veth using grandchild's PID (for setns)
-                let (pod_ip, host_veth_ifindex) = self.handle_veth_netns(pod_uid, pid, isolate_net, &sync_r, &ack_w, subnet.as_deref());
+                let (pod_ip, host_veth_ifindex) = self.handle_veth_netns(
+                    pod_uid,
+                    pid,
+                    isolate_net,
+                    &sync_r,
+                    &ack_w,
+                    subnet.as_deref(),
+                );
 
                 drop(sync_r);
                 drop(ack_w);
@@ -660,23 +758,37 @@ impl ProcessSupervisor {
                 let log_buffer = Self::spawn_log_tasks(stdout_r, stderr_r);
 
                 let instance = Self::build_container_instance(
-                    container_id, container_name, image, pid, rootfs_path, env_owned, isolate_net, pod_ip, host_veth_ifindex,
+                    container_id,
+                    container_name,
+                    image,
+                    pid,
+                    rootfs_path,
+                    env_owned,
+                    isolate_net,
+                    pod_ip,
+                    host_veth_ifindex,
                 );
 
-                Ok(Self::build_running_from_instance(instance, log_buffer, &probes))
+                Ok(Self::build_running_from_instance(
+                    instance, log_buffer, &probes,
+                ))
             }
             Ok(nix::unistd::ForkResult::Child) => {
                 // ── Intermediate child ──────────────────────────────────────────
                 drop(gc_pid_r);
 
                 let _ = nix::unistd::setsid();
-                let pod_hostname = container_id.rsplit_once('-').map_or(container_id, |(pod, _)| pod);
+                let pod_hostname = container_id
+                    .rsplit_once('-')
+                    .map_or(container_id, |(pod, _)| pod);
 
                 // Phase 1: unshare namespaces including CLONE_NEWPID.
                 // This puts future children in a new PID namespace.
                 if let Err(e) = rootfs::unshare_container_ns(isolate_net, pod_hostname, true) {
                     error!("z8s: namespace setup failed: {}", e);
-                    unsafe { nix::libc::_exit(1); }
+                    unsafe {
+                        nix::libc::_exit(1);
+                    }
                 }
 
                 // Fork #2 BEFORE closing fds — grandchild inherits all open fds.
@@ -700,7 +812,9 @@ impl ProcessSupervisor {
                         let _ = nix::unistd::write(&gc_pid_w, &gc_pid.to_ne_bytes());
                         drop(gc_pid_w);
 
-                        unsafe { nix::libc::_exit(0); }
+                        unsafe {
+                            nix::libc::_exit(0);
+                        }
                     }
                     Ok(nix::unistd::ForkResult::Child) => {
                         // ── Grandchild (PID 1 in new PID ns) ───────────────────
@@ -712,13 +826,16 @@ impl ProcessSupervisor {
                         Self::setup_child_pipes(stdout_r, stderr_r, stdout_w, stderr_w);
 
                         // Phase 2: set up rootfs isolation (pivot_root/chroot + mount)
-                        let isolation = match rootfs::setup_container_rootfs(&rootfs_owned, &volumes) {
-                            Ok(i) => i,
-                            Err(e) => {
-                                error!("z8s: rootfs setup failed: {}", e);
-                                unsafe { nix::libc::_exit(1); }
-                            }
-                        };
+                        let isolation =
+                            match rootfs::setup_container_rootfs(&rootfs_owned, &volumes) {
+                                Ok(i) => i,
+                                Err(e) => {
+                                    error!("z8s: rootfs setup failed: {}", e);
+                                    unsafe {
+                                        nix::libc::_exit(1);
+                                    }
+                                }
+                            };
 
                         // Sync with parent for veth setup (if isolate_net)
                         if isolate_net {
@@ -729,7 +846,14 @@ impl ProcessSupervisor {
                         drop(sync_w);
                         drop(ack_r);
 
-                        Self::child_setup_privileges(run_as_group, run_as_user, &working_dir, privileged, &extra_caps, isolation);
+                        Self::child_setup_privileges(
+                            run_as_group,
+                            run_as_user,
+                            &working_dir,
+                            privileged,
+                            &extra_caps,
+                            isolation,
+                        );
 
                         let (exec_path, prog_args) = Self::argv_for_isolation(
                             &entrypoint_owned,
@@ -737,11 +861,19 @@ impl ProcessSupervisor {
                             &rootfs_owned,
                             isolation,
                         );
-                        Self::execvpe_container(&exec_path, &prog_args, &env_owned, &rootfs_owned, isolation);
+                        Self::execvpe_container(
+                            &exec_path,
+                            &prog_args,
+                            &env_owned,
+                            &rootfs_owned,
+                            isolation,
+                        );
                     }
                     Err(e) => {
                         error!("z8s: second fork failed: {}", e);
-                        unsafe { nix::libc::_exit(1); }
+                        unsafe {
+                            nix::libc::_exit(1);
+                        }
                     }
                 }
             }
@@ -783,41 +915,76 @@ impl ProcessSupervisor {
     ) -> ! {
         let envp: Vec<std::ffi::CString> = env_owned
             .iter()
-            .map(|(k, v)| std::ffi::CString::new(format!("{}={}", k, v))
-                .expect("env keys/values cannot contain null bytes"))
+            .map(|(k, v)| {
+                std::ffi::CString::new(format!("{}={}", k, v))
+                    .expect("env keys/values cannot contain null bytes")
+            })
             .collect();
 
         let mut argv: Vec<std::ffi::CString> =
-            vec![std::ffi::CString::new(exec_path)
-                .expect("exec path cannot contain null bytes")];
+            vec![std::ffi::CString::new(exec_path).expect("exec path cannot contain null bytes")];
         for a in prog_args {
-            argv.push(std::ffi::CString::new(a.as_str())
-                .expect("arg strings cannot contain null bytes"));
+            argv.push(
+                std::ffi::CString::new(a.as_str()).expect("arg strings cannot contain null bytes"),
+            );
         }
 
         if isolation == rootfs::RootfsIsolation::Degraded {
             let (loader, args) =
                 rootfs::wrap_dynamic_linker(exec_path, prog_args.to_vec(), rootfs_host_path);
-            argv = vec![std::ffi::CString::new(loader)
-                .expect("loader path cannot contain null bytes")];
+            argv = vec![
+                std::ffi::CString::new(loader).expect("loader path cannot contain null bytes"),
+            ];
             for a in args {
-                argv.push(std::ffi::CString::new(a)
-                    .expect("arg strings cannot contain null bytes"));
+                argv.push(
+                    std::ffi::CString::new(a).expect("arg strings cannot contain null bytes"),
+                );
             }
         }
 
-        let e = nix::unistd::execvpe(&argv[0], &argv, &envp).expect_err("execvpe returned unexpectedly");
-        error!("z8s: execvpe({}) failed: {}", argv[0].to_str().unwrap_or("?"), e);
-        unsafe { nix::libc::_exit(1); }
+        let e = nix::unistd::execvpe(&argv[0], &argv, &envp)
+            .expect_err("execvpe returned unexpectedly");
+        error!(
+            "z8s: execvpe({}) failed: {}",
+            argv[0].to_str().unwrap_or("?"),
+            e
+        );
+        unsafe {
+            nix::libc::_exit(1);
+        }
     }
 
-    async fn spawn_userns_container(
-        &self,
-        ctx: ContainerSpawnCtx<'_>,
-    ) -> Result<RunningContainer> {
-        let ContainerSpawnCtx { entrypoint, cmd_args, env_vars, rootfs_path, container_id, pod_uid, image, container_name, volumes, run_as_user, run_as_group, isolate_net, privileged, extra_caps, working_dir, probes, subnet } = ctx;
+    async fn spawn_userns_container(&self, ctx: ContainerSpawnCtx<'_>) -> Result<RunningContainer> {
+        let ContainerSpawnCtx {
+            entrypoint,
+            cmd_args,
+            env_vars,
+            rootfs_path,
+            container_id,
+            pod_uid,
+            image,
+            container_name,
+            volumes,
+            run_as_user,
+            run_as_group,
+            isolate_net,
+            privileged,
+            extra_caps,
+            working_dir,
+            probes,
+            subnet,
+        } = ctx;
         let pipes = create_std_pipes()?;
-        let StdPipes { stdout_r, stdout_w, stderr_r, stderr_w, sync_r, sync_w, ack_r, ack_w } = pipes;
+        let StdPipes {
+            stdout_r,
+            stdout_w,
+            stderr_r,
+            stderr_w,
+            sync_r,
+            sync_w,
+            ack_r,
+            ack_w,
+        } = pipes;
 
         let rootfs_owned = rootfs_path.to_string();
         let entrypoint_owned = entrypoint.to_string();
@@ -848,10 +1015,15 @@ impl ProcessSupervisor {
 
                 if isolate_net {
                     let pid = child_pid as u32;
-                    match self.netmux.attach_pod(pod_uid, Some(pid), subnet.as_deref()) {
+                    match self
+                        .netmux
+                        .attach_pod(pod_uid, Some(pid), subnet.as_deref())
+                    {
                         Ok((ip, host_idx, peer_idx)) => {
-                            if let Err(e) = self.netmux.configure_pod_netns(pod_uid, &ip, pid, peer_idx) {
-                        warn!("NetMux configure_pod_netns failed: {:#}", e);
+                            if let Err(e) =
+                                self.netmux.configure_pod_netns(pod_uid, &ip, pid, peer_idx)
+                            {
+                                warn!("NetMux configure_pod_netns failed: {:#}", e);
                             }
                             pod_ip = Some(ip);
                             host_veth_ifindex = Some(host_idx);
@@ -874,10 +1046,20 @@ impl ProcessSupervisor {
                 let log_buffer = Self::spawn_log_tasks(stdout_r, stderr_r);
 
                 let instance = Self::build_container_instance(
-                    container_id, container_name, image, pid, rootfs_path, env_owned, isolate_net, pod_ip, host_veth_ifindex,
+                    container_id,
+                    container_name,
+                    image,
+                    pid,
+                    rootfs_path,
+                    env_owned,
+                    isolate_net,
+                    pod_ip,
+                    host_veth_ifindex,
                 );
 
-                Ok(Self::build_running_from_instance(instance, log_buffer, &probes))
+                Ok(Self::build_running_from_instance(
+                    instance, log_buffer, &probes,
+                ))
             }
             Ok(nix::unistd::ForkResult::Child) => {
                 drop(stdout_r);
@@ -887,7 +1069,9 @@ impl ProcessSupervisor {
 
                 let _ = nix::unistd::setsid();
 
-                let pod_hostname = container_id.rsplit_once('-').map_or(container_id, |(pod, _)| pod);
+                let pod_hostname = container_id
+                    .rsplit_once('-')
+                    .map_or(container_id, |(pod, _)| pod);
                 let isolation = match rootfs::child_enter_ns_fork(
                     &rootfs_owned,
                     sync_w,
@@ -899,7 +1083,9 @@ impl ProcessSupervisor {
                     Ok(i) => i,
                     Err(e) => {
                         error!("z8s: namespace setup failed: {:#}", e);
-                        unsafe { nix::libc::_exit(1); }
+                        unsafe {
+                            nix::libc::_exit(1);
+                        }
                     }
                 };
 
@@ -920,7 +1106,14 @@ impl ProcessSupervisor {
                     let _ = nix::unistd::dup2_stdin(fd);
                 }
 
-                Self::child_setup_privileges(run_as_group, run_as_user, &working_dir, privileged, &extra_caps, isolation);
+                Self::child_setup_privileges(
+                    run_as_group,
+                    run_as_user,
+                    &working_dir,
+                    privileged,
+                    &extra_caps,
+                    isolation,
+                );
 
                 let (exec_path, prog_args) = Self::argv_for_isolation(
                     &entrypoint_owned,
@@ -928,7 +1121,13 @@ impl ProcessSupervisor {
                     &rootfs_owned,
                     isolation,
                 );
-                Self::execvpe_container(&exec_path, &prog_args, &env_owned, &rootfs_owned, isolation);
+                Self::execvpe_container(
+                    &exec_path,
+                    &prog_args,
+                    &env_owned,
+                    &rootfs_owned,
+                    isolation,
+                );
             }
             Err(e) => {
                 drop(stdout_r);
@@ -956,7 +1155,9 @@ impl ProcessSupervisor {
         published_ports: &[u16],
         probes: &[ProbeConfig],
     ) -> Result<RunningContainer> {
-        let pid = child.id().ok_or_else(|| anyhow::anyhow!("Child process exited before PID was read"))?;
+        let pid = child
+            .id()
+            .ok_or_else(|| anyhow::anyhow!("Child process exited before PID was read"))?;
 
         let log_buffer = Arc::new(Mutex::new(Vec::<String>::new()));
 
@@ -988,10 +1189,20 @@ impl ProcessSupervisor {
         }
 
         let instance = Self::build_container_instance(
-            container_id, container_name, image, pid, rootfs_path, env_vars.to_vec(), isolate_net, None, None,
+            container_id,
+            container_name,
+            image,
+            pid,
+            rootfs_path,
+            env_vars.to_vec(),
+            isolate_net,
+            None,
+            None,
         );
 
-        Ok(Self::build_running_from_instance(instance, log_buffer, probes))
+        Ok(Self::build_running_from_instance(
+            instance, log_buffer, probes,
+        ))
     }
 
     /// Port the service proxy should dial on 127.0.0.1 for this pod.
@@ -1013,7 +1224,6 @@ impl ProcessSupervisor {
         }
         container_port
     }
-
 
     pub async fn stop_container(&self, container_id: &str) {
         let mut running = self.running.lock().await;
@@ -1037,7 +1247,9 @@ impl ProcessSupervisor {
             {
                 let running = self.running.lock().await;
                 if let Some(rc) = running.get(&cfg.container_id) {
-                    if let (Some(ip), Some(ifindex)) = (rc.instance.pod_ip, rc.instance.host_veth_ifindex) {
+                    if let (Some(ip), Some(ifindex)) =
+                        (rc.instance.pod_ip, rc.instance.host_veth_ifindex)
+                    {
                         if let Err(e) = self.netmux.detach_pod(&spec.pod_uid, &ip, ifindex) {
                             warn!("NetMux detach failed for {}: {}", spec.pod_uid, e);
                         }
@@ -1060,23 +1272,19 @@ impl ProcessSupervisor {
                 cg.remove_cgroup(&uid).ok();
                 crate::cri::volumes::cleanup_emptydir(&uid);
             }),
-        ).await;
+        )
+        .await;
     }
 
     pub fn is_pid_alive(pid: u32) -> bool {
-        nix::sys::signal::kill(
-            nix::unistd::Pid::from_raw(pid as i32),
-            None,
-        )
-        .is_ok()
+        nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None).is_ok()
     }
 
     pub async fn is_pod_alive(&self, pod_name: &str) -> bool {
         let prefix = format!("{}-", pod_name);
         let running = self.running.lock().await;
         running.iter().any(|(cid, rc)| {
-            cid.starts_with(&prefix)
-                && rc.instance.pid.map(Self::is_pid_alive).unwrap_or(false)
+            cid.starts_with(&prefix) && rc.instance.pid.map(Self::is_pid_alive).unwrap_or(false)
         })
     }
 
@@ -1104,9 +1312,15 @@ impl ProcessSupervisor {
     }
 
     /// Returns restart count per container name for a given pod (strips the pod-name prefix).
-    pub async fn pod_restart_counts(&self, pod_name: &str) -> std::collections::HashMap<String, u32> {
+    pub async fn pod_restart_counts(
+        &self,
+        pod_name: &str,
+    ) -> std::collections::HashMap<String, u32> {
         let prefix = format!("{}-", pod_name);
-        self.restart_counts.lock().await.iter()
+        self.restart_counts
+            .lock()
+            .await
+            .iter()
             .filter(|(k, _)| k.starts_with(&prefix))
             .map(|(k, &v)| {
                 let cname = k.strip_prefix(&prefix).unwrap_or(k.as_str()).to_string();
@@ -1124,11 +1338,11 @@ pub struct ContainerRuntime {
 }
 
 impl ContainerRuntime {
-    pub fn new(
-        supervisor: Arc<ProcessSupervisor>,
-        cgroup_manager: Arc<CgroupManager>,
-    ) -> Self {
-        Self { supervisor, cgroup_manager }
+    pub fn new(supervisor: Arc<ProcessSupervisor>, cgroup_manager: Arc<CgroupManager>) -> Self {
+        Self {
+            supervisor,
+            cgroup_manager,
+        }
     }
 
     pub fn create_pod_cgroup(&self, pod_uid: &str) -> Result<String> {
@@ -1143,7 +1357,10 @@ impl ContainerRuntime {
 #[async_trait]
 impl RuntimeProvider for ContainerRuntime {
     async fn start_pod(&self, spec: &ContainerSpec) -> Result<()> {
-        info!("CRI: starting pod {} (namespace={})", spec.pod_name, spec.namespace);
+        info!(
+            "CRI: starting pod {} (namespace={})",
+            spec.pod_name, spec.namespace
+        );
         self.supervisor.start_pod_from_spec(spec).await
     }
 
@@ -1171,7 +1388,9 @@ impl RuntimeProvider for ContainerRuntime {
     }
 
     async fn get_container_logs(&self, pod_name: &str, container_name: &str) -> Vec<String> {
-        self.supervisor.get_container_logs(pod_name, container_name).await
+        self.supervisor
+            .get_container_logs(pod_name, container_name)
+            .await
     }
 
     async fn pod_restart_counts(&self, pod_name: &str) -> HashMap<String, u32> {
@@ -1179,7 +1398,10 @@ impl RuntimeProvider for ContainerRuntime {
     }
 
     async fn unpack_image(&self, image_ref: &str, container_id: &str) -> Result<String> {
-        self.supervisor.image_manager.unpack_image(image_ref, container_id).await
+        self.supervisor
+            .image_manager
+            .unpack_image(image_ref, container_id)
+            .await
     }
 
     fn create_pod_cgroup(&self, pod_uid: &str) -> Result<String> {

@@ -1,10 +1,10 @@
-use std::sync::Arc;
-use async_trait::async_trait;
-use anyhow::Result;
-use tracing::info;
-use crate::store::{AnyResource, ResourceTracker};
 use crate::components::{Component, ReconcileContext, ResourceCategory};
 use crate::netmux::NetMux;
+use crate::store::{AnyResource, ResourceTracker};
+use anyhow::Result;
+use async_trait::async_trait;
+use std::sync::Arc;
+use tracing::info;
 
 pub struct NetworkPolicyResource {
     pub netmux: Arc<NetMux>,
@@ -32,17 +32,24 @@ impl Component for NetworkPolicyResource {
 
     async fn on_apply(&self, _ctx: &ReconcileContext, resource: &AnyResource) -> Result<()> {
         if let AnyResource::NetworkPolicy(np) = resource {
-            let npc = crate::netmux::np_controller::NetworkPolicyController::new(self.netmux.clone());
+            let npc =
+                crate::netmux::np_controller::NetworkPolicyController::new(self.netmux.clone());
             npc.apply_network_policy(np).await?;
-            info!("NetworkPolicy '{}/{}' applied",
+            info!(
+                "NetworkPolicy '{}/{}' applied",
                 np.metadata.namespace.as_deref().unwrap_or("default"),
-                np.metadata.name.as_deref().unwrap_or("?"));
+                np.metadata.name.as_deref().unwrap_or("?")
+            );
         }
         Ok(())
     }
 
     async fn on_delete(&self, _ctx: &ReconcileContext, resource: &AnyResource) -> Result<()> {
-        info!("NetworkPolicy removed: {} {}", resource.namespace(), resource.name());
+        info!(
+            "NetworkPolicy removed: {} {}",
+            resource.namespace(),
+            resource.name()
+        );
         Ok(())
     }
 }

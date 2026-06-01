@@ -1,15 +1,15 @@
-use async_trait::async_trait;
 use anyhow::Result;
+use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::store::{AnyResource, ResourceTracker};
-use crate::store::StoreBackend;
 use crate::cri::RuntimeProvider;
-use crate::netmux::network::NetworkEngine;
 use crate::netmux::NetMux;
+use crate::netmux::network::NetworkEngine;
 use crate::scheduler::process::ProcessTracker;
 use crate::storage::StorageProvisioner;
+use crate::store::StoreBackend;
+use crate::store::{AnyResource, ResourceTracker};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResourceCategory {
@@ -56,7 +56,12 @@ impl ComponentRegistry {
 
     /// Register a handler-only component for a resource kind.
     /// Skips `reconcile` (no-op) and `on_delete` (no-op).
-    pub fn register_handler(&mut self, kind: &'static str, cat: ResourceCategory, on_apply: fn(&AnyResource)) {
+    pub fn register_handler(
+        &mut self,
+        kind: &'static str,
+        cat: ResourceCategory,
+        on_apply: fn(&AnyResource),
+    ) {
         struct Handler {
             kind: &'static str,
             cat: ResourceCategory,
@@ -64,13 +69,31 @@ impl ComponentRegistry {
         }
         #[async_trait]
         impl Component for Handler {
-            fn kind(&self) -> &'static str { self.kind }
-            fn category(&self) -> ResourceCategory { self.cat }
-            async fn reconcile(&self, _ctx: &ReconcileContext, _t: &ResourceTracker) -> Result<()> { Ok(()) }
-            async fn on_apply(&self, _ctx: &ReconcileContext, r: &AnyResource) -> Result<()> { (self.f)(r); Ok(()) }
-            async fn on_delete(&self, _ctx: &ReconcileContext, _r: &AnyResource) -> Result<()> { Ok(()) }
+            fn kind(&self) -> &'static str {
+                self.kind
+            }
+            fn category(&self) -> ResourceCategory {
+                self.cat
+            }
+            async fn reconcile(&self, _ctx: &ReconcileContext, _t: &ResourceTracker) -> Result<()> {
+                Ok(())
+            }
+            async fn on_apply(&self, _ctx: &ReconcileContext, r: &AnyResource) -> Result<()> {
+                (self.f)(r);
+                Ok(())
+            }
+            async fn on_delete(&self, _ctx: &ReconcileContext, _r: &AnyResource) -> Result<()> {
+                Ok(())
+            }
         }
-        self.components.insert(kind, Box::new(Handler { kind, cat, f: on_apply }));
+        self.components.insert(
+            kind,
+            Box::new(Handler {
+                kind,
+                cat,
+                f: on_apply,
+            }),
+        );
     }
 
     pub fn get(&self, kind: &str) -> Option<&dyn Component> {
@@ -89,9 +112,9 @@ impl ComponentRegistry {
         let trackers = ctx.store.get_all().await;
         for tracker in &trackers {
             if let Some(component) = self.get(tracker.resource.kind()) {
-        if let Err(e) = component.reconcile(ctx, tracker).await {
-            tracing::error!("Reconcile failed for {}: {}", tracker.resource.uid(), e);
-        }
+                if let Err(e) = component.reconcile(ctx, tracker).await {
+                    tracing::error!("Reconcile failed for {}: {}", tracker.resource.uid(), e);
+                }
             }
         }
     }
@@ -131,7 +154,9 @@ impl ComponentRegistry {
             cri: ctx.cri.clone(),
             net: ctx.net.clone(),
         };
-        ctx.pipeline.dispatch_deleted(kind, &resource.uid(), &stage_ctx).await;
+        ctx.pipeline
+            .dispatch_deleted(kind, &resource.uid(), &stage_ctx)
+            .await;
     }
 }
 

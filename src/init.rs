@@ -37,15 +37,10 @@ impl InitHandler {
                 match self.signalfd.read_signal() {
                     Ok(Some(siginfo)) => {
                         let signo = siginfo.ssi_signo as i32;
-                        if signo == Signal::SIGTERM as i32
-                            || signo == Signal::SIGINT as i32
-                        {
+                        if signo == Signal::SIGTERM as i32 || signo == Signal::SIGINT as i32 {
                             info!("Received shutdown signal, initiating graceful shutdown");
                             let _ = shutdown.send(true);
-                            let _ = nix::sys::signal::kill(
-                                Pid::from_raw(-1),
-                                Signal::SIGTERM,
-                            );
+                            let _ = nix::sys::signal::kill(Pid::from_raw(-1), Signal::SIGTERM);
                             return Ok(());
                         } else if signo == Signal::SIGHUP as i32 {
                             info!("Received SIGHUP, triggering reload");

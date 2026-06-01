@@ -1,10 +1,10 @@
-use async_trait::async_trait;
 use anyhow::Result;
+use async_trait::async_trait;
 use std::sync::Arc;
 
-use crate::store::{AnyResource, ResourceTracker};
-use crate::store::StoreBackend;
 use crate::components::{Component, ReconcileContext, ResourceCategory};
+use crate::store::StoreBackend;
+use crate::store::{AnyResource, ResourceTracker};
 
 pub struct ConfigMapResource {
     pub store: Arc<dyn StoreBackend>,

@@ -1,24 +1,35 @@
-use axum::Router;
-use axum::routing::get;
 use crate::api::server::*;
 use crate::types::PersistentVolumeClaim;
+use axum::Router;
+use axum::routing::get;
 
 pub async fn list_pvcs_all(State(state): State<AppState>) -> Json<List<PersistentVolumeClaim>> {
-    let items: Vec<PersistentVolumeClaim> = state.store.get_by_kind("PersistentVolumeClaim").await
+    let items: Vec<PersistentVolumeClaim> = state
+        .store
+        .get_by_kind("PersistentVolumeClaim")
+        .await
         .into_iter()
         .filter_map(|t| match t.resource {
             AnyResource::PersistentVolumeClaim(pvc) => Some(pvc),
             _ => None,
         })
         .collect();
-    Json(List { kind: Some("PersistentVolumeClaimList".into()), api_version: None, items, metadata: make_list_meta() })
+    Json(List {
+        kind: Some("PersistentVolumeClaimList".into()),
+        api_version: None,
+        items,
+        metadata: make_list_meta(),
+    })
 }
 
 pub async fn list_pvcs(
     State(state): State<AppState>,
     Path(namespace): Path<String>,
 ) -> Json<List<PersistentVolumeClaim>> {
-    let items: Vec<PersistentVolumeClaim> = state.store.get_by_kind("PersistentVolumeClaim").await
+    let items: Vec<PersistentVolumeClaim> = state
+        .store
+        .get_by_kind("PersistentVolumeClaim")
+        .await
         .into_iter()
         .filter(|t| t.resource.namespace() == namespace)
         .filter_map(|t| match t.resource {
@@ -26,21 +37,34 @@ pub async fn list_pvcs(
             _ => None,
         })
         .collect();
-    Json(List { kind: Some("PersistentVolumeClaimList".into()), api_version: None, items, metadata: make_list_meta() })
+    Json(List {
+        kind: Some("PersistentVolumeClaimList".into()),
+        api_version: None,
+        items,
+        metadata: make_list_meta(),
+    })
 }
 
 pub async fn get_pvc(
     State(state): State<AppState>,
     Path((namespace, name)): Path<(String, String)>,
 ) -> Result<Json<PersistentVolumeClaim>, ApiError> {
-    state.store.get_by_kind("PersistentVolumeClaim").await
+    state
+        .store
+        .get_by_kind("PersistentVolumeClaim")
+        .await
         .into_iter()
         .find(|t| t.resource.namespace() == namespace && t.resource.name() == name)
         .and_then(|t| match t.resource {
             AnyResource::PersistentVolumeClaim(pvc) => Some(Json(pvc)),
             _ => None,
         })
-        .ok_or_else(|| ApiError::not_found(format!("persistentvolumeclaim \"{}/{}\" not found", namespace, name)))
+        .ok_or_else(|| {
+            ApiError::not_found(format!(
+                "persistentvolumeclaim \"{}/{}\" not found",
+                namespace, name
+            ))
+        })
 }
 
 pub async fn create_pvc(
@@ -61,7 +85,10 @@ pub async fn create_pvc(
         pvc.metadata.creation_timestamp = Some(now_time());
     }
     let resource = AnyResource::PersistentVolumeClaim(pvc);
-    state.apply_and_broadcast(resource.clone()).await.map_err(|e| ApiError::bad_request(e.to_string()))?;
+    state
+        .apply_and_broadcast(resource.clone())
+        .await
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
     state.registry.on_apply(&state.ctx, &resource).await;
     Ok((StatusCode::CREATED, Json(resource)).into_response())
 }
@@ -78,12 +105,21 @@ pub async fn delete_pvc(
             return Ok(Json(ok_status()));
         }
     }
-    Err(ApiError::not_found(format!("persistentvolumeclaim \"{}/{}\" not found", namespace, name)))
+    Err(ApiError::not_found(format!(
+        "persistentvolumeclaim \"{}/{}\" not found",
+        namespace, name
+    )))
 }
 
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/v1/persistentvolumeclaims", get(list_pvcs_all))
-        .route("/api/v1/namespaces/{namespace}/persistentvolumeclaims", get(list_pvcs).post(create_pvc))
-        .route("/api/v1/namespaces/{namespace}/persistentvolumeclaims/{name}", get(get_pvc).delete(delete_pvc))
+        .route(
+            "/api/v1/namespaces/{namespace}/persistentvolumeclaims",
+            get(list_pvcs).post(create_pvc),
+        )
+        .route(
+            "/api/v1/namespaces/{namespace}/persistentvolumeclaims/{name}",
+            get(get_pvc).delete(delete_pvc),
+        )
 }

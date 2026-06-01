@@ -1,14 +1,17 @@
-use async_trait::async_trait;
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::store::{AnyResource, ResourceState, ResourceTracker};
-use crate::store::StoreBackend;
 use crate::components::{Component, ReconcileContext, ResourceCategory};
-use crate::types::{Deployment, Pod, OwnerReference};
+use crate::store::StoreBackend;
+use crate::store::{AnyResource, ResourceState, ResourceTracker};
+use crate::types::{Deployment, OwnerReference, Pod};
 
-pub fn labels_match(selector: &BTreeMap<String, String>, labels: &BTreeMap<String, String>) -> bool {
+pub fn labels_match(
+    selector: &BTreeMap<String, String>,
+    labels: &BTreeMap<String, String>,
+) -> bool {
     for (key, value) in selector {
         if labels.get(key) != Some(value) {
             return false;
@@ -19,9 +22,10 @@ pub fn labels_match(selector: &BTreeMap<String, String>, labels: &BTreeMap<Strin
 
 pub fn pod_owned_by_deployment(pod: &Pod, deploy_name: &str) -> bool {
     if let Some(refs) = &pod.metadata.owner_references {
-        if refs.iter().any(|r| {
-            r.controller == Some(true) && r.kind == "Deployment" && r.name == deploy_name
-        }) {
+        if refs
+            .iter()
+            .any(|r| r.controller == Some(true) && r.kind == "Deployment" && r.name == deploy_name)
+        {
             return true;
         }
     }
@@ -95,7 +99,11 @@ impl Component for DeploymentResource {
 }
 
 impl DeploymentResource {
-    async fn reconcile_impl(&self, ctx: &ReconcileContext, tracker: &ResourceTracker) -> Result<()> {
+    async fn reconcile_impl(
+        &self,
+        ctx: &ReconcileContext,
+        tracker: &ResourceTracker,
+    ) -> Result<()> {
         let AnyResource::Deployment(deploy) = &tracker.resource else {
             return Ok(());
         };

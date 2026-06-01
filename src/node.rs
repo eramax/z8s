@@ -5,42 +5,40 @@ use tokio::signal::unix::{SignalKind, signal as unix_signal};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
-use crate::store::{AnyResource, StoreBackend, MemoryBackend};
-use crate::components::{ComponentRegistry, PipelineBuilder, ReconcileContext};
 use crate::components::compute::deployment::DeploymentResource;
 use crate::components::compute::pod::PodResource;
-use crate::components::network::service::ServiceResource;
 use crate::components::network::ingress::IngressResource;
 use crate::components::network::networkpolicy::NetworkPolicyResource;
-use crate::components::network::vnet::VNetResource;
-use crate::components::network::subnet::SubnetResource;
 use crate::components::network::nsg::NsgResource;
 use crate::components::network::routetable::RouteTableResource;
+use crate::components::network::service::NetworkManager;
+use crate::components::network::service::ServiceResource;
+use crate::components::network::subnet::SubnetResource;
+use crate::components::network::vnet::VNetResource;
 use crate::components::storage::configmap::ConfigMapResource;
 use crate::components::storage::pv::PvResource;
 use crate::components::storage::pvc::PvcResource;
 use crate::components::storage::secret::SecretResource;
+use crate::components::{ComponentRegistry, PipelineBuilder, ReconcileContext};
+use crate::cri::cgroup::CgroupManager;
 use crate::cri::image::ImageManager;
 use crate::cri::runtime::ContainerRuntime;
+use crate::cri::runtime::ProcessSupervisor;
 use crate::init::InitHandler;
 use crate::manifest::watcher::ManifestWatcher;
-use crate::components::network::service::NetworkManager;
-use crate::scheduler::reconciler::Reconciler;
-use crate::cri::cgroup::CgroupManager;
-use crate::cri::runtime::ProcessSupervisor;
 use crate::scheduler::process::ProcessTracker;
+use crate::scheduler::reconciler::Reconciler;
 use crate::storage::ProvisionerDispatcher;
+use crate::store::{AnyResource, MemoryBackend, StoreBackend};
 
 pub async fn run_node(
     port: u16,
     _port_lock: std::fs::File,
     _global_lock: Option<std::fs::File>,
 ) -> Result<()> {
-
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("info")),
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .with_target(true)
         .with_thread_ids(true)
@@ -53,8 +51,10 @@ pub async fn run_node(
         "z8s v{} starting — port={}, service-cidr={}.{}.{}.{}/{}, domain={}, manifests={}",
         env!("CARGO_PKG_VERSION"),
         cfg.api_port,
-        cfg.service_cidr_base[0], cfg.service_cidr_base[1],
-        cfg.service_cidr_base[2], cfg.service_cidr_base[3],
+        cfg.service_cidr_base[0],
+        cfg.service_cidr_base[1],
+        cfg.service_cidr_base[2],
+        cfg.service_cidr_base[3],
         cfg.service_cidr_prefix,
         cfg.cluster_domain,
         cfg.manifests_dir,
@@ -64,13 +64,18 @@ pub async fn run_node(
     if pid == 1 {
         info!("Running as PID 1 (init process)");
     } else {
-        warn!("Not running as PID 1 (pid={}). Some init features will be unavailable.", pid);
+        warn!(
+            "Not running as PID 1 (pid={}). Some init features will be unavailable.",
+            pid
+        );
     }
 
-    let apparmor_restricted = std::fs::read_to_string("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")
-        .ok()
-        .and_then(|s| s.trim().parse::<u32>().ok())
-        .unwrap_or(0) == 1;
+    let apparmor_restricted =
+        std::fs::read_to_string("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .unwrap_or(0)
+            == 1;
 
     if apparmor_restricted && !crate::cri::rootfs::is_root() {
         warn!(
@@ -89,7 +94,10 @@ pub async fn run_node(
     if let Some(ref db_path) = cfg.db_path {
         let path = std::path::Path::new(db_path);
         let parent = path.parent().unwrap_or(std::path::Path::new("/tmp"));
-        match crate::store::RedbBackend::open_at(parent, path.file_name().unwrap().to_str().unwrap()) {
+        match crate::store::RedbBackend::open_at(
+            parent,
+            path.file_name().unwrap().to_str().unwrap(),
+        ) {
             Ok(db) => {
                 info!("Using redb database at {}", db_path);
                 let db = Arc::new(db);
@@ -97,7 +105,10 @@ pub async fn run_node(
                 redb = Some(db);
             }
             Err(e) => {
-                warn!("Failed to open redb at {}: {}. Falling back to in-memory.", db_path, e);
+                warn!(
+                    "Failed to open redb at {}: {}. Falling back to in-memory.",
+                    db_path, e
+                );
                 store = Arc::new(MemoryBackend::new());
                 redb = None;
             }
@@ -111,7 +122,10 @@ pub async fn run_node(
                 redb = Some(db);
             }
             Err(e) => {
-                warn!("Failed to open redb at {}: {}. Falling back to in-memory.", data_dir, e);
+                warn!(
+                    "Failed to open redb at {}: {}. Falling back to in-memory.",
+                    data_dir, e
+                );
                 store = Arc::new(MemoryBackend::new());
                 redb = None;
             }
@@ -125,7 +139,10 @@ pub async fn run_node(
     let cgroup_manager = match CgroupManager::new() {
         Ok(m) => Arc::new(m),
         Err(e) => {
-            warn!("Cgroups not available: {}. Running without resource limits.", e);
+            warn!(
+                "Cgroups not available: {}. Running without resource limits.",
+                e
+            );
             Arc::new(CgroupManager::new_stub())
         }
     };
@@ -134,26 +151,40 @@ pub async fn run_node(
     let image_manager = match ImageManager::new() {
         Ok(m) => Arc::new(m),
         Err(e) => {
-            warn!("Image manager init failed: {}. Running without image pulling.", e);
+            warn!(
+                "Image manager init failed: {}. Running without image pulling.",
+                e
+            );
             Arc::new(ImageManager::new_stub())
         }
     };
 
-    let netmux = Arc::new(crate::netmux::NetMux::new(&cfg.pod_cidr, &cfg.node_name).unwrap_or_else(|e| {
-        panic!("Failed to create NetMux with pod CIDR {}: {}", cfg.pod_cidr, e);
-    }));
+    let netmux = Arc::new(
+        crate::netmux::NetMux::new(&cfg.pod_cidr, &cfg.node_name).unwrap_or_else(|e| {
+            panic!(
+                "Failed to create NetMux with pod CIDR {}: {}",
+                cfg.pod_cidr, e
+            );
+        }),
+    );
 
     crate::config::set_dns_server(netmux.gateway().to_string());
 
     if let Err(e) = crate::netmux::NetMux::enable_ip_forward() {
-        warn!("Failed to enable ip_forward: {} — pods may not reach the internet", e);
+        warn!(
+            "Failed to enable ip_forward: {} — pods may not reach the internet",
+            e
+        );
     }
     if let Err(e) = crate::netmux::NetMux::ensure_loopback_up() {
         warn!("Failed to bring up loopback: {}", e);
     }
     crate::netmux::netlink::harden_sysctl().ok();
     if let Err(e) = netmux.nft.init(&cfg.pod_cidr).await {
-        panic!("nftables init failed: {} — nftables is required, refusing to start", e);
+        panic!(
+            "nftables init failed: {} — nftables is required, refusing to start",
+            e
+        );
     }
     if let Err(e) = netmux.nft.add_forward_catchall(&cfg.pod_cidr).await {
         warn!("Failed to add forward catch-all: {}", e);
@@ -183,9 +214,14 @@ pub async fn run_node(
         store: store.clone(),
     });
 
-    let network = Arc::new(NetworkManager::new(store.clone(), process_tracker.clone(), netmux.clone()));
+    let network = Arc::new(NetworkManager::new(
+        store.clone(),
+        process_tracker.clone(),
+        netmux.clone(),
+    ));
 
-    if let Some(port) = crate::netmux::dns::run_dns(store.clone(), netmux.dns_records.clone()).await {
+    if let Some(port) = crate::netmux::dns::run_dns(store.clone(), netmux.dns_records.clone()).await
+    {
         crate::config::set_dns_port(port);
     }
 
@@ -208,8 +244,14 @@ pub async fn run_node(
     let mut registry = ComponentRegistry::new();
     registry.register(Box::new(PodResource::new()));
     registry.register(Box::new(DeploymentResource::new(store.clone())));
-    registry.register(Box::new(ServiceResource::new(store.clone(), network.clone())));
-    registry.register(Box::new(IngressResource::new(store.clone(), netmux.clone())));
+    registry.register(Box::new(ServiceResource::new(
+        store.clone(),
+        network.clone(),
+    )));
+    registry.register(Box::new(IngressResource::new(
+        store.clone(),
+        netmux.clone(),
+    )));
     registry.register(Box::new(NetworkPolicyResource::new(netmux.clone())));
     registry.register(Box::new(VNetResource::new(netmux.clone())));
     registry.register(Box::new(SubnetResource::new(netmux.clone())));
@@ -282,7 +324,10 @@ pub async fn run_node(
         }
         store.apply(AnyResource::Node(node.clone())).await.ok();
         if let Some(ref gs) = gossip_state {
-            gs.lock().await.broadcast_write(&AnyResource::Node(node)).await;
+            gs.lock()
+                .await
+                .broadcast_write(&AnyResource::Node(node))
+                .await;
         }
     }
 
@@ -315,7 +360,9 @@ pub async fn run_node(
         let netmux = netmux.clone();
         let ing_store = store.clone();
         tokio::spawn(async move {
-            if let Err(e) = crate::netmux::ingress::start_http(netmux.ingress_state.clone(), ing_store).await {
+            if let Err(e) =
+                crate::netmux::ingress::start_http(netmux.ingress_state.clone(), ing_store).await
+            {
                 error!("Ingress HTTP listener failed: {}", e);
             }
         });
@@ -356,32 +403,35 @@ pub async fn run_node(
             std::thread::sleep(std::time::Duration::from_secs(15));
             if !done.load(std::sync::atomic::Ordering::SeqCst) {
                 eprintln!("[watchdog] cleanup timed out — force exiting");
-                unsafe { nix::libc::_exit(0); }
+                unsafe {
+                    nix::libc::_exit(0);
+                }
             }
         });
     }
 
     // ── Cleanup: stop all pods ────────────────────────────────────────
-    let resources = match tokio::time::timeout(
-        std::time::Duration::from_secs(3),
-        store.get_all(),
-    ).await {
-        Ok(r) => r,
-        Err(_) => { warn!("Timeout reading store — skipping pod cleanup"); vec![] }
-    };
+    let resources =
+        match tokio::time::timeout(std::time::Duration::from_secs(3), store.get_all()).await {
+            Ok(r) => r,
+            Err(_) => {
+                warn!("Timeout reading store — skipping pod cleanup");
+                vec![]
+            }
+        };
     for tracker in &resources {
-        let spec = crate::components::compute::spec_builder::build_spec(&tracker.resource, store.as_ref()).await;
+        let spec =
+            crate::components::compute::spec_builder::build_spec(&tracker.resource, store.as_ref())
+                .await;
         let _ = tokio::time::timeout(
             std::time::Duration::from_secs(3),
             crate::cri::RuntimeProvider::stop_pod(cri.as_ref(), &spec),
-        ).await;
+        )
+        .await;
     }
 
     // ── Cleanup: remove nftables rules ────────────────────────────────
-    let _ = tokio::time::timeout(
-        std::time::Duration::from_secs(3),
-        netmux.nft.cleanup(),
-    ).await;
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(3), netmux.nft.cleanup()).await;
 
     // ── Cleanup: remove orphan veths created by this instance ─────────
     let netmux_for_veths = netmux.clone();
@@ -390,7 +440,8 @@ pub async fn run_node(
         tokio::task::spawn_blocking(move || {
             let _ = netmux_for_veths.clean_orphan_veths(&[]);
         }),
-    ).await;
+    )
+    .await;
 
     // Lock files are cleaned up automatically when the process exits
     // (flock is released when the fd is closed).
@@ -400,5 +451,7 @@ pub async fn run_node(
     // Use libc::_exit instead of std::process::exit to skip Rust runtime cleanup
     // and glibc atexit handlers — those can block on tokio runtime threads that
     // are stuck in D-state, preventing exit_group() from being called.
-    unsafe { nix::libc::_exit(0); }
+    unsafe {
+        nix::libc::_exit(0);
+    }
 }

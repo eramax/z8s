@@ -1,10 +1,10 @@
-use async_trait::async_trait;
 use anyhow::Result;
+use async_trait::async_trait;
 use std::sync::OnceLock;
 use tokio::sync::Semaphore;
 
-use crate::store::{AnyResource, ResourceState, ResourceTracker};
 use crate::components::{Component, ReconcileContext, ResourceCategory};
+use crate::store::{AnyResource, ResourceState, ResourceTracker};
 
 fn pod_start_semaphore() -> &'static Semaphore {
     static SEM: OnceLock<Semaphore> = OnceLock::new();
@@ -69,8 +69,13 @@ impl Component for PodResource {
 
     async fn on_delete(&self, ctx: &ReconcileContext, resource: &AnyResource) -> Result<()> {
         if let AnyResource::Pod(pod) = resource {
-            if let Some(ip) = ctx.process_tracker.pod_ip(pod.metadata.name.as_deref().unwrap_or("")).await {
-                let npc = crate::netmux::np_controller::NetworkPolicyController::new(ctx.netmux.clone());
+            if let Some(ip) = ctx
+                .process_tracker
+                .pod_ip(pod.metadata.name.as_deref().unwrap_or(""))
+                .await
+            {
+                let npc =
+                    crate::netmux::np_controller::NetworkPolicyController::new(ctx.netmux.clone());
                 if let Err(e) = npc.remove_pod(ip).await {
                     tracing::warn!("NetworkPolicy remove_pod failed: {}", e);
                 }

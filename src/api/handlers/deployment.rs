@@ -1,6 +1,6 @@
+use crate::api::server::*;
 use axum::Router;
 use axum::routing::{get, patch};
-use crate::api::server::*;
 
 pub fn fill_deployment_metadata(deploy: &mut crate::types::Deployment) {
     let meta = &mut deploy.metadata;
@@ -16,7 +16,6 @@ pub fn fill_deployment_metadata(deploy: &mut crate::types::Deployment) {
         meta.uid = Some(format!("Deployment/{}/{}", ns, name));
     }
 }
-
 
 pub fn resource_to_deploy_json(
     resource: &AnyResource,
@@ -45,11 +44,22 @@ pub fn resource_to_deploy_json(
                 status: if all_ready { "True" } else { "False" }.into(),
                 last_update_time: Some(time.clone()),
                 last_transition_time: Some(time.clone()),
-                reason: Some(if all_ready { "MinimumReplicasAvailable" } else { "MinimumReplicasUnavailable" }.into()),
+                reason: Some(
+                    if all_ready {
+                        "MinimumReplicasAvailable"
+                    } else {
+                        "MinimumReplicasUnavailable"
+                    }
+                    .into(),
+                ),
                 message: Some(if all_ready {
                     "Deployment has minimum availability.".into()
                 } else {
-                    format!("{}/{} pods ready", running.unwrap_or(0), desired.unwrap_or(1))
+                    format!(
+                        "{}/{} pods ready",
+                        running.unwrap_or(0),
+                        desired.unwrap_or(1)
+                    )
                 }),
             },
             DeploymentCondition {
@@ -70,7 +80,6 @@ pub fn resource_to_deploy_json(
     serde_json::to_value(&deploy).unwrap_or_default()
 }
 
-
 pub async fn count_deployment_pods(
     resource: &AnyResource,
     pods: &[crate::store::ResourceTracker],
@@ -83,9 +92,14 @@ pub async fn count_deployment_pods(
     };
     let deploy_name = deploy.metadata.name.as_deref().unwrap_or("");
     let namespace = deploy.metadata.namespace.as_deref().unwrap_or("default");
-    let selector = deploy.spec.as_ref().and_then(|s| s.selector.match_labels.as_ref());
+    let selector = deploy
+        .spec
+        .as_ref()
+        .and_then(|s| s.selector.match_labels.as_ref());
 
-    let Some(labels) = selector else { return (0, 0) };
+    let Some(labels) = selector else {
+        return (0, 0);
+    };
 
     let matching: Vec<_> = pods
         .iter()
@@ -93,9 +107,11 @@ pub async fn count_deployment_pods(
             if let AnyResource::Pod(pod) = &t.resource {
                 pod.metadata.namespace.as_deref() == Some(namespace)
                     && pod_managed_by_deployment(pod, deploy_name)
-                    && pod.metadata.labels.as_ref().map_or(false, |pl| {
-                        labels.iter().all(|(k, v)| pl.get(k) == Some(v))
-                    })
+                    && pod
+                        .metadata
+                        .labels
+                        .as_ref()
+                        .map_or(false, |pl| labels.iter().all(|(k, v)| pl.get(k) == Some(v)))
             } else {
                 false
             }
@@ -115,7 +131,6 @@ pub async fn count_deployment_pods(
 
     (ready, matching.len())
 }
-
 
 pub fn deployment_list_to_table(items: &[serde_json::Value]) -> serde_json::Value {
     let columns = serde_json::json!([
@@ -145,14 +160,12 @@ pub fn deployment_list_to_table(items: &[serde_json::Value]) -> serde_json::Valu
     make_table(columns, rows)
 }
 
-
 pub fn pod_managed_by_deployment(pod: &crate::types::Pod, deploy_name: &str) -> bool {
     pod.metadata
         .name
         .as_deref()
         .map_or(false, |n| n.starts_with(&format!("{deploy_name}-pod-")))
 }
-
 
 pub async fn list_deployments_all(
     State(state): State<AppState>,
@@ -161,7 +174,6 @@ pub async fn list_deployments_all(
     list_deployments_in_ns(state, None, headers).await
 }
 
-
 pub async fn list_deployments(
     State(state): State<AppState>,
     Path(namespace): Path<String>,
@@ -169,7 +181,6 @@ pub async fn list_deployments(
 ) -> Result<axum::response::Response, ApiError> {
     list_deployments_in_ns(state, Some(namespace), headers).await
 }
-
 
 pub async fn list_deployments_in_ns(
     state: AppState,
@@ -182,9 +193,16 @@ pub async fn list_deployments_in_ns(
 
     let mut items: Vec<serde_json::Value> = Vec::new();
     for t in &trackers {
-        if namespace.as_deref().map_or(true, |ns| t.resource.namespace() == ns) {
+        if namespace
+            .as_deref()
+            .map_or(true, |ns| t.resource.namespace() == ns)
+        {
             let (ready, avail) = count_deployment_pods(&t.resource, &pods, &tracker).await;
-            items.push(resource_to_deploy_json(&t.resource, Some(ready), Some(avail)));
+            items.push(resource_to_deploy_json(
+                &t.resource,
+                Some(ready),
+                Some(avail),
+            ));
         }
     }
 
@@ -199,7 +217,6 @@ pub async fn list_deployments_in_ns(
     .into_response())
 }
 
-
 pub async fn get_deployment(
     State(state): State<AppState>,
     Path((namespace, name)): Path<(String, String)>,
@@ -208,13 +225,20 @@ pub async fn get_deployment(
     let pods = state.store.get_by_kind("Pod").await;
     for t in &trackers {
         if t.resource.namespace() == namespace && t.resource.name() == name {
-            let (ready, avail) = count_deployment_pods(&t.resource, &pods, &state.process_tracker).await;
-            return Ok(Json(resource_to_deploy_json(&t.resource, Some(ready), Some(avail))));
+            let (ready, avail) =
+                count_deployment_pods(&t.resource, &pods, &state.process_tracker).await;
+            return Ok(Json(resource_to_deploy_json(
+                &t.resource,
+                Some(ready),
+                Some(avail),
+            )));
         }
     }
-    Err(ApiError::not_found(format!("deployment \"{}\" not found", name)))
+    Err(ApiError::not_found(format!(
+        "deployment \"{}\" not found",
+        name
+    )))
 }
-
 
 pub async fn patch_deployment_scale(
     State(state): State<AppState>,
@@ -235,13 +259,24 @@ pub async fn patch_deployment_scale(
                     .or_else(|| body.get("replicas").and_then(|r| r.as_i64()));
 
                 let replicas = desired.unwrap_or_else(|| {
-                    deploy.spec.as_ref().and_then(|s| s.replicas).map(|r| r as i64).unwrap_or(1)
+                    deploy
+                        .spec
+                        .as_ref()
+                        .and_then(|s| s.replicas)
+                        .map(|r| r as i64)
+                        .unwrap_or(1)
                 }) as i32;
 
                 if let Some(spec) = deploy.spec.as_mut() {
                     spec.replicas = Some(replicas);
-                    info!("Scaled deployment {}/{} to {} replicas", namespace, name, replicas);
-                    state.apply_and_broadcast(AnyResource::Deployment(deploy.clone())).await.ok();
+                    info!(
+                        "Scaled deployment {}/{} to {} replicas",
+                        namespace, name, replicas
+                    );
+                    state
+                        .apply_and_broadcast(AnyResource::Deployment(deploy.clone()))
+                        .await
+                        .ok();
                 }
 
                 let selector = deploy
@@ -249,7 +284,10 @@ pub async fn patch_deployment_scale(
                     .as_ref()
                     .and_then(|s| s.selector.match_labels.as_ref())
                     .map(|l| {
-                        l.iter().map(|(k, v)| format!("{}={}", k, v)).collect::<Vec<_>>().join(",")
+                        l.iter()
+                            .map(|(k, v)| format!("{}={}", k, v))
+                            .collect::<Vec<_>>()
+                            .join(",")
                     });
 
                 let scale = Scale {
@@ -259,16 +297,20 @@ pub async fn patch_deployment_scale(
                         uid: Some(format!("Deployment/{}/{}", namespace, name)),
                         ..Default::default()
                     }),
-                    spec: Some(ScaleSpec { replicas: Some(replicas) }),
+                    spec: Some(ScaleSpec {
+                        replicas: Some(replicas),
+                    }),
                     status: Some(ScaleStatus { replicas, selector }),
                 };
                 return Ok(Json(serde_json::to_value(&scale).unwrap_or_default()));
             }
         }
     }
-    Err(ApiError::not_found(format!("deployment \"{}\" not found", name)))
+    Err(ApiError::not_found(format!(
+        "deployment \"{}\" not found",
+        name
+    )))
 }
-
 
 pub async fn create_deployment(
     State(state): State<AppState>,
@@ -278,7 +320,10 @@ pub async fn create_deployment(
     let body = parse_body(&raw)?;
     let kind = body.get("kind").and_then(|k| k.as_str()).unwrap_or("");
     if kind != "Deployment" {
-        return Err(ApiError::bad_request(format!("expected Deployment, got {}", kind)));
+        return Err(ApiError::bad_request(format!(
+            "expected Deployment, got {}",
+            kind
+        )));
     }
     let mut deploy: crate::types::Deployment = serde_json::from_value(body)
         .map_err(|e| ApiError::bad_request(format!("invalid Deployment: {}", e)))?;
@@ -287,13 +332,14 @@ pub async fn create_deployment(
     }
     fill_deployment_metadata(&mut deploy);
     let resource = AnyResource::Deployment(deploy);
-    state.apply_and_broadcast(resource.clone()).await
+    state
+        .apply_and_broadcast(resource.clone())
+        .await
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
     let mut value = serde_json::to_value(&resource).unwrap_or_default();
     value["status"] = serde_json::json!({ "replicas": 0 });
     Ok((StatusCode::CREATED, Json(value)).into_response())
 }
-
 
 pub async fn delete_deployment(
     State(state): State<AppState>,
@@ -303,18 +349,29 @@ pub async fn delete_deployment(
     for t in &trackers {
         if t.resource.name() == name && t.resource.namespace() == namespace {
             if let AnyResource::Deployment(deploy) = &t.resource {
-                let selector = deploy.spec.as_ref()
+                let selector = deploy
+                    .spec
+                    .as_ref()
                     .and_then(|s| s.selector.match_labels.as_ref());
                 if let Some(match_labels) = selector {
                     let pods = state.store.get_by_kind("Pod").await;
                     for pt in &pods {
-                        if pt.resource.namespace() != namespace { continue; }
+                        if pt.resource.namespace() != namespace {
+                            continue;
+                        }
                         if let AnyResource::Pod(pod) = &pt.resource {
                             let pod_labels = pod.metadata.labels.clone().unwrap_or_default();
                             if labels_match(match_labels, &pod_labels)
-                                && crate::components::compute::deployment::pod_owned_by_deployment(pod, &name)
+                                && crate::components::compute::deployment::pod_owned_by_deployment(
+                                    pod, &name,
+                                )
                             {
-                                info!("Deleting pod {} owned by deployment {}/{}", pt.resource.name(), namespace, name);
+                                info!(
+                                    "Deleting pod {} owned by deployment {}/{}",
+                                    pt.resource.name(),
+                                    namespace,
+                                    name
+                                );
                                 state.registry.on_delete(&state.ctx, &pt.resource).await;
                                 state.store.delete(&pt.resource).await.ok();
                             }
@@ -327,9 +384,11 @@ pub async fn delete_deployment(
             return Ok(Json(ok_status()));
         }
     }
-    Err(ApiError::not_found(format!("deployment \"{}\" not found", name)))
+    Err(ApiError::not_found(format!(
+        "deployment \"{}\" not found",
+        name
+    )))
 }
-
 
 pub async fn patch_deployment(
     State(state): State<AppState>,
@@ -337,7 +396,10 @@ pub async fn patch_deployment(
     raw: axum::body::Bytes,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let patch = parse_body(&raw)?;
-    let existing = state.store.get_by_kind("Deployment").await
+    let existing = state
+        .store
+        .get_by_kind("Deployment")
+        .await
         .into_iter()
         .find(|t| t.resource.namespace() == namespace && t.resource.name() == name)
         .and_then(|t| serde_json::to_value(&t.resource).ok());
@@ -353,14 +415,19 @@ pub async fn patch_deployment(
     }
     fill_deployment_metadata(&mut deploy);
     let resource = AnyResource::Deployment(deploy);
-    state.apply_and_broadcast(resource.clone()).await
+    state
+        .apply_and_broadcast(resource.clone())
+        .await
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
     let mut value = serde_json::to_value(&resource).unwrap_or_default();
     value["status"] = serde_json::json!({ "replicas": 0 });
     Ok(Json(value))
 }
 
-pub fn labels_match(selector: &BTreeMap<String, String>, labels: &BTreeMap<String, String>) -> bool {
+pub fn labels_match(
+    selector: &BTreeMap<String, String>,
+    labels: &BTreeMap<String, String>,
+) -> bool {
     for (key, value) in selector {
         if labels.get(key) != Some(value) {
             return false;
@@ -369,11 +436,22 @@ pub fn labels_match(selector: &BTreeMap<String, String>, labels: &BTreeMap<Strin
     true
 }
 
-
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/apis/apps/v1/deployments", get(list_deployments_all))
-        .route("/apis/apps/v1/namespaces/{namespace}/deployments", get(list_deployments).post(create_deployment))
-        .route("/apis/apps/v1/namespaces/{namespace}/deployments/{name}", get(get_deployment).delete(delete_deployment).patch(patch_deployment).put(patch_deployment))
-        .route("/apis/apps/v1/namespaces/{namespace}/deployments/{name}/scale", patch(patch_deployment_scale))
+        .route(
+            "/apis/apps/v1/namespaces/{namespace}/deployments",
+            get(list_deployments).post(create_deployment),
+        )
+        .route(
+            "/apis/apps/v1/namespaces/{namespace}/deployments/{name}",
+            get(get_deployment)
+                .delete(delete_deployment)
+                .patch(patch_deployment)
+                .put(patch_deployment),
+        )
+        .route(
+            "/apis/apps/v1/namespaces/{namespace}/deployments/{name}/scale",
+            patch(patch_deployment_scale),
+        )
 }

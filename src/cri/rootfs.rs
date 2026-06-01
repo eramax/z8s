@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
-use nix::mount::{mount, umount, MsFlags};
-use nix::sched::{unshare, CloneFlags};
-use nix::sys::stat::{makedev, mknod, Mode, SFlag};
-use nix::unistd::{chdir, chroot, getgid, getuid, pivot_root, sethostname, Uid};
+use nix::mount::{MsFlags, mount, umount};
+use nix::sched::{CloneFlags, unshare};
+use nix::sys::stat::{Mode, SFlag, makedev, mknod};
+use nix::unistd::{Uid, chdir, chroot, getgid, getuid, pivot_root, sethostname};
 use std::os::fd::OwnedFd;
 use std::path::Path;
 use tracing::{debug, info, warn};
@@ -12,14 +12,14 @@ const DEV_NODES: &[&str] = &[
 ];
 
 const DEV_NODE_NUMBERS: &[(u64, u64)] = &[
-    (1, 3),  // null
-    (1, 5),  // zero
-    (1, 7),  // full
-    (1, 8),  // random
-    (1, 9),  // urandom
-    (5, 0),  // tty
-    (5, 1),  // console
-    (5, 2),  // ptmx
+    (1, 3), // null
+    (1, 5), // zero
+    (1, 7), // full
+    (1, 8), // random
+    (1, 9), // urandom
+    (5, 0), // tty
+    (5, 1), // console
+    (5, 2), // ptmx
 ];
 
 pub fn is_root() -> bool {
@@ -83,13 +83,23 @@ pub fn resolve_exec_path(entrypoint: &str, rootfs_path: &str) -> String {
     if let Some(container_path) = get_container_path_from_proc(rootfs_path) {
         for dir in container_path.split(':') {
             if !dir.is_empty() {
-                candidates.push(format!("{root}/{}/{entrypoint}", dir.trim_start_matches('/')));
+                candidates.push(format!(
+                    "{root}/{}/{entrypoint}",
+                    dir.trim_start_matches('/')
+                ));
             }
         }
     }
 
     // Standard fallback paths
-    for dir in &["bin", "usr/bin", "usr/local/bin", "sbin", "usr/sbin", "usr/local/sbin"] {
+    for dir in &[
+        "bin",
+        "usr/bin",
+        "usr/local/bin",
+        "sbin",
+        "usr/sbin",
+        "usr/local/sbin",
+    ] {
         candidates.push(format!("{root}/{dir}/{entrypoint}"));
     }
 
@@ -177,12 +187,16 @@ fn read_elf_interpreter(path: &str) -> Option<String> {
             continue;
         }
         let (p_offset, p_filesz): (usize, usize) = if elf_class == 2 {
-            let p_offset = u64::from_le_bytes(data.get(off + 8..off + 16)?.try_into().ok()?) as usize;
-            let p_filesz = u64::from_le_bytes(data.get(off + 32..off + 40)?.try_into().ok()?) as usize;
+            let p_offset =
+                u64::from_le_bytes(data.get(off + 8..off + 16)?.try_into().ok()?) as usize;
+            let p_filesz =
+                u64::from_le_bytes(data.get(off + 32..off + 40)?.try_into().ok()?) as usize;
             (p_offset, p_filesz)
         } else {
-            let p_offset = u32::from_le_bytes(data.get(off + 4..off + 8)?.try_into().ok()?) as usize;
-            let p_filesz = u32::from_le_bytes(data.get(off + 16..off + 20)?.try_into().ok()?) as usize;
+            let p_offset =
+                u32::from_le_bytes(data.get(off + 4..off + 8)?.try_into().ok()?) as usize;
+            let p_filesz =
+                u32::from_le_bytes(data.get(off + 16..off + 20)?.try_into().ok()?) as usize;
             (p_offset, p_filesz)
         };
         if p_filesz == 0 || p_offset + p_filesz > data.len() {
@@ -273,8 +287,14 @@ fn build_resolv_conf() -> String {
     if let Some(dns_port) = crate::config::dns_port() {
         let domain = &crate::config::get().cluster_domain;
         let ns = crate::config::dns_server().unwrap_or("127.0.0.1");
-        tracing::info!("build_resolv_conf: dns_port={:?} using nameserver={}", dns_port, ns);
-        format!("nameserver {ns}\nsearch default.svc.{domain} svc.{domain} {domain}\noptions ndots:5\n")
+        tracing::info!(
+            "build_resolv_conf: dns_port={:?} using nameserver={}",
+            dns_port,
+            ns
+        );
+        format!(
+            "nameserver {ns}\nsearch default.svc.{domain} svc.{domain} {domain}\noptions ndots:5\n"
+        )
     } else {
         let host_resolv = std::fs::read_to_string("/etc/resolv.conf").unwrap_or_default();
         if host_resolv.trim().is_empty()
@@ -294,7 +314,9 @@ pub fn prepare_rootfs(rootfs_path: &str) -> Result<()> {
         anyhow::bail!("Rootfs path does not exist: {}", rootfs_path);
     }
 
-    for dir in &["proc", "sys", "dev", "dev/pts", "tmp", "etc", "run", "dev/shm"] {
+    for dir in &[
+        "proc", "sys", "dev", "dev/pts", "tmp", "etc", "run", "dev/shm",
+    ] {
         std::fs::create_dir_all(rootfs.join(dir))
             .with_context(|| format!("Failed to create /{} in rootfs", dir))?;
     }
@@ -305,20 +327,23 @@ pub fn prepare_rootfs(rootfs_path: &str) -> Result<()> {
         let _ = mknod(
             &path,
             SFlag::S_IFCHR,
-            Mode::S_IRUSR | Mode::S_IWUSR | Mode::S_IRGRP | Mode::S_IWGRP | Mode::S_IROTH | Mode::S_IWOTH,
+            Mode::S_IRUSR
+                | Mode::S_IWUSR
+                | Mode::S_IRGRP
+                | Mode::S_IWGRP
+                | Mode::S_IROTH
+                | Mode::S_IWOTH,
             makedev(*major, *minor),
         );
     }
 
     let resolv_conf = rootfs.join("etc/resolv.conf");
     let content = build_resolv_conf();
-    std::fs::write(&resolv_conf, content)
-        .context("Failed to write /etc/resolv.conf")?;
+    std::fs::write(&resolv_conf, content).context("Failed to write /etc/resolv.conf")?;
 
     let hosts = rootfs.join("etc/hosts");
     if !hosts.exists() {
-        std::fs::write(&hosts, "127.0.0.1 localhost\n")
-            .context("Failed to write /etc/hosts")?;
+        std::fs::write(&hosts, "127.0.0.1 localhost\n").context("Failed to write /etc/hosts")?;
     }
 
     info!("Rootfs prepared at: {}", rootfs_path);
@@ -337,7 +362,10 @@ pub fn write_userns_maps(
     // does NOT set setgroups=deny, so setgroups(2)/seteuid(2) work inside the
     // container. This allows apt, su, sudo, and any tool that drops privileges.
     if try_newid_maps(child_pid, uid, gid).is_ok() {
-        info!("Wrote userns maps via newuidmap/newgidmap for child pid {} (uid={} gid={})", child_pid, uid, gid);
+        info!(
+            "Wrote userns maps via newuidmap/newgidmap for child pid {} (uid={} gid={})",
+            child_pid, uid, gid
+        );
         return Ok(());
     }
 
@@ -435,7 +463,9 @@ fn try_write_subid_maps_direct(child_pid: i32, uid: u32, gid: u32) -> Result<()>
 fn build_idmap_args(child_pid: i32, host_id: u32, subid_file: &str) -> Result<Vec<String>> {
     let mut args = vec![
         child_pid.to_string(),
-        "0".to_string(), host_id.to_string(), "1".to_string(),
+        "0".to_string(),
+        host_id.to_string(),
+        "1".to_string(),
     ];
     if let Some((start, count)) = read_subid(subid_file, host_id) {
         args.extend(["1".to_string(), start.to_string(), count.to_string()]);
@@ -494,12 +524,10 @@ pub fn child_enter_ns_fork(
         crate::netmux::netlink::ensure_loopback_up().ok();
     }
 
-    nix::unistd::write(&sync_w, b"S")
-        .context("child: failed to write sync byte")?;
+    nix::unistd::write(&sync_w, b"S").context("child: failed to write sync byte")?;
 
     let mut ack = [0u8; 1];
-    let n = nix::unistd::read(&ack_r, &mut ack)
-        .context("child: failed to read ack")?;
+    let n = nix::unistd::read(&ack_r, &mut ack).context("child: failed to read ack")?;
     if n == 0 {
         anyhow::bail!("child: ack pipe closed before receiving ack");
     }
@@ -532,7 +560,9 @@ pub fn child_enter_ns_fork(
     }
 
     // Fallback: degraded with a loud warning
-    tracing::error!("z8s: WARNING: FILESYSTEM ISOLATION UNAVAILABLE IN THIS ENVIRONMENT! RUNNING DEGRADED!");
+    tracing::error!(
+        "z8s: WARNING: FILESYSTEM ISOLATION UNAVAILABLE IN THIS ENVIRONMENT! RUNNING DEGRADED!"
+    );
     if !volumes.is_empty() {
         crate::cri::volumes::bind_mount_volumes_degraded(volumes);
     }
@@ -543,9 +573,7 @@ pub fn child_enter_ns_fork(
 /// When `pid_ns` is true, also creates a new PID namespace (first child of the caller
 /// becomes PID 1). This is called by the intermediate child before the second fork.
 pub fn unshare_container_ns(isolate_net: bool, hostname: &str, pid_ns: bool) -> Result<()> {
-    let mut flags = CloneFlags::CLONE_NEWNS
-        | CloneFlags::CLONE_NEWUTS
-        | CloneFlags::CLONE_NEWIPC;
+    let mut flags = CloneFlags::CLONE_NEWNS | CloneFlags::CLONE_NEWUTS | CloneFlags::CLONE_NEWIPC;
     if isolate_net {
         flags |= CloneFlags::CLONE_NEWNET;
     }
@@ -639,16 +667,20 @@ fn make_parent_mount_private(rootfs: &Path) -> Result<()> {
         let mp_matches = if mp.is_empty() {
             rootfs_str.starts_with('/')
         } else {
-            rootfs_str == mp
-                || rootfs_str.starts_with(&format!("{mp}/"))
+            rootfs_str == mp || rootfs_str.starts_with(&format!("{mp}/"))
         };
 
         if mp_matches && mp.len() >= best_len {
             // Optional fields are everything after field 6 up to the " - " separator
             let is_shared = if let Some(dash_pos) = line.find(" - ") {
-                line[..dash_pos].split_whitespace().skip(6).any(|f| f.starts_with("shared:"))
+                line[..dash_pos]
+                    .split_whitespace()
+                    .skip(6)
+                    .any(|f| f.starts_with("shared:"))
             } else {
-                line.split_whitespace().skip(6).any(|f| f.starts_with("shared:"))
+                line.split_whitespace()
+                    .skip(6)
+                    .any(|f| f.starts_with("shared:"))
             };
 
             best_mount = Some(mount_point.to_string());
@@ -660,8 +692,14 @@ fn make_parent_mount_private(rootfs: &Path) -> Result<()> {
     if let Some(mp) = best_mount {
         if best_is_shared {
             debug!("Making parent mount private: {}", mp);
-            mount(None::<&str>, mp.as_str(), None::<&str>, MsFlags::MS_PRIVATE, None::<&str>)
-                .with_context(|| format!("Failed to make parent mount private: {mp}"))?;
+            mount(
+                None::<&str>,
+                mp.as_str(),
+                None::<&str>,
+                MsFlags::MS_PRIVATE,
+                None::<&str>,
+            )
+            .with_context(|| format!("Failed to make parent mount private: {mp}"))?;
         }
     }
 
@@ -696,7 +734,8 @@ fn mount_rootfs_components(
     }
 
     // Bind-mount /proc and /sys from host into rootfs before pivot_root/chroot
-    if !is_root && !nix::unistd::access(Path::new("/proc"), nix::unistd::AccessFlags::R_OK).is_err() {
+    if !is_root && !nix::unistd::access(Path::new("/proc"), nix::unistd::AccessFlags::R_OK).is_err()
+    {
         let proc_dst = rootfs.join("proc");
         std::fs::create_dir_all(&proc_dst).ok();
         mount(
@@ -718,7 +757,8 @@ fn mount_rootfs_components(
         .ok();
     }
 
-    if !is_root && !nix::unistd::access(Path::new("/sys"), nix::unistd::AccessFlags::R_OK).is_err() {
+    if !is_root && !nix::unistd::access(Path::new("/sys"), nix::unistd::AccessFlags::R_OK).is_err()
+    {
         let sys_dst = rootfs.join("sys");
         std::fs::create_dir_all(&sys_dst).ok();
         mount(
@@ -906,14 +946,18 @@ pub fn drop_capabilities(privileged: bool, extra_caps: &[String]) {
     }
 
     let permitted = caps::read(None, CapSet::Permitted).unwrap_or_default();
-    let new_caps: HashSet<Capability> = permitted.into_iter().filter(|c| keep.contains(c)).collect();
+    let new_caps: HashSet<Capability> =
+        permitted.into_iter().filter(|c| keep.contains(c)).collect();
 
     caps::set(None, CapSet::Effective, &new_caps).ok();
     caps::set(None, CapSet::Permitted, &new_caps).ok();
     caps::clear(None, CapSet::Inheritable).ok();
     caps::clear(None, CapSet::Ambient).ok();
 
-    debug!("Capabilities restricted to OCI default set (+{} extra)", extra_caps.len());
+    debug!(
+        "Capabilities restricted to OCI default set (+{} extra)",
+        extra_caps.len()
+    );
 }
 
 /// Restrict the process to its rootfs (now "/") using Linux Landlock LSM.
@@ -925,7 +969,9 @@ pub fn apply_landlock() {
 }
 
 fn try_apply_landlock() -> std::result::Result<(), Box<dyn std::error::Error>> {
-    use landlock::{Access, AccessFs, ABI, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr};
+    use landlock::{
+        ABI, Access, AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr,
+    };
 
     let abi = ABI::V3;
     let access_fs = AccessFs::from_all(abi);
@@ -965,12 +1011,7 @@ pub fn setup_exec_mounts(rootfs: &str) -> Result<()> {
 
     let ptmx = root_path.join("dev/ptmx");
     if !ptmx.exists() {
-        let _ = mknod(
-            &ptmx,
-            SFlag::S_IFCHR,
-            Mode::S_IRWXU,
-            makedev(5, 2),
-        ).ok();
+        let _ = mknod(&ptmx, SFlag::S_IFCHR, Mode::S_IRWXU, makedev(5, 2)).ok();
     }
 
     let etc_path = root_path.join("etc");

@@ -1,24 +1,35 @@
-use axum::Router;
-use axum::routing::get;
 use crate::api::server::*;
 use crate::types::PersistentVolume;
+use axum::Router;
+use axum::routing::get;
 
 pub async fn list_pvs(State(state): State<AppState>) -> Json<List<PersistentVolume>> {
-    let items: Vec<PersistentVolume> = state.store.get_by_kind("PersistentVolume").await
+    let items: Vec<PersistentVolume> = state
+        .store
+        .get_by_kind("PersistentVolume")
+        .await
         .into_iter()
         .filter_map(|t| match t.resource {
             AnyResource::PersistentVolume(pv) => Some(pv),
             _ => None,
         })
         .collect();
-    Json(List { kind: Some("PersistentVolumeList".into()), api_version: None, items, metadata: make_list_meta() })
+    Json(List {
+        kind: Some("PersistentVolumeList".into()),
+        api_version: None,
+        items,
+        metadata: make_list_meta(),
+    })
 }
 
 pub async fn get_pv(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Json<PersistentVolume>, ApiError> {
-    state.store.get_by_kind("PersistentVolume").await
+    state
+        .store
+        .get_by_kind("PersistentVolume")
+        .await
         .into_iter()
         .find(|t| t.resource.name() == name)
         .and_then(|t| match t.resource {
@@ -42,7 +53,10 @@ pub async fn create_pv(
         pv.metadata.creation_timestamp = Some(now_time());
     }
     let resource = AnyResource::PersistentVolume(pv);
-    state.apply_and_broadcast(resource.clone()).await.map_err(|e| ApiError::bad_request(e.to_string()))?;
+    state
+        .apply_and_broadcast(resource.clone())
+        .await
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
     state.registry.on_apply(&state.ctx, &resource).await;
     Ok((StatusCode::CREATED, Json(resource)).into_response())
 }
@@ -59,11 +73,17 @@ pub async fn delete_pv(
             return Ok(Json(ok_status()));
         }
     }
-    Err(ApiError::not_found(format!("persistentvolume \"{}\" not found", name)))
+    Err(ApiError::not_found(format!(
+        "persistentvolume \"{}\" not found",
+        name
+    )))
 }
 
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/v1/persistentvolumes", get(list_pvs).post(create_pv))
-        .route("/api/v1/persistentvolumes/{name}", get(get_pv).delete(delete_pv))
+        .route(
+            "/api/v1/persistentvolumes/{name}",
+            get(get_pv).delete(delete_pv),
+        )
 }

@@ -1,6 +1,6 @@
-use crate::store::parse_manifest_yaml;
-use crate::store::StoreBackend;
 use crate::api::AnyResource;
+use crate::store::StoreBackend;
+use crate::store::parse_manifest_yaml;
 use anyhow::{Context, Result};
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::path::Path;
@@ -26,8 +26,10 @@ impl ManifestWatcher {
     pub async fn load_existing(&self) -> Result<()> {
         let dir = Path::new(&self.dir);
         if !dir.exists() {
-            std::fs::create_dir_all(dir)
-                .context(format!("Failed to create manifests directory: {}", self.dir))?;
+            std::fs::create_dir_all(dir).context(format!(
+                "Failed to create manifests directory: {}",
+                self.dir
+            ))?;
             info!("Created manifests directory: {}", self.dir);
             return Ok(());
         }
@@ -47,8 +49,8 @@ impl ManifestWatcher {
     }
 
     async fn process_file(&self, path: &Path) -> Result<()> {
-        let content = std::fs::read_to_string(path)
-            .context(format!("Failed to read {}", path.display()))?;
+        let content =
+            std::fs::read_to_string(path).context(format!("Failed to read {}", path.display()))?;
 
         if content.trim().is_empty() {
             warn!("Empty manifest file: {}", path.display());
@@ -69,8 +71,7 @@ impl ManifestWatcher {
             // Set default namespace if not specified
             let resource = set_default_namespace(resource);
 
-            self.store.apply(resource)
-                .await?;
+            self.store.apply(resource).await?;
         }
 
         let mut processed = self.processed.write().await;
@@ -109,7 +110,10 @@ impl ManifestWatcher {
                     match event.kind {
                         EventKind::Create(_) => {
                             for path in &event.paths {
-                                if !path.extension().map_or(false, |e| e == "yaml" || e == "yml") {
+                                if !path
+                                    .extension()
+                                    .map_or(false, |e| e == "yaml" || e == "yml")
+                                {
                                     continue;
                                 }
                                 // Skip spurious Create events for files already loaded at startup
@@ -126,7 +130,10 @@ impl ManifestWatcher {
                         }
                         EventKind::Modify(_) => {
                             for path in &event.paths {
-                                if !path.extension().map_or(false, |e| e == "yaml" || e == "yml") {
+                                if !path
+                                    .extension()
+                                    .map_or(false, |e| e == "yaml" || e == "yml")
+                                {
                                     continue;
                                 }
                                 info!("Detected manifest update: {}", path.display());
@@ -162,14 +169,22 @@ fn collect_yaml_paths(root: &Path) -> Vec<std::path::PathBuf> {
     let mut result = Vec::new();
     let mut dirs = vec![root.to_path_buf()];
     while let Some(dir) = dirs.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
-                if path.file_name().map_or(false, |n| !n.to_string_lossy().starts_with('.')) {
+                if path
+                    .file_name()
+                    .map_or(false, |n| !n.to_string_lossy().starts_with('.'))
+                {
                     dirs.push(path);
                 }
-            } else if path.extension().map_or(false, |e| e == "yaml" || e == "yml") {
+            } else if path
+                .extension()
+                .map_or(false, |e| e == "yaml" || e == "yml")
+            {
                 result.push(path);
             }
         }

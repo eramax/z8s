@@ -1,6 +1,6 @@
+use crate::api::server::*;
 use axum::Router;
 use axum::routing::get;
-use crate::api::server::*;
 
 pub async fn list_endpointslices_all(State(state): State<AppState>) -> Json<List<EndpointSlice>> {
     list_endpointslices_ns(&state, None).await
@@ -13,16 +13,29 @@ pub async fn list_endpointslices(
     list_endpointslices_ns(&state, Some(namespace)).await
 }
 
-pub async fn list_endpointslices_ns(state: &AppState, namespace: Option<String>) -> Json<List<EndpointSlice>> {
+pub async fn list_endpointslices_ns(
+    state: &AppState,
+    namespace: Option<String>,
+) -> Json<List<EndpointSlice>> {
     let svc_trackers = state.store.get_by_kind("Service").await;
     let mut items = Vec::new();
     for t in &svc_trackers {
-        if namespace.as_deref().map_or(false, |ns| t.resource.namespace() != ns) { continue; }
+        if namespace
+            .as_deref()
+            .map_or(false, |ns| t.resource.namespace() != ns)
+        {
+            continue;
+        }
         if let AnyResource::Service(svc) = &t.resource {
             items.extend(state.ctx.net.compute_endpointslices(svc).await);
         }
     }
-    Json(List { kind: Some("EndpointSliceList".into()), api_version: None, items, metadata: make_list_meta() })
+    Json(List {
+        kind: Some("EndpointSliceList".into()),
+        api_version: None,
+        items,
+        metadata: make_list_meta(),
+    })
 }
 
 pub async fn get_endpointslice(
@@ -31,7 +44,9 @@ pub async fn get_endpointslice(
 ) -> Result<Json<EndpointSlice>, ApiError> {
     let trackers = state.store.get_by_kind("Service").await;
     for t in &trackers {
-        if t.resource.namespace() != namespace { continue; }
+        if t.resource.namespace() != namespace {
+            continue;
+        }
         if let AnyResource::Service(svc) = &t.resource {
             for ep in state.ctx.net.compute_endpointslices(svc).await {
                 if ep.metadata.name.as_deref() == Some(&name) {
@@ -40,12 +55,24 @@ pub async fn get_endpointslice(
             }
         }
     }
-    Err(ApiError::not_found(format!("endpointslices \"{}/{}\" not found", namespace, name)))
+    Err(ApiError::not_found(format!(
+        "endpointslices \"{}/{}\" not found",
+        namespace, name
+    )))
 }
 
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route("/apis/discovery.k8s.io/v1/endpointslices", get(list_endpointslices_all))
-        .route("/apis/discovery.k8s.io/v1/namespaces/{namespace}/endpointslices", get(list_endpointslices))
-        .route("/apis/discovery.k8s.io/v1/namespaces/{namespace}/endpointslices/{name}", get(get_endpointslice))
+        .route(
+            "/apis/discovery.k8s.io/v1/endpointslices",
+            get(list_endpointslices_all),
+        )
+        .route(
+            "/apis/discovery.k8s.io/v1/namespaces/{namespace}/endpointslices",
+            get(list_endpointslices),
+        )
+        .route(
+            "/apis/discovery.k8s.io/v1/namespaces/{namespace}/endpointslices/{name}",
+            get(get_endpointslice),
+        )
 }

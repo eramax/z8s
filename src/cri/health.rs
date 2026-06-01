@@ -58,12 +58,16 @@ impl HealthChecker {
             return HealthStatus::Unknown;
         }
         let result = tokio::time::timeout(timeout, async {
-            let child = Command::new(&cmd[0]).args(&cmd[1..]).kill_on_drop(true).spawn();
+            let child = Command::new(&cmd[0])
+                .args(&cmd[1..])
+                .kill_on_drop(true)
+                .spawn();
             match child {
                 Ok(mut c) => c.wait().await.map(|s| s.success()).unwrap_or(false),
                 Err(_) => false,
             }
-        }).await;
+        })
+        .await;
         match result {
             Ok(true) => HealthStatus::Healthy,
             _ => HealthStatus::Unhealthy,
@@ -82,13 +86,21 @@ impl HealthChecker {
         let result = tokio::time::timeout(timeout, async {
             let stream = TcpStream::connect(format!("{}:{}", host, port)).await?;
             let mut reader = BufReader::new(stream);
-            let req = format!("GET {} HTTP/1.0\r\nHost: {}\r\nConnection: close\r\n{}\r\n", path, host, extra_headers);
+            let req = format!(
+                "GET {} HTTP/1.0\r\nHost: {}\r\nConnection: close\r\n{}\r\n",
+                path, host, extra_headers
+            );
             reader.get_mut().write_all(req.as_bytes()).await?;
             let mut status_line = String::new();
             reader.read_line(&mut status_line).await?;
-            let code: u16 = status_line.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let code: u16 = status_line
+                .split_whitespace()
+                .nth(1)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
             Ok::<bool, std::io::Error>(code >= 200 && code < 400)
-        }).await;
+        })
+        .await;
         match result {
             Ok(Ok(true)) => HealthStatus::Healthy,
             _ => HealthStatus::Unhealthy,
@@ -100,7 +112,8 @@ impl HealthChecker {
         let port = probe.port;
         let result = tokio::time::timeout(timeout, async {
             TcpStream::connect(format!("{}:{}", host, port)).await
-        }).await;
+        })
+        .await;
         match result {
             Ok(Ok(_)) => HealthStatus::Healthy,
             _ => HealthStatus::Unhealthy,

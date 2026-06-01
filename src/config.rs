@@ -111,7 +111,10 @@ impl Config {
                             cfg.service_cidr_base = ip;
                             cfg.service_cidr_prefix = prefix;
                         } else {
-                            eprintln!("Invalid --service-cidr (expected e.g. 127.96.0.0/16): {}", v);
+                            eprintln!(
+                                "Invalid --service-cidr (expected e.g. 127.96.0.0/16): {}",
+                                v
+                            );
                             std::process::exit(1);
                         }
                     }
@@ -236,7 +239,10 @@ fn parse_cidr(s: &str) -> Option<([u8; 4], u8)> {
     if prefix > 32 {
         return None;
     }
-    let parts: Vec<u8> = ip_str.split('.').map(|p| p.parse().ok()).collect::<Option<Vec<_>>>()?;
+    let parts: Vec<u8> = ip_str
+        .split('.')
+        .map(|p| p.parse().ok())
+        .collect::<Option<Vec<_>>>()?;
     if parts.len() != 4 {
         return None;
     }
@@ -305,4 +311,3 @@ EXAMPLES:
     # Join as a worker
     z8s join ws://10.0.0.1:6443/ws/db --token mytoken
 ";
-

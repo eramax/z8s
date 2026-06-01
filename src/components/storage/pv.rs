@@ -1,11 +1,14 @@
-use async_trait::async_trait;
 use anyhow::Result;
+use async_trait::async_trait;
 use std::sync::Arc;
 
-use crate::store::{AnyResource, ResourceTracker};
-use crate::store::StoreBackend;
 use crate::components::{Component, ReconcileContext, ResourceCategory};
-use crate::types::{ObjectReference, PersistentVolume, PersistentVolumeClaim, PersistentVolumeClaimStatus, PersistentVolumeStatus};
+use crate::store::StoreBackend;
+use crate::store::{AnyResource, ResourceTracker};
+use crate::types::{
+    ObjectReference, PersistentVolume, PersistentVolumeClaim, PersistentVolumeClaimStatus,
+    PersistentVolumeStatus,
+};
 
 pub struct PvResource {
     pub store: Arc<dyn StoreBackend>,
@@ -19,9 +22,13 @@ impl PvResource {
 
 #[async_trait]
 impl Component for PvResource {
-    fn kind(&self) -> &'static str { "PersistentVolume" }
+    fn kind(&self) -> &'static str {
+        "PersistentVolume"
+    }
 
-    fn category(&self) -> ResourceCategory { ResourceCategory::Storage }
+    fn category(&self) -> ResourceCategory {
+        ResourceCategory::Storage
+    }
 
     async fn reconcile(&self, _ctx: &ReconcileContext, _tracker: &ResourceTracker) -> Result<()> {
         Ok(())
@@ -32,7 +39,12 @@ impl Component for PvResource {
             AnyResource::PersistentVolume(p) => p.clone(),
             _ => return Ok(()),
         };
-        if pv.spec.as_ref().and_then(|s| s.claim_ref.as_ref()).is_some() {
+        if pv
+            .spec
+            .as_ref()
+            .and_then(|s| s.claim_ref.as_ref())
+            .is_some()
+        {
             return Ok(());
         }
         let pv_name = match pv.metadata.name.as_deref() {
@@ -52,7 +64,9 @@ impl Component for PvResource {
             if pvc_spec.volume_name.is_some() {
                 continue;
             }
-            let Some(mut updated_pvc) = try_bind_pvc(&pv, &pvc) else { continue };
+            let Some(mut updated_pvc) = try_bind_pvc(&pv, &pvc) else {
+                continue;
+            };
 
             let mut updated_pv = pv.clone();
             if let Some(s) = updated_pv.spec.as_mut() {
@@ -68,8 +82,12 @@ impl Component for PvResource {
                 ..Default::default()
             });
 
-            self.store.apply(AnyResource::PersistentVolume(updated_pv)).await?;
-            self.store.apply(AnyResource::PersistentVolumeClaim(updated_pvc)).await?;
+            self.store
+                .apply(AnyResource::PersistentVolume(updated_pv))
+                .await?;
+            self.store
+                .apply(AnyResource::PersistentVolumeClaim(updated_pvc))
+                .await?;
             return Ok(());
         }
         Ok(())
@@ -83,30 +101,45 @@ impl Component for PvResource {
     }
 }
 
-fn try_bind_pvc(pv: &PersistentVolume, pvc: &PersistentVolumeClaim) -> Option<PersistentVolumeClaim> {
+fn try_bind_pvc(
+    pv: &PersistentVolume,
+    pvc: &PersistentVolumeClaim,
+) -> Option<PersistentVolumeClaim> {
     let pv_spec = pv.spec.as_ref()?;
     let pvc_spec = pvc.spec.as_ref()?;
 
-    let req_storage = pvc_spec.resources.as_ref()
+    let req_storage = pvc_spec
+        .resources
+        .as_ref()
         .and_then(|r| r.requests.as_ref())
         .and_then(|m| m.get("storage"))
         .map(|q| crate::store::parse_quantity_bytes(q))
         .unwrap_or(0);
 
-    let pv_capacity = pv_spec.capacity.as_ref()
+    let pv_capacity = pv_spec
+        .capacity
+        .as_ref()
         .and_then(|m| m.get("storage"))
         .map(|q| crate::store::parse_quantity_bytes(q))
         .unwrap_or(0);
 
-    if pv_capacity < req_storage { return None; }
+    if pv_capacity < req_storage {
+        return None;
+    }
 
-    let pv_modes: Vec<&str> = pv_spec.access_modes.as_ref()
+    let pv_modes: Vec<&str> = pv_spec
+        .access_modes
+        .as_ref()
         .map(|m| m.iter().map(|s| s.as_str()).collect())
         .unwrap_or_default();
-    let pvc_modes: Vec<&str> = pvc_spec.access_modes.as_ref()
+    let pvc_modes: Vec<&str> = pvc_spec
+        .access_modes
+        .as_ref()
         .map(|m| m.iter().map(|s| s.as_str()).collect())
         .unwrap_or_default();
-    if !pvc_modes.is_empty() && !pvc_modes.iter().all(|m| pv_modes.contains(m)) { return None; }
+    if !pvc_modes.is_empty() && !pvc_modes.iter().all(|m| pv_modes.contains(m)) {
+        return None;
+    }
 
     let pv_name = pv.metadata.name.as_deref()?;
     let mut updated_pvc = pvc.clone();

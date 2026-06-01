@@ -65,7 +65,9 @@ impl RedbBackend {
         lease.epoch += 1;
         lease.holder = holder.to_string();
         lease.acquired_at_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
         lease.expires_at_ms = lease.acquired_at_ms + 30_000;
     }
 }
@@ -149,7 +151,12 @@ impl StoreBackend for RedbBackend {
                     }
                 }
             }
-            tracing::debug!("DB get_by_kind({}): total_keys={}, matched={}", kind, total, result.len());
+            tracing::debug!(
+                "DB get_by_kind({}): total_keys={}, matched={}",
+                kind,
+                total,
+                result.len()
+            );
             Ok(result)
         })
         .await
@@ -224,7 +231,8 @@ mod tests {
     #[tokio::test]
     async fn delete_removes_entry() {
         let db = temp_db();
-        let yaml = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: delme\n  namespace: default\n";
+        let yaml =
+            "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: delme\n  namespace: default\n";
         let resource = crate::store::parse_manifest_yaml(yaml).unwrap().remove(0);
         db.apply(resource.clone()).await.unwrap();
         assert!(db.get("ConfigMap/default/delme").await.is_some());

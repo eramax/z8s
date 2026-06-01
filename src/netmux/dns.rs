@@ -37,7 +37,9 @@ pub async fn run_dns(store: Arc<dyn StoreBackend>, dns_records: DnsRecords) -> O
 async fn dns_loop(sock: UdpSocket, store: Arc<dyn StoreBackend>, dns_records: DnsRecords) {
     let sock = Arc::new(sock);
     let mut buf = [0u8; MAX_UDP];
-    let upstream = tokio::task::spawn_blocking(read_upstream_dns).await.unwrap_or_default();
+    let upstream = tokio::task::spawn_blocking(read_upstream_dns)
+        .await
+        .unwrap_or_default();
     loop {
         match sock.recv_from(&mut buf).await {
             Ok((n, src)) => {
@@ -47,7 +49,9 @@ async fn dns_loop(sock: UdpSocket, store: Arc<dyn StoreBackend>, dns_records: Dn
                 let upstream = upstream.clone();
                 let dns_records = dns_records.clone();
                 tokio::spawn(async move {
-                    if let Some(resp) = handle_query(&query, store.as_ref(), &upstream, &dns_records).await {
+                    if let Some(resp) =
+                        handle_query(&query, store.as_ref(), &upstream, &dns_records).await
+                    {
                         sock.send_to(&resp, src).await.ok();
                     }
                 });
@@ -107,7 +111,11 @@ fn parse_name(buf: &[u8], offset: &mut usize) -> Option<String> {
         if cur + len > buf.len() {
             return None;
         }
-        labels.push(std::str::from_utf8(&buf[cur..cur + len]).ok()?.to_lowercase());
+        labels.push(
+            std::str::from_utf8(&buf[cur..cur + len])
+                .ok()?
+                .to_lowercase(),
+        );
         cur += len;
     }
 
@@ -141,10 +149,10 @@ fn make_response(
         | if rd { 0x0180 } else { 0x0100 }           // RA|RD
         | (rcode as u16 & 0xF);
     out.extend_from_slice(&flags.to_be_bytes());
-    out.extend_from_slice(&1u16.to_be_bytes());       // QDCOUNT
+    out.extend_from_slice(&1u16.to_be_bytes()); // QDCOUNT
     out.extend_from_slice(&(answers.len() as u16).to_be_bytes()); // ANCOUNT
-    out.extend_from_slice(&0u16.to_be_bytes());       // NSCOUNT
-    out.extend_from_slice(&0u16.to_be_bytes());       // ARCOUNT
+    out.extend_from_slice(&0u16.to_be_bytes()); // NSCOUNT
+    out.extend_from_slice(&0u16.to_be_bytes()); // ARCOUNT
     // Question (copied verbatim)
     out.extend_from_slice(question_bytes);
     // Answers
@@ -157,10 +165,10 @@ fn make_response(
 fn a_record(name: &str, ip: [u8; 4]) -> Vec<u8> {
     let mut rr = Vec::new();
     rr.extend_from_slice(&encode_name(name));
-    rr.extend_from_slice(&1u16.to_be_bytes());   // TYPE A
-    rr.extend_from_slice(&1u16.to_be_bytes());   // CLASS IN
+    rr.extend_from_slice(&1u16.to_be_bytes()); // TYPE A
+    rr.extend_from_slice(&1u16.to_be_bytes()); // CLASS IN
     rr.extend_from_slice(&TTL.to_be_bytes());
-    rr.extend_from_slice(&4u16.to_be_bytes());   // RDLENGTH
+    rr.extend_from_slice(&4u16.to_be_bytes()); // RDLENGTH
     rr.extend_from_slice(&ip);
     rr
 }
@@ -169,8 +177,8 @@ fn cname_record(name: &str, target: &str) -> Vec<u8> {
     let encoded_target = encode_name(target);
     let mut rr = Vec::new();
     rr.extend_from_slice(&encode_name(name));
-    rr.extend_from_slice(&5u16.to_be_bytes());   // TYPE CNAME
-    rr.extend_from_slice(&1u16.to_be_bytes());   // CLASS IN
+    rr.extend_from_slice(&5u16.to_be_bytes()); // TYPE CNAME
+    rr.extend_from_slice(&1u16.to_be_bytes()); // CLASS IN
     rr.extend_from_slice(&TTL.to_be_bytes());
     rr.extend_from_slice(&(encoded_target.len() as u16).to_be_bytes());
     rr.extend_from_slice(&encoded_target);
@@ -219,10 +227,22 @@ async fn handle_query(
 
     // Check custom DNS records (populated by ingress hosts)
     {
-        let records = dns_records.read().unwrap_or_else(|e| { warn!("dns_records lock poisoned"); e.into_inner() });
+        let records = dns_records.read().unwrap_or_else(|e| {
+            warn!("dns_records lock poisoned");
+            e.into_inner()
+        });
         if let Some(ip) = records.get(name.trim_end_matches('.')) {
-            let ip_bytes = [ip.octets()[0], ip.octets()[1], ip.octets()[2], ip.octets()[3]];
-            let answers = if qtype == 28 { vec![] } else { vec![a_record(&name, ip_bytes)] };
+            let ip_bytes = [
+                ip.octets()[0],
+                ip.octets()[1],
+                ip.octets()[2],
+                ip.octets()[3],
+            ];
+            let answers = if qtype == 28 {
+                vec![]
+            } else {
+                vec![a_record(&name, ip_bytes)]
+            };
             return Some(make_response(id, rd, question_bytes, &answers, 0));
         }
     }
@@ -242,10 +262,18 @@ async fn handle_query(
             // For ExternalName services return CNAME pointing to external_name.
             // If it looks like an IP, return it as an A record directly.
             if let Some(ip_bytes) = parse_ipv4(&external_name) {
-                let answers = if qtype == 28 { vec![] } else { vec![a_record(&name, ip_bytes)] };
+                let answers = if qtype == 28 {
+                    vec![]
+                } else {
+                    vec![a_record(&name, ip_bytes)]
+                };
                 return Some(make_response(id, rd, question_bytes, &answers, 0));
             }
-            let answers = if qtype == 28 { vec![] } else { vec![cname_record(&name, &external_name)] };
+            let answers = if qtype == 28 {
+                vec![]
+            } else {
+                vec![cname_record(&name, &external_name)]
+            };
             return Some(make_response(id, rd, question_bytes, &answers, 0));
         }
         ServiceResolution::None => {}
@@ -381,11 +409,8 @@ async fn forward(query: &[u8], upstream: &[String]) -> Option<Vec<u8>> {
         if let Ok(sock) = UdpSocket::bind("0.0.0.0:0").await {
             if sock.send_to(query, addr).await.is_ok() {
                 let mut buf = [0u8; MAX_UDP];
-                match tokio::time::timeout(
-                    std::time::Duration::from_secs(3),
-                    sock.recv(&mut buf),
-                )
-                .await
+                match tokio::time::timeout(std::time::Duration::from_secs(3), sock.recv(&mut buf))
+                    .await
                 {
                     Ok(Ok(n)) => return Some(buf[..n].to_vec()),
                     _ => continue,

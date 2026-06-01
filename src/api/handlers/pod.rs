@@ -1,6 +1,6 @@
+use crate::api::server::*;
 use axum::Router;
 use axum::routing::{any, get};
-use crate::api::server::*;
 
 pub async fn list_pods_all(
     State(state): State<AppState>,
@@ -10,16 +10,20 @@ pub async fn list_pods_all(
     list_pods_in_ns(state, None, raw_query.as_deref().unwrap_or(""), headers).await
 }
 
-
 pub async fn list_pods(
     State(state): State<AppState>,
     Path(namespace): Path<String>,
     axum::extract::RawQuery(raw_query): axum::extract::RawQuery,
     headers: axum::http::HeaderMap,
 ) -> Result<axum::response::Response, ApiError> {
-    list_pods_in_ns(state, Some(namespace), raw_query.as_deref().unwrap_or(""), headers).await
+    list_pods_in_ns(
+        state,
+        Some(namespace),
+        raw_query.as_deref().unwrap_or(""),
+        headers,
+    )
+    .await
 }
-
 
 pub async fn list_pods_in_ns(
     state: AppState,
@@ -32,7 +36,10 @@ pub async fn list_pods_in_ns(
     let trackers = state.store.get_by_kind("Pod").await;
     let mut items = Vec::new();
     for t in &trackers {
-        if namespace.as_deref().map_or(true, |ns| t.resource.namespace() == ns) {
+        if namespace
+            .as_deref()
+            .map_or(true, |ns| t.resource.namespace() == ns)
+        {
             if !label_selector.is_empty() {
                 if let AnyResource::Pod(pod) = &t.resource {
                     let labels = pod.metadata.labels.clone().unwrap_or_default();
@@ -42,9 +49,22 @@ pub async fn list_pods_in_ns(
                 }
             }
             let ready = state.process_tracker.is_ready(t.resource.name()).await;
-            let restarts = state.process_tracker.pod_restart_counts(t.resource.name()).await;
-            let ip = state.process_tracker.pod_ip(t.resource.name()).await.map(|a| a.to_string());
-            items.push(resource_to_pod_json_with_status(&t.resource, &t.state, ready, &restarts, ip.as_deref()));
+            let restarts = state
+                .process_tracker
+                .pod_restart_counts(t.resource.name())
+                .await;
+            let ip = state
+                .process_tracker
+                .pod_ip(t.resource.name())
+                .await
+                .map(|a| a.to_string());
+            items.push(resource_to_pod_json_with_status(
+                &t.resource,
+                &t.state,
+                ready,
+                &restarts,
+                ip.as_deref(),
+            ));
         }
     }
     if accepts_table(&headers) {
@@ -58,7 +78,6 @@ pub async fn list_pods_in_ns(
     .into_response())
 }
 
-
 pub async fn get_pod(
     State(state): State<AppState>,
     Path((namespace, name)): Path<(String, String)>,
@@ -67,14 +86,26 @@ pub async fn get_pod(
     for t in &trackers {
         if t.resource.namespace() == namespace && t.resource.name() == name {
             let ready = state.process_tracker.is_ready(t.resource.name()).await;
-            let restarts = state.process_tracker.pod_restart_counts(t.resource.name()).await;
-            let ip = state.process_tracker.pod_ip(t.resource.name()).await.map(|a| a.to_string());
-            return Ok(Json(resource_to_pod_json_with_status(&t.resource, &t.state, ready, &restarts, ip.as_deref())));
+            let restarts = state
+                .process_tracker
+                .pod_restart_counts(t.resource.name())
+                .await;
+            let ip = state
+                .process_tracker
+                .pod_ip(t.resource.name())
+                .await
+                .map(|a| a.to_string());
+            return Ok(Json(resource_to_pod_json_with_status(
+                &t.resource,
+                &t.state,
+                ready,
+                &restarts,
+                ip.as_deref(),
+            )));
         }
     }
     Err(ApiError::not_found(format!("pod \"{}\" not found", name)))
 }
-
 
 pub async fn get_pod_log(
     State(state): State<AppState>,
@@ -93,7 +124,6 @@ pub async fn get_pod_log(
     }
     Err(ApiError::not_found(format!("pod \"{}\" not found", name)))
 }
-
 
 pub async fn pod_handler(
     method: Method,
@@ -123,21 +153,40 @@ pub async fn pod_handler(
             }
             fill_pod_metadata(&mut pod);
             let resource = AnyResource::Pod(pod);
-            state.apply_and_broadcast(resource.clone()).await
+            state
+                .apply_and_broadcast(resource.clone())
+                .await
                 .map_err(|e| ApiError::bad_request(e.to_string()))?;
             let pod_name = resource.name().to_string();
             let already_running = state.process_tracker.is_running(&pod_name).await;
             if !already_running {
                 state.registry.on_apply(&state.ctx, &resource).await;
-                state.store.update_state(&resource.uid(), ResourceState::Running).await;
+                state
+                    .store
+                    .update_state(&resource.uid(), ResourceState::Running)
+                    .await;
             }
-            let tracker_state = state.store.get(&resource.uid()).await
+            let tracker_state = state
+                .store
+                .get(&resource.uid())
+                .await
                 .map(|t| t.state)
                 .unwrap_or(ResourceState::Pending);
             let is_ready = state.process_tracker.is_ready(&pod_name).await;
             let restarts = state.process_tracker.pod_restart_counts(&pod_name).await;
-            let ip = state.process_tracker.pod_ip(&pod_name).await.map(|a| a.to_string());
-            Ok(Json(resource_to_pod_json_with_status(&resource, &tracker_state, is_ready, &restarts, ip.as_deref())).into_response())
+            let ip = state
+                .process_tracker
+                .pod_ip(&pod_name)
+                .await
+                .map(|a| a.to_string());
+            Ok(Json(resource_to_pod_json_with_status(
+                &resource,
+                &tracker_state,
+                is_ready,
+                &restarts,
+                ip.as_deref(),
+            ))
+            .into_response())
         }
         _ => Err(ApiError::method_not_allowed("method not allowed".into())),
     }
@@ -176,22 +225,43 @@ pub async fn create_pod(
     }
     fill_pod_metadata(&mut pod);
     let resource = AnyResource::Pod(pod);
-    state.apply_and_broadcast(resource.clone()).await
+    state
+        .apply_and_broadcast(resource.clone())
+        .await
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
 
     state.registry.on_apply(&state.ctx, &resource).await;
 
     let pod_state = ResourceState::Running;
     state.store.update_state(&resource.uid(), pod_state).await;
-    let tracker_state = state.store.get(&resource.uid()).await
+    let tracker_state = state
+        .store
+        .get(&resource.uid())
+        .await
         .map(|t| t.state)
         .unwrap_or(ResourceState::Pending);
     let is_ready = state.process_tracker.is_ready(resource.name()).await;
-    let restarts = state.process_tracker.pod_restart_counts(resource.name()).await;
-    let ip = state.process_tracker.pod_ip(resource.name()).await.map(|a| a.to_string());
-    Ok((StatusCode::CREATED, Json(resource_to_pod_json_with_status(&resource, &tracker_state, is_ready, &restarts, ip.as_deref()))).into_response())
+    let restarts = state
+        .process_tracker
+        .pod_restart_counts(resource.name())
+        .await;
+    let ip = state
+        .process_tracker
+        .pod_ip(resource.name())
+        .await
+        .map(|a| a.to_string());
+    Ok((
+        StatusCode::CREATED,
+        Json(resource_to_pod_json_with_status(
+            &resource,
+            &tracker_state,
+            is_ready,
+            &restarts,
+            ip.as_deref(),
+        )),
+    )
+        .into_response())
 }
-
 
 pub fn fill_pod_metadata(pod: &mut crate::types::Pod) {
     let meta = &mut pod.metadata;
@@ -207,7 +277,6 @@ pub fn fill_pod_metadata(pod: &mut crate::types::Pod) {
         meta.uid = Some(format!("Pod/{}/{}", ns, name));
     }
 }
-
 
 pub fn resource_to_pod_json_with_status(
     resource: &AnyResource,
@@ -256,10 +325,13 @@ pub fn resource_to_pod_json_with_status(
                     let crash_loop = restarts >= 3 && !is_ready;
                     let cstate = Some(if is_ready {
                         ContainerState {
-                            running: Some(ContainerStateRunning { started_at: Some(time.clone()) }),
+                            running: Some(ContainerStateRunning {
+                                started_at: Some(time.clone()),
+                            }),
                             ..Default::default()
                         }
-                    } else if matches!(state, ResourceState::Succeeded | ResourceState::Terminated) {
+                    } else if matches!(state, ResourceState::Succeeded | ResourceState::Terminated)
+                    {
                         ContainerState {
                             terminated: Some(ContainerStateTerminated {
                                 exit_code: 0,
@@ -281,7 +353,14 @@ pub fn resource_to_pod_json_with_status(
                     } else {
                         ContainerState {
                             waiting: Some(ContainerStateWaiting {
-                                reason: Some(if crash_loop { "CrashLoopBackOff" } else { "ContainerCreating" }.into()),
+                                reason: Some(
+                                    if crash_loop {
+                                        "CrashLoopBackOff"
+                                    } else {
+                                        "ContainerCreating"
+                                    }
+                                    .into(),
+                                ),
                                 ..Default::default()
                             }),
                             ..Default::default()
@@ -290,7 +369,11 @@ pub fn resource_to_pod_json_with_status(
                     ContainerStatus {
                         name: c.name.clone(),
                         image: c.image.clone().unwrap_or_default(),
-                        image_id: c.image.clone().map(|i| format!("z8s://{}", i)).unwrap_or_default(),
+                        image_id: c
+                            .image
+                            .clone()
+                            .map(|i| format!("z8s://{}", i))
+                            .unwrap_or_default(),
                         ready: is_ready,
                         restart_count: restarts,
                         container_id: Some(format!("z8s://{}", c.name)),
@@ -301,7 +384,11 @@ pub fn resource_to_pod_json_with_status(
                 })
                 .collect()
         }),
-        message: if let ResourceState::Failed(msg) = state { Some(msg.clone()) } else { None },
+        message: if let ResourceState::Failed(msg) = state {
+            Some(msg.clone())
+        } else {
+            None
+        },
         reason: if restart_counts.values().any(|&v| v >= 3) && !is_ready {
             Some("CrashLoopBackOff".into())
         } else {
@@ -317,11 +404,7 @@ pub fn resource_to_pod_json_with_status(
     serde_json::to_value(&pod).unwrap_or_default()
 }
 
-pub fn pod_condition(
-    type_: &str,
-    status: &str,
-    time: &crate::types::Time,
-) -> PodCondition {
+pub fn pod_condition(type_: &str, status: &str, time: &crate::types::Time) -> PodCondition {
     PodCondition {
         type_: type_.into(),
         status: status.into(),
@@ -329,7 +412,6 @@ pub fn pod_condition(
         ..Default::default()
     }
 }
-
 
 pub fn pod_list_to_table(items: &[serde_json::Value]) -> serde_json::Value {
     let columns = serde_json::json!([
@@ -350,7 +432,10 @@ pub fn pod_list_to_table(items: &[serde_json::Value]) -> serde_json::Value {
             let (ready, total, restarts) = status["containerStatuses"]
                 .as_array()
                 .map(|cs| {
-                    let ready = cs.iter().filter(|c| c["ready"].as_bool().unwrap_or(false)).count();
+                    let ready = cs
+                        .iter()
+                        .filter(|c| c["ready"].as_bool().unwrap_or(false))
+                        .count();
                     let restarts: i32 = cs
                         .iter()
                         .map(|c| c["restartCount"].as_i64().unwrap_or(0) as i32)
@@ -366,7 +451,6 @@ pub fn pod_list_to_table(items: &[serde_json::Value]) -> serde_json::Value {
         .collect();
     make_table(columns, rows)
 }
-
 
 pub fn extract_label_selector(raw_query: &str) -> Vec<(String, Option<String>)> {
     if raw_query.is_empty() {
@@ -384,7 +468,6 @@ pub fn extract_label_selector(raw_query: &str) -> Vec<(String, Option<String>)> 
     vec![]
 }
 
-
 pub fn parse_label_selector(raw: &str) -> Vec<(String, Option<String>)> {
     if raw.is_empty() {
         return vec![];
@@ -394,14 +477,16 @@ pub fn parse_label_selector(raw: &str) -> Vec<(String, Option<String>)> {
         .map(|req| {
             let req = urlpath_decode(req.trim());
             if let Some((k, v)) = req.split_once('=') {
-                (k.trim().to_string(), Some(v.trim_start_matches('=').to_string()))
+                (
+                    k.trim().to_string(),
+                    Some(v.trim_start_matches('=').to_string()),
+                )
             } else {
                 (req, None)
             }
         })
         .collect()
 }
-
 
 pub fn urlpath_decode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -424,7 +509,6 @@ pub fn urlpath_decode(s: &str) -> String {
     out
 }
 
-
 pub fn labels_match_selector(
     selector: &[(String, Option<String>)],
     labels: &std::collections::BTreeMap<String, String>,
@@ -446,12 +530,23 @@ pub fn labels_match_selector(
     true
 }
 
-
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/v1/pods", get(list_pods_all))
-        .route("/api/v1/namespaces/{namespace}/pods", get(list_pods).post(create_pod))
-        .route("/api/v1/namespaces/{namespace}/pods/{name}", any(pod_handler))
-        .route("/api/v1/namespaces/{namespace}/pods/{name}/log", get(get_pod_log))
-        .route("/api/v1/namespaces/{namespace}/pods/{name}/exec", get(crate::cri::exec::exec_handler).post(crate::cri::exec::exec_post_handler))
+        .route(
+            "/api/v1/namespaces/{namespace}/pods",
+            get(list_pods).post(create_pod),
+        )
+        .route(
+            "/api/v1/namespaces/{namespace}/pods/{name}",
+            any(pod_handler),
+        )
+        .route(
+            "/api/v1/namespaces/{namespace}/pods/{name}/log",
+            get(get_pod_log),
+        )
+        .route(
+            "/api/v1/namespaces/{namespace}/pods/{name}/exec",
+            get(crate::cri::exec::exec_handler).post(crate::cri::exec::exec_post_handler),
+        )
 }

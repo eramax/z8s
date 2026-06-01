@@ -1,9 +1,9 @@
+use crate::types::{LabelSelector, NetworkPolicy};
+use anyhow::Result;
 use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
-use anyhow::Result;
 use tracing::{info, warn};
-use crate::types::{NetworkPolicy, LabelSelector};
 
 use super::NetMux;
 
@@ -53,9 +53,15 @@ impl NetworkPolicyController {
                     if let Some(ps) = &peer.pod_selector {
                         self.create_policy_set(&set_name, ps).await?;
                         // Fix Bug #4: use 0.0.0.0/0 as destination (match all dest IPs)
-                        self.netmux.nft.add_forward_allow_set_src(&set_name, "0.0.0.0/0").await?;
+                        self.netmux
+                            .nft
+                            .add_forward_allow_set_src(&set_name, "0.0.0.0/0")
+                            .await?;
 
-                        let mut sets = self.sets.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() });
+                        let mut sets = self.sets.lock().unwrap_or_else(|e| {
+                            tracing::warn!("mutex poisoned");
+                            e.into_inner()
+                        });
                         sets.entry(set_name).or_insert_with(|| PolicySet {
                             ip_addrs: Vec::new(),
                             pod_selector: Some(ps.clone()),
@@ -68,9 +74,15 @@ impl NetworkPolicyController {
                         // For now, create a set with a placeholder name
                         let ns_set_name = format!("np:ns:{}:{}:{}", ns, name, idx);
                         self.netmux.nft.create_set(&ns_set_name, &[]).await?;
-                        self.netmux.nft.add_forward_allow_set_src(&ns_set_name, "0.0.0.0/0").await?;
+                        self.netmux
+                            .nft
+                            .add_forward_allow_set_src(&ns_set_name, "0.0.0.0/0")
+                            .await?;
 
-                        let mut sets = self.sets.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() });
+                        let mut sets = self.sets.lock().unwrap_or_else(|e| {
+                            tracing::warn!("mutex poisoned");
+                            e.into_inner()
+                        });
                         sets.entry(ns_set_name).or_insert_with(|| PolicySet {
                             ip_addrs: Vec::new(),
                             pod_selector: None,
@@ -80,9 +92,15 @@ impl NetworkPolicyController {
 
                     if let Some(ip_block) = &peer.ip_block {
                         // ipBlock: allow/deny by CIDR
-                        self.netmux.nft.add_forward_allow(&ip_block.cidr, "0.0.0.0/0").await?;
+                        self.netmux
+                            .nft
+                            .add_forward_allow(&ip_block.cidr, "0.0.0.0/0")
+                            .await?;
                         for except in ip_block.except.as_deref().unwrap_or(&[]) {
-                            self.netmux.nft.add_forward_deny(except, "0.0.0.0/0").await?;
+                            self.netmux
+                                .nft
+                                .add_forward_deny(except, "0.0.0.0/0")
+                                .await?;
                         }
                     }
                 }
@@ -100,16 +118,42 @@ impl NetworkPolicyController {
     }
 
     /// Update a pod in all matching NetworkPolicy sets.
-    pub async fn update_pod(&self, pod_ip: Ipv4Addr, labels: &BTreeMap<String, String>, _ns: &str) -> Result<()> {
+    pub async fn update_pod(
+        &self,
+        pod_ip: Ipv4Addr,
+        labels: &BTreeMap<String, String>,
+        _ns: &str,
+    ) -> Result<()> {
         let to_update: Vec<String> = {
-            let mut sets = self.sets.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() });
-            sets.iter_mut().filter_map(|(n, ps)| {
-                let matches = ps.pod_selector.as_ref().map_or(true, |sel| labels_match_selector(labels, sel));
-                if matches && !ps.ip_addrs.contains(&pod_ip) { ps.ip_addrs.push(pod_ip); Some(n.clone()) } else { None }
-            }).collect()
+            let mut sets = self.sets.lock().unwrap_or_else(|e| {
+                tracing::warn!("mutex poisoned");
+                e.into_inner()
+            });
+            sets.iter_mut()
+                .filter_map(|(n, ps)| {
+                    let matches = ps
+                        .pod_selector
+                        .as_ref()
+                        .map_or(true, |sel| labels_match_selector(labels, sel));
+                    if matches && !ps.ip_addrs.contains(&pod_ip) {
+                        ps.ip_addrs.push(pod_ip);
+                        Some(n.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect()
         };
         for name in &to_update {
-            let ips = { let s = self.sets.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() }); s.get(name).map(|ps| ps.ip_addrs.clone()).unwrap_or_default() };
+            let ips = {
+                let s = self.sets.lock().unwrap_or_else(|e| {
+                    tracing::warn!("mutex poisoned");
+                    e.into_inner()
+                });
+                s.get(name)
+                    .map(|ps| ps.ip_addrs.clone())
+                    .unwrap_or_default()
+            };
             if let Err(e) = self.netmux.nft.replace_set(name, &ips).await {
                 warn!("Failed to update set '{}': {}", name, e);
             }
@@ -120,14 +164,28 @@ impl NetworkPolicyController {
     /// Remove a pod from all matching NetworkPolicy sets.
     pub async fn remove_pod(&self, pod_ip: Ipv4Addr) -> Result<()> {
         let to_update: Vec<String> = {
-            let mut sets = self.sets.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() });
-            sets.iter_mut().filter_map(|(n, ps)| {
-                let pos = ps.ip_addrs.iter().position(|ip| *ip == pod_ip)?;
-                ps.ip_addrs.remove(pos); Some(n.clone())
-            }).collect()
+            let mut sets = self.sets.lock().unwrap_or_else(|e| {
+                tracing::warn!("mutex poisoned");
+                e.into_inner()
+            });
+            sets.iter_mut()
+                .filter_map(|(n, ps)| {
+                    let pos = ps.ip_addrs.iter().position(|ip| *ip == pod_ip)?;
+                    ps.ip_addrs.remove(pos);
+                    Some(n.clone())
+                })
+                .collect()
         };
         for name in &to_update {
-            let ips = { let s = self.sets.lock().unwrap_or_else(|e| { tracing::warn!("mutex poisoned"); e.into_inner() }); s.get(name).map(|ps| ps.ip_addrs.clone()).unwrap_or_default() };
+            let ips = {
+                let s = self.sets.lock().unwrap_or_else(|e| {
+                    tracing::warn!("mutex poisoned");
+                    e.into_inner()
+                });
+                s.get(name)
+                    .map(|ps| ps.ip_addrs.clone())
+                    .unwrap_or_default()
+            };
             if let Err(e) = self.netmux.nft.replace_set(name, &ips).await {
                 warn!("Failed to update set '{}': {}", name, e);
             }

@@ -16,7 +16,11 @@ impl Reconciler {
         ctx: Arc<ReconcileContext>,
         process_tracker: Arc<ProcessTracker>,
     ) -> Self {
-        Self { registry, ctx, process_tracker }
+        Self {
+            registry,
+            ctx,
+            process_tracker,
+        }
     }
 
     pub async fn run(&self) {
@@ -26,7 +30,9 @@ impl Reconciler {
             ticker.tick().await;
             let reaped = self.process_tracker.reap_zombies();
             if !reaped.is_empty() {
-                self.process_tracker.handle_exited_containers(reaped, &self.ctx.store).await;
+                self.process_tracker
+                    .handle_exited_containers(reaped, &self.ctx.store)
+                    .await;
             }
             self.registry.reconcile_all(&self.ctx).await;
         }

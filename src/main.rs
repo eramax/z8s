@@ -47,7 +47,8 @@ fn acquire_lock(path: &str) -> Result<std::fs::File> {
             .open(path)
             .map_err(|e| anyhow::anyhow!("Failed to open lock file {path}: {e}"))?;
 
-        let ret = unsafe { nix::libc::flock(file.as_raw_fd(), nix::libc::LOCK_EX | nix::libc::LOCK_NB) };
+        let ret =
+            unsafe { nix::libc::flock(file.as_raw_fd(), nix::libc::LOCK_EX | nix::libc::LOCK_NB) };
         if ret == 0 {
             // Lock acquired — write our PID
             use std::os::unix::io::AsRawFd;
@@ -91,7 +92,8 @@ fn detect_main_port() -> Option<u16> {
     }
     // Find which port lock has this PID
     let locks = scan_lock_files();
-    locks.iter()
+    locks
+        .iter()
         .find(|(_, pid)| *pid == main_pid)
         .map(|(port, _)| *port)
 }
@@ -99,11 +101,16 @@ fn detect_main_port() -> Option<u16> {
 /// Scan /tmp for z8s lock files and return (port, pid) pairs for live processes.
 fn scan_lock_files() -> Vec<(u16, i32)> {
     let mut result = Vec::new();
-    let Ok(entries) = std::fs::read_dir(Z8S_RUN_DIR) else { return result };
+    let Ok(entries) = std::fs::read_dir(Z8S_RUN_DIR) else {
+        return result;
+    };
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
         // Match z8s-<port>.lock
-        if let Some(port_str) = name.strip_prefix("z8s-").and_then(|s| s.strip_suffix(".lock")) {
+        if let Some(port_str) = name
+            .strip_prefix("z8s-")
+            .and_then(|s| s.strip_suffix(".lock"))
+        {
             if let Ok(port) = port_str.parse::<u16>() {
                 if let Some(pid) = read_lock_pid(&entry.path().to_string_lossy()) {
                     if is_pid_alive(pid) {
@@ -167,7 +174,8 @@ fn is_pid_dstate(pid: i32) -> bool {
 fn print_help() {
     if let Ok(path) = std::env::current_exe() {
         let name = path.file_name().unwrap_or_default().to_string_lossy();
-        eprintln!("Usage: {name} [SUBCOMMAND] [OPTIONS]
+        eprintln!(
+            "Usage: {name} [SUBCOMMAND] [OPTIONS]
 
 Commands:
   run          Start the node server (called internally by spawner)
@@ -181,7 +189,8 @@ Commands:
 
 Options:
   --port <PORT>  API server listen port     [default: 6443]
-  -h, --help     Show this help message");
+  -h, --help     Show this help message"
+        );
     }
 }
 
@@ -222,9 +231,14 @@ fn main() -> Result<()> {
         Some("join") => {
             crate::config::init();
             let cfg = crate::config::get();
-            let url = args.get(2).expect("Usage: z8s join <ws-url> [--token <token>]");
-            let token = args.iter().position(|a| a == "--token")
-                .and_then(|i| args.get(i + 1)).map(|s| s.clone());
+            let url = args
+                .get(2)
+                .expect("Usage: z8s join <ws-url> [--token <token>]");
+            let token = args
+                .iter()
+                .position(|a| a == "--token")
+                .and_then(|i| args.get(i + 1))
+                .map(|s| s.clone());
             let token = token.or_else(|| cfg.join_token.clone());
             let url = url.to_string();
             let rt = tokio::runtime::Runtime::new()?;
@@ -260,15 +274,18 @@ fn main() -> Result<()> {
 // ── Helper functions ────────────────────────────────────────────────
 
 fn parse_port(args: &[String], default: u16) -> u16 {
-    args.iter().position(|a| a == "--port")
+    args.iter()
+        .position(|a| a == "--port")
         .and_then(|i| args.get(i + 1))
         .and_then(|v| v.parse().ok())
         .unwrap_or(default)
 }
 
 fn parse_opt_arg(args: &[String], flag: &str) -> Option<String> {
-    args.iter().position(|a| a == flag)
-        .and_then(|i| args.get(i + 1)).cloned()
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1))
+        .cloned()
 }
 
 fn default_start(args: &[String]) -> Result<()> {
@@ -349,7 +366,9 @@ fn stop_z8s() -> Result<()> {
 fn send_shutdown(pid: i32) {
     // D-state processes are stuck in kernel — can't be killed by userspace
     if is_pid_dstate(pid) {
-        eprintln!("PID {pid} is stuck in D-state (kernel zombie) — cannot be killed. Reboot required.");
+        eprintln!(
+            "PID {pid} is stuck in D-state (kernel zombie) — cannot be killed. Reboot required."
+        );
         return;
     }
 
@@ -413,7 +432,9 @@ fn send_shutdown(pid: i32) {
 /// Removes stale lock files and z8s nftables tables.
 fn cleanup_external(pid: i32) {
     // Remove stale lock files for this PID
-    let Ok(entries) = std::fs::read_dir(Z8S_RUN_DIR) else { return };
+    let Ok(entries) = std::fs::read_dir(Z8S_RUN_DIR) else {
+        return;
+    };
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
         if name == "z8s.lock" || name.starts_with("z8s-") {
@@ -428,7 +449,10 @@ fn cleanup_external(pid: i32) {
 
     // Remove z8s nftables tables from outside (the stuck process can't do it)
     eprintln!("Cleaning up nftables from external process...");
-    if let Ok(output) = std::process::Command::new("sudo").args(["nft", "list", "tables", "ip"]).output() {
+    if let Ok(output) = std::process::Command::new("sudo")
+        .args(["nft", "list", "tables", "ip"])
+        .output()
+    {
         let stdout = String::from_utf8_lossy(&output.stdout);
         for line in stdout.lines() {
             if line.starts_with("table ip z8s_nat") || line.starts_with("table ip z8s_filter") {
@@ -484,7 +508,11 @@ fn show_status() -> Result<()> {
 
     let mut found = false;
     for (port, pid) in &locks {
-        let role = if global_pid == Some(*pid) { "main" } else { "node" };
+        let role = if global_pid == Some(*pid) {
+            "main"
+        } else {
+            "node"
+        };
         if is_pid_dstate(*pid) {
             println!("{role}:{port}  PID={pid}  (stuck in D-state, needs reboot)");
         } else {
@@ -517,12 +545,18 @@ fn node_start(args: &[String]) -> Result<()> {
     let peer_host = parse_opt_arg(args, "--peer-addr").unwrap_or_else(|| "127.0.0.1".to_string());
     let mut node_args = vec![
         "run".to_string(),
-        "--port".to_string(), node_port.to_string(),
-        "--node-name".to_string(), format!("node-{}", node_port),
-        "--peers".to_string(), format!("main={}:{}", peer_host, main_port),
-        "--db-path".to_string(), format!("{Z8S_RUN_DIR}/z8s-node-{node_port}.redb"),
-        "--data-dir".to_string(), format!("{Z8S_RUN_DIR}/z8s-node-{node_port}-data"),
-        "--manifests-dir".to_string(), format!("{Z8S_RUN_DIR}/z8s-node-{node_port}-manifests"),
+        "--port".to_string(),
+        node_port.to_string(),
+        "--node-name".to_string(),
+        format!("node-{}", node_port),
+        "--peers".to_string(),
+        format!("main={}:{}", peer_host, main_port),
+        "--db-path".to_string(),
+        format!("{Z8S_RUN_DIR}/z8s-node-{node_port}.redb"),
+        "--data-dir".to_string(),
+        format!("{Z8S_RUN_DIR}/z8s-node-{node_port}-data"),
+        "--manifests-dir".to_string(),
+        format!("{Z8S_RUN_DIR}/z8s-node-{node_port}-manifests"),
     ];
     // Create the directories
     std::fs::create_dir_all(format!("{Z8S_RUN_DIR}/z8s-node-{node_port}-data")).ok();
@@ -589,7 +623,11 @@ fn node_list() -> Result<()> {
 
     let mut found = false;
     for (port, pid) in &locks {
-        let role = if global_pid == Some(*pid) { "main" } else { "node" };
+        let role = if global_pid == Some(*pid) {
+            "main"
+        } else {
+            "node"
+        };
         println!("{role}:{port}  PID={pid}");
         found = true;
     }
@@ -603,13 +641,19 @@ fn node_list() -> Result<()> {
 fn find_z8s_pids() -> Vec<i32> {
     let mut pids = Vec::new();
     let self_pid = std::process::id() as i32;
-    let Ok(entries) = std::fs::read_dir("/proc") else { return pids };
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return pids;
+    };
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
-        if !name_str.chars().all(|c| c.is_ascii_digit()) { continue; }
+        if !name_str.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
         if let Ok(pid) = name_str.parse::<i32>() {
-            if pid == self_pid { continue; }
+            if pid == self_pid {
+                continue;
+            }
             if let Ok(comm) = std::fs::read_to_string(format!("/proc/{pid}/comm")) {
                 if comm.trim() == "z8s" {
                     pids.push(pid);
@@ -626,14 +670,16 @@ fn spawn_daemon(args: &[&str], port: u16) -> Result<std::process::Child> {
     let log_path = format!("{Z8S_RUN_DIR}/z8s-daemon-{port}.log");
     let log_file = std::fs::File::create(&log_path)
         .map_err(|e| anyhow::anyhow!("Cannot create log file {log_path}: {e}"))?;
-    let log_file_err = log_file.try_clone()
+    let log_file_err = log_file
+        .try_clone()
         .map_err(|e| anyhow::anyhow!("Cannot clone log file handle: {e}"))?;
     let mut cmd = std::process::Command::new(&self_path);
     cmd.args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::from(log_file))
         .stderr(std::process::Stdio::from(log_file_err));
-    cmd.spawn().map_err(|e| anyhow::anyhow!("Failed to spawn z8s: {e}"))
+    cmd.spawn()
+        .map_err(|e| anyhow::anyhow!("Failed to spawn z8s: {e}"))
 }
 
 /// Connect to a cluster as a worker via WebSocket.
@@ -651,9 +697,14 @@ async fn join_cluster(url: &str, _token: Option<String>) {
                 loop {
                     match read.next().await {
                         Some(Ok(msg)) => {
-                            if msg.is_close() { break; }
+                            if msg.is_close() {
+                                break;
+                            }
                         }
-                        Some(Err(e)) => { warn!("WebSocket error: {}", e); break; }
+                        Some(Err(e)) => {
+                            warn!("WebSocket error: {}", e);
+                            break;
+                        }
                         None => break,
                         _ => {}
                     }

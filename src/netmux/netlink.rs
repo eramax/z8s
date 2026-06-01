@@ -1,11 +1,10 @@
+use anyhow::{Context, Result};
 /// SAFETY: All netlink operations use raw libc FFI because rtnetlink
 /// functions (veth creation, routes, addresses) are not available via
 /// the `nix` crate. Each unsafe block is justified inline.
-
 use std::mem;
 use std::net::Ipv4Addr;
 use std::os::fd::AsRawFd;
-use anyhow::{Context, Result};
 
 pub const RTM_NEWLINK: u16 = 16;
 pub const RTM_DELLINK: u16 = 17;
@@ -112,7 +111,8 @@ pub fn nlattr<T: Copy>(nla_type: u16, data: &T) -> Vec<u8> {
     buf[0..2].copy_from_slice(&(size as u16).to_ne_bytes());
     buf[2..4].copy_from_slice(&nla_type.to_ne_bytes());
     // SAFETY: T is Copy, data points to valid memory of known size (mem::size_of::<T>())
-    let data_bytes = unsafe { std::slice::from_raw_parts(data as *const T as *const u8, mem::size_of::<T>()) };
+    let data_bytes =
+        unsafe { std::slice::from_raw_parts(data as *const T as *const u8, mem::size_of::<T>()) };
     buf[4..].copy_from_slice(data_bytes);
     buf
 }
@@ -123,7 +123,7 @@ pub fn nlattr_bytes(nla_type: u16, data: &[u8]) -> Vec<u8> {
     let mut buf = vec![0u8; size];
     buf[0..2].copy_from_slice(&(size as u16).to_ne_bytes());
     buf[2..4].copy_from_slice(&nla_type.to_ne_bytes());
-    buf[4..4+data.len()].copy_from_slice(data);
+    buf[4..4 + data.len()].copy_from_slice(data);
     buf
 }
 
@@ -143,7 +143,12 @@ fn check_nl_response(resp: &[u8], context: &str) -> Result<()> {
         if msg_type == NLMSG_ERROR && resp.len() >= 20 {
             let err_code = i32::from_ne_bytes([resp[16], resp[17], resp[18], resp[19]]);
             if err_code != 0 {
-                return Err(anyhow::anyhow!("{}: netlink error {} ({})", context, err_code, nix::errno::Errno::from_raw(err_code as i32)));
+                return Err(anyhow::anyhow!(
+                    "{}: netlink error {} ({})",
+                    context,
+                    err_code,
+                    nix::errno::Errno::from_raw(err_code as i32)
+                ));
             }
         }
     }
@@ -152,7 +157,11 @@ fn check_nl_response(resp: &[u8], context: &str) -> Result<()> {
 
 // ── Veth creation ───────────────────────────────────────────────────────────
 
-pub fn create_veth_pair(host_name: &str, peer_name: &str, peer_pid: Option<u32>) -> Result<(u32, u32)> {
+pub fn create_veth_pair(
+    host_name: &str,
+    peer_name: &str,
+    peer_pid: Option<u32>,
+) -> Result<(u32, u32)> {
     let fd = netlink_socket()?;
 
     let mut peer_data = Vec::new();
@@ -180,7 +189,8 @@ pub fn create_veth_pair(host_name: &str, peer_name: &str, peer_pid: Option<u32>)
 
     buf[0..4].copy_from_slice(&(total_len as u32).to_ne_bytes());
     buf[4..6].copy_from_slice(&RTM_NEWLINK.to_ne_bytes());
-    buf[6..8].copy_from_slice(&(NLM_F_REQUEST | NLM_F_CREATE | NLM_F_EXCL | NLM_F_ACK).to_ne_bytes());
+    buf[6..8]
+        .copy_from_slice(&(NLM_F_REQUEST | NLM_F_CREATE | NLM_F_EXCL | NLM_F_ACK).to_ne_bytes());
     buf[8..12].copy_from_slice(&1u32.to_ne_bytes());
     buf[12..16].copy_from_slice(&0u32.to_ne_bytes());
 
@@ -194,7 +204,7 @@ pub fn create_veth_pair(host_name: &str, peer_name: &str, peer_pid: Option<u32>)
 
     let mut offset = 32;
     for attr in [&ifname_attr, &mtu_attr, &info_nested] {
-        buf[offset..offset+attr.len()].copy_from_slice(attr);
+        buf[offset..offset + attr.len()].copy_from_slice(attr);
         offset += attr.len();
     }
 
@@ -207,7 +217,11 @@ pub fn create_veth_pair(host_name: &str, peer_name: &str, peer_pid: Option<u32>)
     // Peer ifindex can only be obtained from its own netns when created
     // with IFLA_NET_NS_PID. We look it up in the host for now and handle
     // the peer ifindex from inside the pod netns later.
-    let peer_idx = if peer_pid.is_some() { 0 } else { get_ifindex(peer_name)? };
+    let peer_idx = if peer_pid.is_some() {
+        0
+    } else {
+        get_ifindex(peer_name)?
+    };
 
     Ok((host_idx, peer_idx))
 }
@@ -233,7 +247,7 @@ pub fn get_ifindex(name: &str) -> Result<u32> {
     buf[28..32].copy_from_slice(&0u32.to_ne_bytes());
 
     let offset = 32;
-    buf[offset..offset+name_attr.len()].copy_from_slice(&name_attr);
+    buf[offset..offset + name_attr.len()].copy_from_slice(&name_attr);
 
     send_nlmsg(&fd, &buf)?;
     let resp = recv_nlmsg(&fd)?;
@@ -276,7 +290,12 @@ pub fn set_link_up(ifindex: u32) -> Result<()> {
     check_nl_response(&resp, "set_link_up")
 }
 
-pub fn add_route(dest: &Ipv4Addr, prefix: u8, gateway: Option<&Ipv4Addr>, oif: Option<u32>) -> Result<()> {
+pub fn add_route(
+    dest: &Ipv4Addr,
+    prefix: u8,
+    gateway: Option<&Ipv4Addr>,
+    oif: Option<u32>,
+) -> Result<()> {
     let fd = netlink_socket()?;
 
     let dest_bytes = dest.octets();
@@ -293,7 +312,11 @@ pub fn add_route(dest: &Ipv4Addr, prefix: u8, gateway: Option<&Ipv4Addr>, oif: O
         attrs.push(nlattr(RTA_OIF, &idx));
     }
 
-    let scope = if gateway.is_some() { RT_SCOPE_UNIVERSE } else { RT_SCOPE_LINK };
+    let scope = if gateway.is_some() {
+        RT_SCOPE_UNIVERSE
+    } else {
+        RT_SCOPE_LINK
+    };
     let attrs_len: usize = attrs.iter().map(|a| a.len()).sum();
     let total_len = 16 + 12 + attrs_len; // nlmsghdr(16) + rtmsg(12) + attrs
     let mut buf = vec![0u8; total_len];
@@ -320,7 +343,7 @@ pub fn add_route(dest: &Ipv4Addr, prefix: u8, gateway: Option<&Ipv4Addr>, oif: O
 
     let mut offset = 28;
     for attr in &attrs {
-        buf[offset..offset+attr.len()].copy_from_slice(attr);
+        buf[offset..offset + attr.len()].copy_from_slice(attr);
         offset += attr.len();
     }
 
@@ -330,7 +353,12 @@ pub fn add_route(dest: &Ipv4Addr, prefix: u8, gateway: Option<&Ipv4Addr>, oif: O
     check_nl_response(&resp, "add_route")
 }
 
-pub fn del_route(dest: &Ipv4Addr, prefix: u8, gateway: Option<&Ipv4Addr>, oif: Option<u32>) -> Result<()> {
+pub fn del_route(
+    dest: &Ipv4Addr,
+    prefix: u8,
+    gateway: Option<&Ipv4Addr>,
+    oif: Option<u32>,
+) -> Result<()> {
     let fd = netlink_socket()?;
 
     let dest_bytes = dest.octets();
@@ -370,7 +398,7 @@ pub fn del_route(dest: &Ipv4Addr, prefix: u8, gateway: Option<&Ipv4Addr>, oif: O
 
     let mut offset = 28;
     for attr in &attrs {
-        buf[offset..offset+attr.len()].copy_from_slice(attr);
+        buf[offset..offset + attr.len()].copy_from_slice(attr);
         offset += attr.len();
     }
 
@@ -392,7 +420,8 @@ pub fn add_addr(ifindex: u32, ip: &Ipv4Addr, prefix: u8) -> Result<()> {
 
     buf[0..4].copy_from_slice(&(total_len as u32).to_ne_bytes());
     buf[4..6].copy_from_slice(&RTM_NEWADDR.to_ne_bytes());
-    buf[6..8].copy_from_slice(&(NLM_F_REQUEST | NLM_F_CREATE | NLM_F_EXCL | NLM_F_ACK).to_ne_bytes());
+    buf[6..8]
+        .copy_from_slice(&(NLM_F_REQUEST | NLM_F_CREATE | NLM_F_EXCL | NLM_F_ACK).to_ne_bytes());
     buf[8..12].copy_from_slice(&1u32.to_ne_bytes());
     buf[12..16].copy_from_slice(&0u32.to_ne_bytes());
 
@@ -404,7 +433,7 @@ pub fn add_addr(ifindex: u32, ip: &Ipv4Addr, prefix: u8) -> Result<()> {
 
     let mut offset = 24;
     for attr in [&local_attr, &addr_attr] {
-        buf[offset..offset+attr.len()].copy_from_slice(attr);
+        buf[offset..offset + attr.len()].copy_from_slice(attr);
         offset += attr.len();
     }
 
@@ -443,8 +472,7 @@ pub fn del_link(ifindex: u32) -> Result<()> {
 pub fn enable_ip_forward() -> Result<()> {
     let val = "1\n".as_bytes().to_vec();
     tokio::task::block_in_place(|| {
-        std::fs::write("/proc/sys/net/ipv4/ip_forward", &val)
-            .context("Failed to enable ip_forward")
+        std::fs::write("/proc/sys/net/ipv4/ip_forward", &val).context("Failed to enable ip_forward")
     })
 }
 
@@ -478,7 +506,11 @@ pub fn ensure_loopback_up() -> Result<()> {
     // Uses raw libc socket because nix::sys::socket returns OwnedFd which may
     // conflict with Rust 2024 IO safety when the fd is used for ioctl.
     unsafe {
-        let fd = nix::libc::socket(nix::libc::AF_INET, nix::libc::SOCK_DGRAM | nix::libc::SOCK_CLOEXEC, 0);
+        let fd = nix::libc::socket(
+            nix::libc::AF_INET,
+            nix::libc::SOCK_DGRAM | nix::libc::SOCK_CLOEXEC,
+            0,
+        );
         if fd < 0 {
             return Err(std::io::Error::last_os_error()).context("loopback socket");
         }
@@ -496,5 +528,3 @@ pub fn ensure_loopback_up() -> Result<()> {
     }
     Ok(())
 }
-
-

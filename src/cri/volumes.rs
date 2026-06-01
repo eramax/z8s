@@ -1,5 +1,5 @@
 use anyhow::Result;
-use nix::mount::{mount, MsFlags};
+use nix::mount::{MsFlags, mount};
 use std::path::Path;
 use tracing::{info, warn};
 
@@ -162,15 +162,31 @@ pub fn stage_volumes_in_rootfs(rootfs_path: &str, volumes: &[ResolvedVolume]) {
         }
         if src.is_dir() {
             if std::os::unix::fs::symlink(src, &dst).is_ok() {
-                info!("Staged volume in rootfs {} → {}", vol.host_path, dst.display());
+                info!(
+                    "Staged volume in rootfs {} → {}",
+                    vol.host_path,
+                    dst.display()
+                );
             } else if copy_tree(src, &dst).is_ok() {
-                info!("Copied volume into rootfs {} → {}", vol.host_path, dst.display());
+                info!(
+                    "Copied volume into rootfs {} → {}",
+                    vol.host_path,
+                    dst.display()
+                );
             }
         } else if src.is_file() {
             if std::os::unix::fs::symlink(src, &dst).is_ok() {
-                info!("Staged volume file in rootfs {} → {}", vol.host_path, dst.display());
+                info!(
+                    "Staged volume file in rootfs {} → {}",
+                    vol.host_path,
+                    dst.display()
+                );
             } else if std::fs::copy(src, &dst).is_ok() {
-                info!("Copied volume file into rootfs {} → {}", vol.host_path, dst.display());
+                info!(
+                    "Copied volume file into rootfs {} → {}",
+                    vol.host_path,
+                    dst.display()
+                );
             }
         }
     }
@@ -248,13 +264,11 @@ pub fn cleanup_emptydir(pod_uid: &str) {
     let emptydir_base = format!("{}/emptydir", base);
     let safe_uid = pod_uid.replace('/', "_");
     let prefix = format!("{}-", safe_uid);
-    let Ok(entries) = std::fs::read_dir(&emptydir_base) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        if name.to_string_lossy().starts_with(&prefix) {
-            std::fs::remove_dir_all(entry.path()).ok();
-        }
-    }
+
+    // Use a subprocess to prevent the async runtime or z8s threads from
+    // getting stuck in D-state on broken kernfs/overlayfs mounts.
+    let _ = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("rm -rf {}/{}*", emptydir_base, prefix))
+        .spawn(); // ignore errors, fire and forget
 }

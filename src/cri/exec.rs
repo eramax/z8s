@@ -1,15 +1,13 @@
-use crate::cri::rootfs;
 use crate::api::server::AppState;
-use std::sync::Arc;
-use tokio::sync::Mutex;
+use crate::cri::rootfs;
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use axum::extract::{Path, State, WebSocketUpgrade};
-use axum::http::request::Parts;
 use axum::http::StatusCode;
+use axum::http::request::Parts;
 use axum::response::IntoResponse;
 use futures_util::{SinkExt, StreamExt};
 use nix::fcntl::OFlag;
-use nix::mount::{mount, MsFlags};
+use nix::mount::{MsFlags, mount};
 use nix::pty;
 use nix::sched::CloneFlags;
 use nix::sys::termios::{self, InputFlags, LocalFlags, OutputFlags, SetArg};
@@ -18,8 +16,10 @@ use std::os::fd::OwnedFd;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::process::Stdio;
-use tokio::process::Command;
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::process::Command;
+use tokio::sync::Mutex;
 use tracing::info;
 
 use crate::cri::runtime::RunningContainer;
@@ -143,10 +143,30 @@ pub async fn exec_handler(
     info!(pod = %name, ns = %namespace, cmds = ?cmds, container = ?params.container, tty, "Exec WS");
     let info = resolve_container(&state, &name, params.container.as_deref()).await;
     let rootfs_pid = info.as_ref().and_then(|i| i.rootfs_pid.clone());
-    let env_vars = info.as_ref().map(|i| i.env_vars.clone()).unwrap_or_default();
+    let env_vars = info
+        .as_ref()
+        .map(|i| i.env_vars.clone())
+        .unwrap_or_default();
     let isolated_net = info.as_ref().map(|i| i.isolated_net).unwrap_or(false);
-    ws.protocols(["v5.channel.k8s.io", "v4.channel.k8s.io", "v3.channel.k8s.io", "channel.k8s.io"])
-        .on_upgrade(move |socket| exec_ws(socket, cmds, rootfs_pid, env_vars, isolated_net, tty, stdin_flag, stdout_flag, stderr_flag))
+    ws.protocols([
+        "v5.channel.k8s.io",
+        "v4.channel.k8s.io",
+        "v3.channel.k8s.io",
+        "channel.k8s.io",
+    ])
+    .on_upgrade(move |socket| {
+        exec_ws(
+            socket,
+            cmds,
+            rootfs_pid,
+            env_vars,
+            isolated_net,
+            tty,
+            stdin_flag,
+            stdout_flag,
+            stderr_flag,
+        )
+    })
 }
 
 pub async fn exec_post_handler(
@@ -184,13 +204,20 @@ async fn resolve_container(
     let rc = if let Some(container) = container_name {
         running.get(&format!("{}-{}", pod_name, container))
     } else {
-        running.iter().find(|(k, _)| k.starts_with(&prefix)).map(|(_, v)| v)
+        running
+            .iter()
+            .find(|(k, _)| k.starts_with(&prefix))
+            .map(|(_, v)| v)
     }?;
 
     let env_vars = rc.instance.env_vars.clone();
     let rootfs = rc.instance.rootfs.clone();
     let pid = rc.instance.pid?;
-    let rootfs_pid = if rootfs.is_empty() { None } else { Some((rootfs, pid)) };
+    let rootfs_pid = if rootfs.is_empty() {
+        None
+    } else {
+        Some((rootfs, pid))
+    };
 
     Some(ContainerExecInfo {
         rootfs_pid,
@@ -210,8 +237,7 @@ fn spawn_with_pty(
         .map_err(|e| format!("posix_openpt: {}", e))?;
     pty::grantpt(&master).map_err(|e| format!("grantpt: {}", e))?;
     pty::unlockpt(&master).map_err(|e| format!("unlockpt: {}", e))?;
-    let slave_name =
-        unsafe { pty::ptsname(&master) }.map_err(|e| format!("ptsname: {}", e))?;
+    let slave_name = unsafe { pty::ptsname(&master) }.map_err(|e| format!("ptsname: {}", e))?;
 
     let slave = std::fs::OpenOptions::new()
         .read(true)
@@ -241,10 +267,14 @@ fn spawn_with_pty(
 
     child_cmd
         .stdin(Stdio::from(
-            slave.try_clone().map_err(|e| format!("clone stdin: {}", e))?,
+            slave
+                .try_clone()
+                .map_err(|e| format!("clone stdin: {}", e))?,
         ))
         .stdout(Stdio::from(
-            slave.try_clone().map_err(|e| format!("clone stdout: {}", e))?,
+            slave
+                .try_clone()
+                .map_err(|e| format!("clone stdout: {}", e))?,
         ))
         .stderr(Stdio::from(slave));
     child_cmd.kill_on_drop(true);
@@ -331,14 +361,20 @@ fn enter_container_namespaces(
     if use_mnt_ns {
         if let Some(ref mnt) = ns.mnt {
             nix::sched::setns(mnt, CloneFlags::CLONE_NEWNS).map_err(|e| {
-                std::io::Error::new(std::io::ErrorKind::Other, format!("setns(CLONE_NEWNS): {e}"))
+                std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("setns(CLONE_NEWNS): {e}"),
+                )
             })?;
         }
     }
     if isolated_net {
         if let Some(ref net) = ns.net {
             nix::sched::setns(net, CloneFlags::CLONE_NEWNET).map_err(|e| {
-                std::io::Error::new(std::io::ErrorKind::Other, format!("setns(CLONE_NEWNET): {e}"))
+                std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("setns(CLONE_NEWNET): {e}"),
+                )
             })?;
         }
     }
@@ -359,7 +395,9 @@ fn read_container_path(pid: u32) -> String {
             }
         }
     }
-    std::env::var("PATH").unwrap_or_else(|_| "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string())
+    std::env::var("PATH").unwrap_or_else(|_| {
+        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string()
+    })
 }
 
 fn build_command(
@@ -379,7 +417,9 @@ fn build_command(
             }
         }
         if !has_path {
-            let fallback_path = std::env::var("PATH").unwrap_or_else(|_| "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string());
+            let fallback_path = std::env::var("PATH").unwrap_or_else(|_| {
+                "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string()
+            });
             if let Some((_, pid)) = rootfs_pid {
                 c.env("PATH", read_container_path(pid));
             } else {
@@ -399,7 +439,10 @@ fn build_command(
 
         let ns_fds = try_open_namespace_fds(container_pid);
         if ns_fds.mnt.is_none() {
-            tracing::warn!("exec: cannot open mnt namespace for PID {} (stale PID?). Falling back to host namespace.", container_pid);
+            tracing::warn!(
+                "exec: cannot open mnt namespace for PID {} (stale PID?). Falling back to host namespace.",
+                container_pid
+            );
         }
         let can_enter_mnt = ns_fds.mnt.is_some();
         let (exec_path, prog_args) = if can_enter_mnt {
@@ -438,7 +481,9 @@ fn build_command(
                         }
                         // Child: mount fresh procfs scoped to this PID namespace.
                         if let Err(e) = mount(
-                            Some("proc"), "/proc", Some("proc"),
+                            Some("proc"),
+                            "/proc",
+                            Some("proc"),
                             MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC | MsFlags::MS_NODEV,
                             None::<&str>,
                         ) {
@@ -486,12 +531,37 @@ async fn exec_ws(
 
     let cmd = cmds[0].clone();
     let args: Vec<&str> = cmds.iter().skip(1).map(|s| s.as_str()).collect();
-    info!("Exec WS: cmd={}, args={:?}, rootfs={:?}, tty={}", cmd, args, rootfs_pid.as_ref().map(|(r, _)| r.as_str()), tty);
+    info!(
+        "Exec WS: cmd={}, args={:?}, rootfs={:?}, tty={}",
+        cmd,
+        args,
+        rootfs_pid.as_ref().map(|(r, _)| r.as_str()),
+        tty
+    );
 
     if tty {
-        exec_ws_tty(socket, &cmd, &args, rootfs_pid.as_ref().map(|(r, p)| (r.as_str(), *p)), &env_vars, isolated_net).await
+        exec_ws_tty(
+            socket,
+            &cmd,
+            &args,
+            rootfs_pid.as_ref().map(|(r, p)| (r.as_str(), *p)),
+            &env_vars,
+            isolated_net,
+        )
+        .await
     } else {
-        exec_ws_pipes(socket, &cmd, &args, rootfs_pid.as_ref().map(|(r, p)| (r.as_str(), *p)), &env_vars, isolated_net, stdin_flag, stdout_flag, stderr_flag).await
+        exec_ws_pipes(
+            socket,
+            &cmd,
+            &args,
+            rootfs_pid.as_ref().map(|(r, p)| (r.as_str(), *p)),
+            &env_vars,
+            isolated_net,
+            stdin_flag,
+            stdout_flag,
+            stderr_flag,
+        )
+        .await
     }
 }
 
@@ -501,24 +571,39 @@ fn error_frame(msg: &str) -> Message {
         "status": "Failure", "message": msg, "code": 500
     });
     let mut frame = vec![3u8];
-    frame.extend_from_slice(serde_json::to_string(&status_json).unwrap_or_default().as_bytes());
+    frame.extend_from_slice(
+        serde_json::to_string(&status_json)
+            .unwrap_or_default()
+            .as_bytes(),
+    );
     Message::Binary(axum::body::Bytes::from(frame))
 }
 
-async fn send_error_and_close(ws_tx: &mut futures_util::stream::SplitSink<WebSocket, Message>, msg: &str) {
+async fn send_error_and_close(
+    ws_tx: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    msg: &str,
+) {
     send_exit_status_msg(ws_tx, 1, Some(msg)).await;
 }
 
-async fn exec_ws_tty(socket: WebSocket, cmd: &str, args: &[&str], rootfs_pid: Option<(&str, u32)>, env_vars: &[(String, String)], isolated_net: bool) {
+async fn exec_ws_tty(
+    socket: WebSocket,
+    cmd: &str,
+    args: &[&str],
+    rootfs_pid: Option<(&str, u32)>,
+    env_vars: &[(String, String)],
+    isolated_net: bool,
+) {
     let (mut ws_tx, mut ws_rx) = socket.split();
 
-    let (master, mut child_cmd) = match spawn_with_pty(cmd, args, rootfs_pid, env_vars, isolated_net) {
-        Ok(pair) => pair,
-        Err(e) => {
-            send_error_and_close(&mut ws_tx, &format!("pty setup: {}", e)).await;
-            return;
-        }
-    };
+    let (master, mut child_cmd) =
+        match spawn_with_pty(cmd, args, rootfs_pid, env_vars, isolated_net) {
+            Ok(pair) => pair,
+            Err(e) => {
+                send_error_and_close(&mut ws_tx, &format!("pty setup: {}", e)).await;
+                return;
+            }
+        };
 
     let mut child = match child_cmd.spawn() {
         Ok(c) => c,
@@ -531,8 +616,7 @@ async fn exec_ws_tty(socket: WebSocket, cmd: &str, args: &[&str], rootfs_pid: Op
 
     info!("Exec WS TTY: child PID {:?}", child.id());
 
-    let async_master =
-        tokio::io::unix::AsyncFd::new(master).expect("AsyncFd for PTY master");
+    let async_master = tokio::io::unix::AsyncFd::new(master).expect("AsyncFd for PTY master");
     let mut read_buf = vec![0u8; 4096];
 
     loop {
@@ -642,8 +726,16 @@ async fn exec_ws_pipes(
     info!("Exec WS pipes: child PID {:?}", child.id());
 
     let child_stdin = if stdin_flag { child.stdin.take() } else { None };
-    let child_stdout = if stdout_flag { child.stdout.take() } else { None };
-    let child_stderr = if stderr_flag { child.stderr.take() } else { None };
+    let child_stdout = if stdout_flag {
+        child.stdout.take()
+    } else {
+        None
+    };
+    let child_stderr = if stderr_flag {
+        child.stderr.take()
+    } else {
+        None
+    };
 
     let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<Message>(64);
 
@@ -659,7 +751,11 @@ async fn exec_ws_pipes(
                     Ok(n) => {
                         let mut frame = vec![1u8];
                         frame.extend_from_slice(&buf[..n]);
-                        if out_tx.send(Message::Binary(axum::body::Bytes::from(frame))).await.is_err() {
+                        if out_tx
+                            .send(Message::Binary(axum::body::Bytes::from(frame)))
+                            .await
+                            .is_err()
+                        {
                             break;
                         }
                     }
@@ -680,7 +776,11 @@ async fn exec_ws_pipes(
                     Ok(n) => {
                         let mut frame = vec![2u8];
                         frame.extend_from_slice(&buf[..n]);
-                        if out_tx.send(Message::Binary(axum::body::Bytes::from(frame))).await.is_err() {
+                        if out_tx
+                            .send(Message::Binary(axum::body::Bytes::from(frame)))
+                            .await
+                            .is_err()
+                        {
                             break;
                         }
                     }
@@ -773,7 +873,10 @@ async fn exec_ws_pipes(
     send_exit_status(&mut tx, exit_code).await;
 }
 
-async fn send_exit_status(ws_tx: &mut futures_util::stream::SplitSink<WebSocket, Message>, exit_code: i32) {
+async fn send_exit_status(
+    ws_tx: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    exit_code: i32,
+) {
     send_exit_status_msg(ws_tx, exit_code, None).await;
 }
 
@@ -795,8 +898,14 @@ async fn send_exit_status_msg(
         "details": { "exitCode": exit_code }
     });
     let mut frame = vec![3u8];
-    frame.extend_from_slice(serde_json::to_string(&status_json).unwrap_or_default().as_bytes());
-    let _ = ws_tx.send(Message::Binary(axum::body::Bytes::from(frame))).await;
+    frame.extend_from_slice(
+        serde_json::to_string(&status_json)
+            .unwrap_or_default()
+            .as_bytes(),
+    );
+    let _ = ws_tx
+        .send(Message::Binary(axum::body::Bytes::from(frame)))
+        .await;
     let _ = ws_tx
         .send(Message::Close(Some(CloseFrame {
             code: 1000,

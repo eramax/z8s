@@ -1,5 +1,5 @@
 pub use crate::store::{
-    parse_manifest_yaml, parse_quantity_bytes, parse_quantity_cpu, extract_containers,
-    AnyResource, ResourceState, ResourceTracker,
+    AnyResource, ResourceState, ResourceTracker, extract_containers, parse_manifest_yaml,
+    parse_quantity_bytes, parse_quantity_cpu,
 };
-pub use crate::store::{StoreBackend, MemoryBackend};
+pub use crate::store::{MemoryBackend, StoreBackend};
