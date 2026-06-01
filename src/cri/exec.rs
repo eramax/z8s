@@ -219,7 +219,31 @@ fn spawn_with_pty(
         let _ = rootfs::setup_exec_mounts(root);
     }
 
-    let mut child_cmd = build_command(cmd, args, rootfs_pid, env_vars, isolated_net);
+    let (mut child_cmd, ctx) = build_command(cmd, args, rootfs_pid, env_vars, isolated_net);
+
+    if let Some(ctx) = ctx {
+        unsafe {
+            child_cmd.as_std_mut().pre_exec(move || {
+                exec_container_pre_exec(&ctx)?;
+                let _ = nix::unistd::chdir("/");
+                let _ = nix::unistd::setsid();
+                nix::libc::ioctl(0, nix::libc::TIOCSCTTY as _, 0);
+                nix::libc::tcsetpgrp(0, nix::libc::getpid());
+                for sig in [
+                    nix::libc::SIGINT,
+                    nix::libc::SIGHUP,
+                    nix::libc::SIGTERM,
+                    nix::libc::SIGPIPE,
+                    nix::libc::SIGTSTP,
+                    nix::libc::SIGTTIN,
+                    nix::libc::SIGTTOU,
+                ] {
+                    nix::libc::signal(sig, nix::libc::SIG_DFL);
+                }
+                Ok(())
+            });
+        }
+    }
 
     child_cmd
         .stdin(Stdio::from(
@@ -230,32 +254,6 @@ fn spawn_with_pty(
         ))
         .stderr(Stdio::from(slave));
     child_cmd.kill_on_drop(true);
-
-    let ns = rootfs_pid.map(|(_, pid)| try_open_namespace_fds(pid));
-
-    unsafe {
-        child_cmd.as_std_mut().pre_exec(move || {
-            if let Some(ref ns) = ns {
-                let _ = enter_container_namespaces(ns, isolated_net, true);
-                let _ = nix::unistd::chdir("/");
-            }
-            let _ = nix::unistd::setsid();
-            nix::libc::ioctl(0, nix::libc::TIOCSCTTY as _, 0);
-            nix::libc::tcsetpgrp(0, nix::libc::getpid());
-            for sig in [
-                nix::libc::SIGINT,
-                nix::libc::SIGHUP,
-                nix::libc::SIGTERM,
-                nix::libc::SIGPIPE,
-                nix::libc::SIGTSTP,
-                nix::libc::SIGTTIN,
-                nix::libc::SIGTTOU,
-            ] {
-                nix::libc::signal(sig, nix::libc::SIG_DFL);
-            }
-            Ok(())
-        });
-    }
 
     Ok((master, child_cmd))
 }
@@ -271,7 +269,15 @@ fn spawn_with_pipes(
         let _ = rootfs::setup_exec_mounts(root);
     }
 
-    let mut child_cmd = build_command(cmd, args, rootfs_pid, env_vars, isolated_net);
+    let (mut child_cmd, ctx) = build_command(cmd, args, rootfs_pid, env_vars, isolated_net);
+
+    if let Some(ctx) = ctx {
+        unsafe {
+            child_cmd.as_std_mut().pre_exec(move || {
+                exec_container_pre_exec(&ctx)
+            });
+        }
+    }
 
     child_cmd
         .stdin(Stdio::piped())
@@ -284,6 +290,7 @@ fn spawn_with_pipes(
 
 struct NamespaceFds {
     user: Option<OwnedFd>,
+    pid: Option<OwnedFd>,
     mnt: Option<OwnedFd>,
     net: Option<OwnedFd>,
 }
@@ -296,6 +303,7 @@ fn try_open_namespace_fds(container_pid: u32) -> NamespaceFds {
     let open_one = |path: &str| nix::fcntl::open(path, open_flags, mode).ok();
     NamespaceFds {
         user: open_one(&format!("/proc/{}/ns/user", container_pid)),
+        pid: open_one(&format!("/proc/{}/ns/pid", container_pid)),
         mnt: open_one(&format!("/proc/{}/ns/mnt", container_pid)),
         net: open_one(&format!("/proc/{}/ns/net", container_pid)),
     }
@@ -314,16 +322,6 @@ fn enter_container_namespaces(
             nix::sched::setns(mnt, CloneFlags::CLONE_NEWNS).map_err(|e| {
                 std::io::Error::new(std::io::ErrorKind::Other, format!("setns(CLONE_NEWNS): {e}"))
             })?;
-            // Mount a fresh procfs so the exec'd process can see itself in /proc.
-            // We avoid setns(CLONE_NEWPID) because it creates a ghost PID not
-            // visible in the container's existing procfs, breaking tools like ps.
-            let _ = mount(
-                Some("proc"),
-                "/proc",
-                Some("proc"),
-                MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC | MsFlags::MS_NODEV,
-                None::<&str>,
-            );
         }
     }
     if isolated_net {
@@ -332,6 +330,47 @@ fn enter_container_namespaces(
                 std::io::Error::new(std::io::ErrorKind::Other, format!("setns(CLONE_NEWNET): {e}"))
             })?;
         }
+    }
+    Ok(())
+}
+
+fn exec_container_pre_exec(ctx: &ExecCtx) -> Result<(), std::io::Error> {
+    let _ = enter_container_namespaces(&ctx.ns, ctx.iso_net, ctx.use_mnt_ns);
+    if ctx.use_mnt_ns {
+        if let Some(ref pid) = ctx.ns.pid {
+            let _ = nix::sched::setns(pid, CloneFlags::CLONE_NEWPID);
+            let child = unsafe { nix::libc::fork() };
+            if child == 0 {
+                let _ = mount(
+                    Some("proc"),
+                    "/proc",
+                    Some("proc"),
+                    MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC | MsFlags::MS_NODEV,
+                    None::<&str>,
+                );
+                if let Some(g) = ctx.c_gid {
+                    let _ = nix::unistd::setgid(nix::unistd::Gid::from_raw(g));
+                }
+                if let Some(u) = ctx.c_uid {
+                    let _ = nix::unistd::setuid(nix::unistd::Uid::from_raw(u));
+                }
+                return Ok(());
+            }
+            let mut status: i32 = 0;
+            unsafe { nix::libc::waitpid(child, &mut status as *mut i32, 0) };
+            let code = if nix::libc::WIFEXITED(status) {
+                nix::libc::WEXITSTATUS(status)
+            } else {
+                1
+            };
+            std::process::exit(code);
+        }
+    }
+    if let Some(g) = ctx.c_gid {
+        let _ = nix::unistd::setgid(nix::unistd::Gid::from_raw(g));
+    }
+    if let Some(u) = ctx.c_uid {
+        let _ = nix::unistd::setuid(nix::unistd::Uid::from_raw(u));
     }
     Ok(())
 }
@@ -349,13 +388,21 @@ fn read_container_path(pid: u32) -> String {
     std::env::var("PATH").unwrap_or_else(|_| "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string())
 }
 
+struct ExecCtx {
+    ns: NamespaceFds,
+    use_mnt_ns: bool,
+    c_uid: Option<u32>,
+    c_gid: Option<u32>,
+    iso_net: bool,
+}
+
 fn build_command(
     cmd: &str,
     args: &[&str],
     rootfs_pid: Option<(&str, u32)>,
     env_vars: &[(String, String)],
     isolated_net: bool,
-) -> Command {
+) -> (Command, Option<ExecCtx>) {
     let apply_env = |c: &mut Command| {
         c.env_clear();
         let mut has_path = false;
@@ -417,27 +464,14 @@ fn build_command(
             }
         }
 
-        let iso_net = isolated_net;
-        unsafe {
-            c.as_std_mut().pre_exec(move || {
-                let _ = enter_container_namespaces(&ns, iso_net, use_mnt_ns);
-                if let Some(g) = c_gid {
-                    let _ = nix::unistd::setgid(nix::unistd::Gid::from_raw(g));
-                }
-                if let Some(u) = c_uid {
-                    let _ = nix::unistd::setuid(nix::unistd::Uid::from_raw(u));
-                }
-                Ok(())
-            });
-        }
-        c
+        (c, Some(ExecCtx { ns, use_mnt_ns, c_uid, c_gid, iso_net: isolated_net }))
     } else {
         let mut c = Command::new(cmd);
         for a in args {
             c.arg(a);
         }
         apply_env(&mut c);
-        c
+        (c, None)
     }
 }
 
