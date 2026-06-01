@@ -24,3 +24,21 @@ sleep 3
 tests/netmux/test_hub_spoke_setup.sh
 
 
+
+
+# 1. Kill z8s
+sudo pkill -9 -f z8s
+
+# 2. Iterate and unmount all stuck rootfs locations
+for mount in $(mount | grep /var/lib/z8s | awk '{print $3}'); do sudo umount -f $mount; done
+for mount in $(mount | grep /tmp/z8s | awk '{print $3}'); do sudo umount -f $mount; done
+
+# 3. Nuke the databases and data folders now that mounts are clear
+sudo rm -rf /var/lib/z8s/z8s.redb /tmp/z8s-node-7443.redb
+sudo rm -rf /var/lib/z8s/rootfs /tmp/z8s-node-*/rootfs
+
+# 4. Start fresh and run tests!
+sudo target/debug/z8s node start
+sudo target/debug/z8s node start --port 7443
+sleep 3
+./tests/run-tests.sh
