@@ -14,7 +14,19 @@ GREEN='\033[0;32m'; RED='\033[0;31m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC
 
 pass() { echo -e "${GREEN}PASS${NC} $1"; PASS=$((PASS+1)); }
 fail() { local m="$1" d="${2:-}"; echo -e "${RED}FAIL${NC} $m${d:+: $d}"; ERRORS+=("$m${d:+: $d}"); FAIL=$((FAIL+1)); }
-section() { echo -e "\n${YELLOW}══ $1 ══${NC}"; }
+LAST_SECTION_TIME=$(date +%s)
+LAST_SECTION_NAME=""
+
+section() { 
+    local now=$(date +%s)
+    if [[ -n "$LAST_SECTION_NAME" ]]; then
+        local diff=$((now - LAST_SECTION_TIME))
+        echo -e "${YELLOW}   (took ${diff}s)${NC}"
+    fi
+    echo -e "\n${YELLOW}══ $1 ══${NC}"
+    LAST_SECTION_NAME="$1"
+    LAST_SECTION_TIME=$now
+}
 sub() { echo -e "${CYAN}  ▸ $1${NC}"; }
 
 k() { /home/abb/.local/bin/kubectl --server="$SERVER" "$@" 2>&1 || true; }
@@ -92,6 +104,11 @@ cleanup() {
     k delete pvc pvc-test -n default --ignore-not-found 2>/dev/null || true
     k delete pvc pvc-test -n z8s-test --ignore-not-found 2>/dev/null || true
     k delete ns z8s-test z8s-prod --ignore-not-found 2>/dev/null || true
+    local now=$(date +%s)
+    if [[ -n "$LAST_SECTION_NAME" ]]; then
+        local diff=$((now - LAST_SECTION_TIME))
+        echo -e "${YELLOW}   (took ${diff}s)${NC}"
+    fi
     echo ""
     echo "════════════════════════════════════════════"
     echo " Results: ${PASS} passed, ${FAIL} failed"
