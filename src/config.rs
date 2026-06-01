@@ -90,7 +90,7 @@ impl Config {
         let mut i = 1;
         while i < args.len() {
             match args[i].as_str() {
-                "run" | "restart" | "node" => {} // handled by main
+                "run" | "restart" | "node" | "--daemon" => {} // handled by main
                 "--help" | "-h" => {
                     eprintln!("{}", HELP);
                     std::process::exit(0);

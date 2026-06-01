@@ -207,6 +207,13 @@ fn main() -> Result<()> {
 
         // ── Run as the actual server (called by daemon spawner) ────────
         Some("run") => {
+            // Check if we are running in the background daemon mode
+            let is_daemon = args.iter().any(|a| a == "--daemon");
+            if !is_daemon {
+                // If not in daemon mode, user ran `z8s run`. Start it in background.
+                return default_start(&args);
+            }
+
             crate::config::init();
             let cfg = crate::config::get();
             let port = cfg.api_port;
@@ -296,7 +303,7 @@ fn default_start(args: &[String]) -> Result<()> {
         anyhow::bail!("Port {port} is already in use");
     }
 
-    let child = spawn_daemon(&["run", "--port", &port.to_string()], port)?;
+    let child = spawn_daemon(&["run", "--daemon", "--port", &port.to_string()], port)?;
     let pid = child.id() as i32;
 
     // Poll the global lock PID. The child (main) writes its PID to the global
@@ -528,7 +535,7 @@ fn show_status() -> Result<()> {
 }
 
 fn node_start(args: &[String]) -> Result<()> {
-    let node_port = parse_port(args, 7443);
+    let node_port = parse_port(args, 6443);
 
     // Check port availability
     if std::net::TcpListener::bind(format!("0.0.0.0:{node_port}")).is_err() {
@@ -545,22 +552,30 @@ fn node_start(args: &[String]) -> Result<()> {
     let peer_host = parse_opt_arg(args, "--peer-addr").unwrap_or_else(|| "127.0.0.1".to_string());
     let mut node_args = vec![
         "run".to_string(),
+        "--daemon".to_string(),
         "--port".to_string(),
         node_port.to_string(),
-        "--node-name".to_string(),
-        format!("node-{}", node_port),
-        "--peers".to_string(),
-        format!("main={}:{}", peer_host, main_port),
-        "--db-path".to_string(),
-        format!("{Z8S_RUN_DIR}/z8s-node-{node_port}.redb"),
-        "--data-dir".to_string(),
-        format!("{Z8S_RUN_DIR}/z8s-node-{node_port}-data"),
-        "--manifests-dir".to_string(),
-        format!("{Z8S_RUN_DIR}/z8s-node-{node_port}-manifests"),
     ];
-    // Create the directories
-    std::fs::create_dir_all(format!("{Z8S_RUN_DIR}/z8s-node-{node_port}-data")).ok();
-    std::fs::create_dir_all(format!("{Z8S_RUN_DIR}/z8s-node-{node_port}-manifests")).ok();
+
+    if node_port == 6443 {
+        // Just start as main node
+    } else {
+        node_args.extend_from_slice(&[
+            "--node-name".to_string(),
+            format!("node-{}", node_port),
+            "--peers".to_string(),
+            format!("main={}:{}", peer_host, main_port),
+            "--db-path".to_string(),
+            format!("{Z8S_RUN_DIR}/z8s-node-{node_port}.redb"),
+            "--data-dir".to_string(),
+            format!("{Z8S_RUN_DIR}/z8s-node-{node_port}-data"),
+            "--manifests-dir".to_string(),
+            format!("{Z8S_RUN_DIR}/z8s-node-{node_port}-manifests"),
+        ]);
+        // Create the directories
+        std::fs::create_dir_all(format!("{Z8S_RUN_DIR}/z8s-node-{node_port}-data")).ok();
+        std::fs::create_dir_all(format!("{Z8S_RUN_DIR}/z8s-node-{node_port}-manifests")).ok();
+    }
 
     if let Some(cidr) = parse_opt_arg(args, "--service-cidr") {
         node_args.push("--service-cidr".to_string());
@@ -601,7 +616,7 @@ fn node_start(args: &[String]) -> Result<()> {
 }
 
 fn node_stop(args: &[String]) -> Result<()> {
-    let node_port = parse_port(args, 7443);
+    let node_port = parse_port(args, 6443);
     let path = port_lock_path(node_port);
 
     if let Some(pid) = read_lock_pid(&path) {
