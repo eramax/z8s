@@ -151,8 +151,10 @@ impl NetMux {
             tracing::warn!("mutex poisoned");
             e.into_inner()
         });
-        pools.insert(name.to_string(), IpPool::new(cidr));
-        info!("Registered subnet '{}' with CIDR {}", name, cidr_str);
+        if !pools.contains_key(name) {
+            pools.insert(name.to_string(), IpPool::new(cidr));
+            info!("Registered subnet '{}' with CIDR {}", name, cidr_str);
+        }
         Ok(())
     }
 

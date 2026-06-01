@@ -17,6 +17,7 @@ pub struct ProcessTracker {
     pub restart_counts: Arc<Mutex<HashMap<String, u32>>>,
     pub cri: Arc<dyn RuntimeProvider>,
     pub store: Arc<dyn StoreBackend>,
+    pub broadcast_tx: tokio::sync::RwLock<Option<tokio::sync::mpsc::UnboundedSender<AnyResource>>>,
 }
 
 impl ProcessTracker {
@@ -31,7 +32,12 @@ impl ProcessTracker {
             restart_counts,
             cri,
             store,
+            broadcast_tx: tokio::sync::RwLock::new(None),
         }
+    }
+
+    pub async fn set_broadcast_tx(&self, tx: tokio::sync::mpsc::UnboundedSender<AnyResource>) {
+        *self.broadcast_tx.write().await = Some(tx);
     }
 
     pub async fn start_pod(&self, resource: &AnyResource) -> anyhow::Result<()> {
@@ -42,6 +48,12 @@ impl ProcessTracker {
         self.store
             .update_state(&resource.uid(), ResourceState::Running)
             .await;
+        if let Some(mut t) = self.store.get(&resource.uid()).await {
+            t.state = ResourceState::Running;
+            if let Some(tx) = &*self.broadcast_tx.read().await {
+                let _ = tx.send(t.resource);
+            }
+        }
         Ok(())
     }
 
@@ -53,6 +65,12 @@ impl ProcessTracker {
         self.store
             .update_state(&resource.uid(), ResourceState::Terminated)
             .await;
+        if let Some(mut t) = self.store.get(&resource.uid()).await {
+            t.state = ResourceState::Terminated;
+            if let Some(tx) = &*self.broadcast_tx.read().await {
+                let _ = tx.send(t.resource);
+            }
+        }
     }
 
     pub async fn is_running(&self, pod_name: &str) -> bool {
@@ -272,12 +290,23 @@ impl ProcessTracker {
                             tokio::time::sleep(Duration::from_secs(delay_secs)).await;
                         }
                         store.update_state(&uid, ResourceState::Pending).await;
+                        if let Some(mut t) = store.get(&uid).await {
+                            t.state = ResourceState::Pending;
+                            // (We don't easily have access to self.broadcast_tx here inside the spawn, 
+                            // but the next start_pod will broadcast Running)
+                        }
                     });
                 }
             } else {
                 if !pod_uid.is_empty() {
                     if exit_code == 0 {
                         store.update_state(&pod_uid, ResourceState::Succeeded).await;
+                        if let Some(mut t) = store.get(&pod_uid).await {
+                            t.state = ResourceState::Succeeded;
+                            if let Some(tx) = &*self.broadcast_tx.read().await {
+                                let _ = tx.send(t.resource);
+                            }
+                        }
                     } else {
                         store
                             .update_state(
@@ -285,6 +314,12 @@ impl ProcessTracker {
                                 ResourceState::Failed(format!("exit code {}", exit_code)),
                             )
                             .await;
+                        if let Some(mut t) = store.get(&pod_uid).await {
+                            t.state = ResourceState::Failed(format!("exit code {}", exit_code));
+                            if let Some(tx) = &*self.broadcast_tx.read().await {
+                                let _ = tx.send(t.resource);
+                            }
+                        }
                     }
                 }
             }

@@ -25,17 +25,20 @@ impl Component for SubnetResource {
         ResourceCategory::Network
     }
 
-    async fn reconcile(&self, _ctx: &ReconcileContext, _tracker: &ResourceTracker) -> Result<()> {
+    async fn reconcile(&self, _ctx: &ReconcileContext, tracker: &ResourceTracker) -> Result<()> {
+        if let AnyResource::Subnet(subnet) = &tracker.resource {
+            let name = subnet.metadata.name.as_deref().unwrap_or("unknown");
+            self.netmux.register_subnet_cidr(name, &subnet.spec.cidr)?;
+        }
         Ok(())
     }
 
     async fn on_apply(&self, _ctx: &ReconcileContext, resource: &AnyResource) -> Result<()> {
         if let AnyResource::Subnet(subnet) = resource {
             let name = subnet.metadata.name.as_deref().unwrap_or("unknown");
-            self.netmux.register_subnet_cidr(name, &subnet.spec.cidr)?;
             info!(
-                "Subnet '{}' registered with CIDR {}",
-                name, &subnet.spec.cidr
+                "Subnet '{}' on_apply called",
+                name
             );
         }
         Ok(())

@@ -53,6 +53,7 @@ pub async fn scheduler_tick(
     store: &Arc<dyn StoreBackend>,
     db: &Arc<crate::store::RedbBackend>,
     lease: &LeaseRecord,
+    gs: &Option<Arc<tokio::sync::Mutex<crate::store::gossip::GossipState>>>,
 ) -> u32 {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -74,8 +75,12 @@ pub async fn scheduler_tick(
                 pod.scheduler_epoch = lease.epoch;
                 match store.apply(AnyResource::Pod(pod.clone())).await {
                     Ok(()) => {
+                        if let Some(state) = gs {
+                            state.lock().await.broadcast_write(&AnyResource::Pod(pod.clone())).await;
+                        }
                         // Verify by reading back
-                        let uid = format!("Pod/default/{}", t.resource.name());
+                        let ns = p.metadata.namespace.as_deref().unwrap_or("default");
+                        let uid = format!("Pod/{}/{}", ns, t.resource.name());
                         match store.get(&uid).await {
                             Some(tracker) => {
                                 if let AnyResource::Pod(p) = &tracker.resource {
@@ -114,7 +119,10 @@ pub async fn scheduler_tick(
                     let mut pod = p.clone();
                     pod.assigned_node = Some(node.clone());
                     pod.scheduler_epoch = lease.epoch;
-                    store.apply(AnyResource::Pod(pod)).await.ok();
+                    store.apply(AnyResource::Pod(pod.clone())).await.ok();
+                    if let Some(state) = gs {
+                        state.lock().await.broadcast_write(&AnyResource::Pod(pod)).await;
+                    }
                     total += 1;
                     info!(
                         "Re-assigned {} from dead {} -> {}",
@@ -134,6 +142,7 @@ pub async fn run_scheduler(
     store: Arc<dyn StoreBackend>,
     node_name: String,
     db: Arc<crate::store::RedbBackend>,
+    gs: Option<Arc<tokio::sync::Mutex<crate::store::gossip::GossipState>>>,
 ) {
     let mut lease = run_lease_loop(db.clone(), node_name.clone()).await;
     info!("Scheduler {} active (epoch {})", node_name, lease.epoch);
@@ -161,7 +170,7 @@ pub async fn run_scheduler(
             }
         }
 
-        let n = scheduler_tick(&store, &db, &lease).await;
+        let n = scheduler_tick(&store, &db, &lease, &gs).await;
         if n > 0 {
             debug!("Scheduler {} scheduled {} pods", node_name, n);
         }

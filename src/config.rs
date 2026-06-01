@@ -73,7 +73,7 @@ impl Config {
             cluster_domain: "cluster.local".to_string(),
             dns_port: None,
             manifests_dir: "/etc/z8s/manifests".to_string(),
-            data_dir: None,
+            data_dir: Some("/var/lib/z8s".to_string()),
             db_path: None,
             pod_cidr: "10.100.0.0/16".to_string(),
             vnet_cidr_size: 20,

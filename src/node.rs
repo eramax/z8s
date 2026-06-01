@@ -207,12 +207,12 @@ pub async fn run_node(
         cgroup_manager.clone(),
     ));
 
-    let process_tracker = Arc::new(ProcessTracker {
-        running: supervisor.running.clone(),
-        restart_counts: supervisor.restart_counts.clone(),
-        cri: cri.clone(),
-        store: store.clone(),
-    });
+    let process_tracker = Arc::new(ProcessTracker::new(
+        supervisor.running.clone(),
+        supervisor.restart_counts.clone(),
+        cri.clone(),
+        store.clone(),
+    ));
 
     let network = Arc::new(NetworkManager::new(
         store.clone(),
@@ -317,6 +317,17 @@ pub async fn run_node(
         Some(state)
     };
 
+    if let Some(ref gs) = gossip_state {
+        let (btx, mut brx) = tokio::sync::mpsc::unbounded_channel();
+        process_tracker.set_broadcast_tx(btx).await;
+        let gs_clone = gs.clone();
+        tokio::spawn(async move {
+            while let Some(resource) = brx.recv().await {
+                gs_clone.lock().await.broadcast_write(&resource).await;
+            }
+        });
+    }
+
     {
         let mut node = crate::api::handlers::node::make_local_node();
         if node.metadata.creation_timestamp.is_none() {
@@ -351,8 +362,9 @@ pub async fn run_node(
         let sched_store = store.clone();
         let sched_name = cfg.node_name.clone();
         let sched_db = db.clone();
+        let sched_gs = gossip_state.clone();
         tokio::spawn(async move {
-            crate::scheduler::scheduler::run_scheduler(sched_store, sched_name, sched_db).await;
+            crate::scheduler::scheduler::run_scheduler(sched_store, sched_name, sched_db, sched_gs).await;
         });
     }
 
