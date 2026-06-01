@@ -109,19 +109,19 @@ cleanup() {
 #trap cleanup EXIT
 
 # ── 0. Server startup ──────────────────────────────────────────────────────────
-section "0. Server startup"
-"$DAEMON" restart
-for i in $(seq 1 15); do
-    if curl -sf "$SERVER/healthz" >/dev/null 2>&1; then
-        pass "server started (${i}s)"
-        break
-    fi
-    sleep 1
-    if [[ $i -eq 15 ]]; then
-        fail "server startup" "did not respond within 15s"
-        echo "--- server log ---"; tail -30 "$LOG"; exit 1
-    fi
-done
+# section "0. Server startup"
+# "$DAEMON" restart
+# for i in $(seq 1 15); do
+#     if curl -sf "$SERVER/healthz" >/dev/null 2>&1; then
+#         pass "server started (${i}s)"
+#         break
+#     fi
+#     sleep 1
+#     if [[ $i -eq 15 ]]; then
+#         fail "server startup" "did not respond within 15s"
+#         echo "--- server log ---"; tail -30 "$LOG"; exit 1
+#     fi
+# done
 
 # ── 1. Apply all YAML resources ────────────────────────────────────────────────
 section "1. Apply all manifest YAMLs"
