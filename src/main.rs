@@ -42,9 +42,30 @@ use tokio::signal::unix::{SignalKind, signal as unix_signal};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
+fn pid_file_path() -> String {
+    format!("/tmp/z8s-{}.pid", crate::api::server::z8s_port())
+}
+
+fn check_pid_file() -> Result<()> {
+    let pid_path = pid_file_path();
+    if let Ok(existing) = std::fs::read_to_string(&pid_path) {
+        if let Ok(pid) = existing.trim().parse::<i32>() {
+            if pid > 0 {
+                let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
+                if comm.trim() == "z8s" {
+                    anyhow::bail!("z8s is already running on port {} (PID {pid}). If stale, remove {pid_path} and retry.", crate::api::server::z8s_port());
+                }
+            }
+        }
+    }
+    std::fs::write(&pid_path, format!("{}\n", std::process::id())).ok();
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     crate::config::init();
+    check_pid_file()?;
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -398,6 +419,7 @@ async fn main() -> Result<()> {
         let _ = crate::cri::RuntimeProvider::stop_pod(cri.as_ref(), &spec).await;
     }
 
+    let _ = std::fs::remove_file(pid_file_path());
     info!("z8s shutdown complete.");
     Ok(())
 }
