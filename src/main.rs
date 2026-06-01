@@ -36,36 +36,37 @@ use crate::cri::runtime::ProcessSupervisor;
 use crate::scheduler::process::ProcessTracker;
 use crate::storage::ProvisionerDispatcher;
 use anyhow::Result;
+use nix::libc;
 use std::sync::Arc;
 use tokio::signal;
 use tokio::signal::unix::{SignalKind, signal as unix_signal};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
-fn pid_file_path() -> String {
-    format!("/tmp/z8s-{}.pid", crate::api::server::z8s_port())
+fn lock_file_path() -> String {
+    format!("/tmp/z8s-{}.lock", crate::api::server::z8s_port())
 }
 
-fn check_pid_file() -> Result<()> {
-    let pid_path = pid_file_path();
-    if let Ok(existing) = std::fs::read_to_string(&pid_path) {
-        if let Ok(pid) = existing.trim().parse::<i32>() {
-            if pid > 0 {
-                let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
-                if comm.trim() == "z8s" {
-                    anyhow::bail!("z8s is already running on port {} (PID {pid}). If stale, remove {pid_path} and retry.", crate::api::server::z8s_port());
-                }
-            }
-        }
+/// Acquire an exclusive file lock. If another z8s on this port already holds
+/// the lock, bail immediately. The lock is released automatically when the
+/// process exits (even on SIGKILL, the kernel cleans up file locks).
+fn acquire_port_lock() -> Result<std::fs::File> {
+    use std::os::unix::io::AsRawFd;
+    let path = lock_file_path();
+    let file = std::fs::File::create(&path)
+        .map_err(|e| anyhow::anyhow!("Failed to create lock file {path}: {e}"))?;
+    let ret = unsafe { nix::libc::flock(file.as_raw_fd(), nix::libc::LOCK_EX | nix::libc::LOCK_NB) };
+    if ret != 0 {
+        anyhow::bail!("z8s is already running on port {} (lock held). If stale, remove {path} and retry.", crate::api::server::z8s_port());
     }
-    std::fs::write(&pid_path, format!("{}\n", std::process::id())).ok();
-    Ok(())
+    Ok(file)
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     crate::config::init();
-    check_pid_file()?;
+    let _lock = acquire_port_lock()?; // held for the lifetime of the process
+    std::fs::write(lock_file_path(), format!("{}\n", std::process::id())).ok();
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -419,7 +420,7 @@ async fn main() -> Result<()> {
         let _ = crate::cri::RuntimeProvider::stop_pod(cri.as_ref(), &spec).await;
     }
 
-    let _ = std::fs::remove_file(pid_file_path());
+    let _ = std::fs::remove_file(lock_file_path());
     info!("z8s shutdown complete.");
     Ok(())
 }

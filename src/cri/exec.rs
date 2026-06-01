@@ -156,6 +156,10 @@ struct ContainerExecInfo {
     isolated_net: bool,
 }
 
+fn is_pid_alive(pid: u32) -> bool {
+    std::path::Path::new(&format!("/proc/{pid}")).exists()
+}
+
 async fn resolve_container(
     state: &ExecState,
     pod_name: &str,
@@ -164,10 +168,15 @@ async fn resolve_container(
     let running = state.0.lock().await;
     let prefix = format!("{}-", pod_name);
     let rc = if let Some(container) = container_name {
-        running.get(&format!("{}-{}", pod_name, container))
+        let key = format!("{}-{}", pod_name, container);
+        running.get(&key).filter(|rc| rc.instance.pid.map(is_pid_alive).unwrap_or(false))?
     } else {
-        running.iter().find(|(k, _)| k.starts_with(&prefix)).map(|(_, v)| v)
-    }?;
+        running.iter()
+            .filter(|(k, _)| k.starts_with(&prefix))
+            .filter(|(_, rc)| rc.instance.pid.map(is_pid_alive).unwrap_or(false))
+            .next()
+            .map(|(_, v)| v)?
+    };
 
     let env_vars = rc.instance.env_vars.clone();
     let rootfs = rc.instance.rootfs.clone();
@@ -309,62 +318,38 @@ fn try_open_namespace_fds(container_pid: u32) -> NamespaceFds {
     }
 }
 
-fn enter_container_namespaces(
-    ns: &NamespaceFds,
-    isolated_net: bool,
-    use_mnt_ns: bool,
-) -> Result<(), std::io::Error> {
-    if let Some(ref user) = ns.user {
+/// Enter user, pid, mnt, net namespaces, then fork + mount proc so the exec'd
+/// process gets a real PID in the container's namespace (setns alone gives a
+/// ghost PID invisible to procfs). Parent waits and exits with child's code.
+fn exec_container_pre_exec(ctx: &ExecCtx) -> Result<(), std::io::Error> {
+    if let Some(ref user) = ctx.ns.user {
         let _ = nix::sched::setns(user, CloneFlags::CLONE_NEWUSER);
     }
-    if use_mnt_ns {
-        if let Some(ref mnt) = ns.mnt {
+    if let Some(ref pid) = ctx.ns.pid {
+        let _ = nix::sched::setns(pid, CloneFlags::CLONE_NEWPID);
+    }
+    if ctx.use_mnt_ns {
+        if let Some(ref mnt) = ctx.ns.mnt {
             nix::sched::setns(mnt, CloneFlags::CLONE_NEWNS).map_err(|e| {
                 std::io::Error::new(std::io::ErrorKind::Other, format!("setns(CLONE_NEWNS): {e}"))
             })?;
         }
     }
-    if isolated_net {
-        if let Some(ref net) = ns.net {
-            nix::sched::setns(net, CloneFlags::CLONE_NEWNET).map_err(|e| {
-                std::io::Error::new(std::io::ErrorKind::Other, format!("setns(CLONE_NEWNET): {e}"))
-            })?;
+    if ctx.iso_net {
+        if let Some(ref net) = ctx.ns.net {
+            let _ = nix::sched::setns(net, CloneFlags::CLONE_NEWNET);
         }
     }
-    Ok(())
-}
-
-fn exec_container_pre_exec(ctx: &ExecCtx) -> Result<(), std::io::Error> {
-    let _ = enter_container_namespaces(&ctx.ns, ctx.iso_net, ctx.use_mnt_ns);
-    if ctx.use_mnt_ns {
-        if let Some(ref pid) = ctx.ns.pid {
-            let _ = nix::sched::setns(pid, CloneFlags::CLONE_NEWPID);
-            let child = unsafe { nix::libc::fork() };
-            if child == 0 {
-                let _ = mount(
-                    Some("proc"),
-                    "/proc",
-                    Some("proc"),
-                    MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC | MsFlags::MS_NODEV,
-                    None::<&str>,
-                );
-                if let Some(g) = ctx.c_gid {
-                    let _ = nix::unistd::setgid(nix::unistd::Gid::from_raw(g));
-                }
-                if let Some(u) = ctx.c_uid {
-                    let _ = nix::unistd::setuid(nix::unistd::Uid::from_raw(u));
-                }
-                return Ok(());
-            }
+    if ctx.use_mnt_ns && ctx.ns.pid.is_some() {
+        let child = unsafe { nix::libc::fork() };
+        if child > 0 {
             let mut status: i32 = 0;
             unsafe { nix::libc::waitpid(child, &mut status as *mut i32, 0) };
-            let code = if nix::libc::WIFEXITED(status) {
-                nix::libc::WEXITSTATUS(status)
-            } else {
-                1
-            };
+            let code = if nix::libc::WIFEXITED(status) { nix::libc::WEXITSTATUS(status) } else { 1 };
             std::process::exit(code);
         }
+        let _ = mount(Some("proc"), "/proc", Some("proc"),
+            MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC | MsFlags::MS_NODEV, None::<&str>);
     }
     if let Some(g) = ctx.c_gid {
         let _ = nix::unistd::setgid(nix::unistd::Gid::from_raw(g));
