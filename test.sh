@@ -4,8 +4,8 @@
 set -uo pipefail
 
 SERVER="${Z8S_SERVER:-http://localhost:6443}"
-DAEMON="$(dirname "$0")/z8s.sh"
-LOG="/tmp/z8s.log"
+BINARY="$(dirname "$0")/target/debug/z8s"
+LOG="/tmp/z8s-6443.log"
 PASS=0; FAIL=0; ERRORS=()
 
 # ── colours ──────────────────────────────────────────────────────────────────

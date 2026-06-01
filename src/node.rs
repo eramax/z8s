@@ -31,8 +31,11 @@ use crate::cri::runtime::ProcessSupervisor;
 use crate::scheduler::process::ProcessTracker;
 use crate::storage::ProvisionerDispatcher;
 
-pub async fn run_node(port: u16, lock_file: std::fs::File) -> Result<()> {
-    let _lock = lock_file;
+pub async fn run_node(
+    port: u16,
+    _port_lock: std::fs::File,
+    _global_lock: Option<std::fs::File>,
+) -> Result<()> {
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -79,6 +82,7 @@ pub async fn run_node(port: u16, lock_file: std::fs::File) -> Result<()> {
         );
     }
 
+    // ── Store ─────────────────────────────────────────────────────────
     let store: Arc<dyn StoreBackend>;
     let redb: Option<Arc<crate::store::RedbBackend>>;
 
@@ -117,19 +121,21 @@ pub async fn run_node(port: u16, lock_file: std::fs::File) -> Result<()> {
         redb = None;
     };
 
+    // ── Cgroup manager — graceful degradation, no panic ───────────────
     let cgroup_manager = match CgroupManager::new() {
         Ok(m) => Arc::new(m),
         Err(e) => {
             warn!("Cgroups not available: {}. Running without resource limits.", e);
-            Arc::new(CgroupManager::new().expect("cgroup manager init failed twice"))
+            Arc::new(CgroupManager::new_stub())
         }
     };
 
+    // ── Image manager — graceful degradation, no panic ────────────────
     let image_manager = match ImageManager::new() {
         Ok(m) => Arc::new(m),
         Err(e) => {
             warn!("Image manager init failed: {}. Running without image pulling.", e);
-            Arc::new(ImageManager::new().expect("Failed to create image manager"))
+            Arc::new(ImageManager::new_stub())
         }
     };
 
@@ -241,6 +247,7 @@ pub async fn run_node(port: u16, lock_file: std::fs::File) -> Result<()> {
     let rec = reconciler.clone();
     tokio::spawn(async move { rec.run().await });
 
+    // ── Gossip setup (no blocking) ────────────────────────────────────
     let gossip_state = {
         let mut gs = crate::store::gossip::GossipState::new(cfg.node_name.clone(), store.clone());
         let state = std::sync::Arc::new(tokio::sync::Mutex::new(gs));
@@ -251,13 +258,8 @@ pub async fn run_node(port: u16, lock_file: std::fs::File) -> Result<()> {
             let n = name.clone();
 
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-            tokio::task::block_in_place(|| {
-                let rt = tokio::runtime::Handle::current();
-                rt.block_on(async {
-                    let mut gs = st.lock().await;
-                    gs.add_peer(tx);
-                });
-            });
+            // Register the peer channel directly — no blocking
+            st.lock().await.add_peer(tx);
 
             tokio::spawn(async move {
                 crate::store::ws::run_gossip_client(n, url, st, rx).await;
@@ -319,19 +321,9 @@ pub async fn run_node(port: u16, lock_file: std::fs::File) -> Result<()> {
         });
     }
 
-    let pt = process_tracker.clone();
-    let s = store.clone();
-    let rc = registry.clone();
-    let cx = ctx.clone();
-    tokio::spawn(async move {
-        let reaped = pt.reap_zombies();
-        if !reaped.is_empty() {
-            pt.handle_exited_containers(reaped, &s).await;
-        }
-        rc.reconcile_all(&cx).await;
-    });
-
     info!("z8s is ready. Listening on port {}...", port);
+
+    // ── Signal handling ───────────────────────────────────────────────
     if pid == 1 {
         init_handler.run(&shutdown_tx).await.ok();
     } else {
@@ -350,14 +342,26 @@ pub async fn run_node(port: u16, lock_file: std::fs::File) -> Result<()> {
     let _ = shutdown_rx.changed().await;
     info!("Shutting down all services...");
 
+    // ── Cleanup: stop all pods ────────────────────────────────────────
     let resources = store.get_all().await;
     for tracker in &resources {
         let spec = crate::components::compute::spec_builder::build_spec(&tracker.resource, store.as_ref()).await;
         let _ = crate::cri::RuntimeProvider::stop_pod(cri.as_ref(), &spec).await;
     }
 
-    let lock_path = format!("/tmp/z8s-{port}.lock");
-    let _ = std::fs::remove_file(&lock_path);
+    // ── Cleanup: remove nftables rules ────────────────────────────────
+    if let Err(e) = netmux.nft.cleanup().await {
+        warn!("Failed to cleanup nftables rules: {}", e);
+    }
+
+    // ── Cleanup: remove orphan veths created by this instance ─────────
+    if let Err(e) = netmux.clean_orphan_veths(&[]) {
+        warn!("Failed to clean orphan veths: {}", e);
+    }
+
+    // Lock files are cleaned up automatically when the process exits
+    // (flock is released when the fd is closed).
+
     info!("z8s shutdown complete.");
     Ok(())
 }

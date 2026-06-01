@@ -8,10 +8,7 @@ echo "Building z8s release binary..."
 
 echo "Installing z8s binary to /usr/local/bin..."
 sudo cp "$Z8S_HOME/target/release/z8s" /usr/local/bin/z8s
-
-echo "Installing daemon script..."
-sudo cp "$Z8S_HOME/scripts/z8s-daemon.sh" /usr/local/bin/z8s-daemon
-sudo chmod +x /usr/local/bin/z8s-daemon
+sudo chmod +x /usr/local/bin/z8s
 
 echo "Creating log directory..."
 sudo mkdir -p /var/log/z8s
@@ -28,4 +25,4 @@ else
 fi
 
 echo ""
-echo "z8s installed. Use 'sudo z8s-daemon {start|stop|restart|status}' to manage."
+echo "z8s installed. Use 'sudo z8s' to start, 'sudo z8s stop' to stop."

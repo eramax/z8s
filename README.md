@@ -65,10 +65,10 @@ The release binary is ~5.4 MB, statically optimized (`opt-level = "z"`, `lto = t
 ### Run (development)
 
 ```bash
-sudo ./z8s.sh start       # starts target/debug/z8s, logs to /tmp/z8s.log
-./z8s.sh status
-sudo ./z8s.sh restart
-sudo ./z8s.sh stop
+sudo ./target/debug/z8s                    # start main z8s (daemon mode)
+./target/debug/z8s status                  # show running processes
+./target/debug/z8s stop                    # stop main z8s
+sudo ./target/debug/z8s restart            # restart
 ```
 
 > `sudo` is required when using OCI containers (chroot, network namespaces). Native processes (`image: ""`) work without root.
@@ -77,7 +77,9 @@ sudo ./z8s.sh stop
 
 ```bash
 ./install.sh                              # builds release, copies to /usr/local/bin
-sudo z8s-daemon start
+sudo z8s                                  # start (daemon mode)
+sudo z8s stop                             # stop
+sudo z8s status                           # check status
 ```
 
 Runs on port **6443**. No TLS — use `kubectl --insecure-skip-tls-verify` or put a TLS terminator in front.

@@ -54,6 +54,16 @@ impl ImageManager {
         })
     }
 
+    /// Create a stub (no-op) ImageManager for degraded mode.
+    pub fn new_stub() -> Self {
+        let base = z8s_base_dir();
+        Self {
+            client: Client::new(ClientConfig::default()),
+            cache_dir: format!("{}/images", base),
+            rootfs_dir: format!("{}/rootfs", base),
+        }
+    }
+
     fn image_cache_path(&self, image_ref: &str) -> String {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();

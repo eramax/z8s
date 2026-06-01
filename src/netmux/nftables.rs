@@ -268,6 +268,23 @@ impl NftEngine {
     pub async fn replace_set(&self, name: &str, ips: &[Ipv4Addr]) -> Result<()> {
         self.create_set(name, ips).await
     }
+
+    /// Remove all z8s nftables tables. Called during shutdown.
+    pub async fn cleanup(&self) -> Result<()> {
+        info!("Cleaning up nftables rules...");
+        for tbl in [NAT_TABLE, FILTER_TABLE] {
+            let t = Table::new(ProtocolFamily::Ipv4).with_name(tbl);
+            let mut d = Batch::new();
+            d.add(&t, rustables::MsgType::Del);
+            if let Err(e) = self.send(d).await {
+                debug!("Failed to delete table {}: {}", tbl, e);
+            }
+        }
+        self.jump_track.lock().await.clear();
+        self.nodeport_jump_track.lock().await.clear();
+        info!("nftables cleanup complete");
+        Ok(())
+    }
 }
 
 fn code_name(c: i32) -> &'static str {
