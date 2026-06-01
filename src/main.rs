@@ -248,26 +248,20 @@ fn default_start(args: &[String]) -> Result<()> {
     let child = spawn_daemon(&["run", "--port", &port.to_string()])?;
     let pid = child.id() as i32;
 
-    // Poll: check if child is alive and has稳定的 lock file. Two checks
-    // separated by 1s to ensure the child survived initialization.
-    let mut seen_alive = false;
+    // Poll the global lock PID. The child (main) writes its PID to the global
+    // lock only AFTER acquiring BOTH the port lock AND the global lock.
+    // If the global lock fails, the child exits and we'll detect it.
     for _ in 0..30 {
         std::thread::sleep(std::time::Duration::from_millis(100));
         let alive = is_pid_alive(pid);
-        let lock_matches = read_lock_pid(&port_lock_path(port)) == Some(pid);
-
-        if lock_matches && alive {
-            if seen_alive {
-                // Stable for ~1s — child is running
+        match read_lock_pid(&global_lock_path()) {
+            Some(lock_pid) if lock_pid == pid && alive => {
                 eprintln!("z8s started on port {port} (PID {pid}).");
                 return Ok(());
             }
-            seen_alive = true;
-        } else if !alive && seen_alive {
-            // Was alive, now dead — child crashed after lock acquisition
-            break;
-        } else if !alive && !seen_alive {
-            // Died before lock — definitely failed
+            _ => {}
+        }
+        if !alive {
             break;
         }
     }
@@ -455,8 +449,30 @@ fn node_start(args: &[String]) -> Result<()> {
     eprintln!("Starting node on port {node_port}...");
     let refs: Vec<&str> = node_args.iter().map(|s| s.as_str()).collect();
     let child = spawn_daemon(&refs)?;
-    eprintln!("Node started on port {node_port} (PID {}).", child.id());
-    Ok(())
+    let pid = child.id() as i32;
+
+    // Poll for node startup (port lock PID matches child PID)
+    for _ in 0..30 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        if read_lock_pid(&port_lock_path(node_port)) == Some(pid) && is_pid_alive(pid) {
+            eprintln!("Node started on port {node_port} (PID {pid}).");
+            return Ok(());
+        }
+        if !is_pid_alive(pid) {
+            break;
+        }
+    }
+
+    // Check daemon log for reason
+    let log_path = format!("{Z8S_RUN_DIR}/z8s-daemon.log");
+    if let Ok(log) = std::fs::read_to_string(&log_path) {
+        for line in log.lines().rev().take(5) {
+            if line.contains("Error") || line.contains("error") || line.contains("panicked") {
+                anyhow::bail!("z8s failed to start: {line}");
+            }
+        }
+    }
+    anyhow::bail!("z8s node failed to start on port {node_port}");
 }
 
 fn node_stop(args: &[String]) -> Result<()> {
