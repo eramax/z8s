@@ -62,11 +62,55 @@ fn acquire_port_lock() -> Result<std::fs::File> {
     Ok(file)
 }
 
+fn check_port(port: u16) -> Result<()> {
+    let addr = format!("0.0.0.0:{port}");
+    let listener = std::net::TcpListener::bind(&addr);
+    if let Err(e) = listener {
+        if e.kind() == std::io::ErrorKind::AddrInUse {
+            anyhow::bail!("Port {port} is already in use");
+        }
+        anyhow::bail!("Failed to bind to {addr}: {e}");
+    }
+    Ok(())
+}
+
+fn daemonize(foreground: bool) {
+    if foreground {
+        return;
+    }
+    // Detach from the terminal by forking. Parent exits, child continues.
+    match unsafe { nix::libc::fork() } {
+        0 => {
+            // Child: create new session, detach from terminal.
+            let _ = unsafe { nix::libc::setsid() };
+            let _ = std::fs::File::create("/dev/null").map(|nul| {
+                let fd = nul.into_raw_fd();
+                unsafe { nix::libc::dup2(fd, 0); nix::libc::dup2(fd, 1); nix::libc::dup2(fd, 2); }
+            });
+        }
+        pid if pid > 0 => {
+            // Parent: exit immediately.
+            std::process::exit(0);
+        }
+        _ => {
+            eprintln!("fork failed");
+            std::process::exit(1);
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    let foreground = args.iter().any(|a| a == "--foreground" || a == "-f");
+
     crate::config::init();
-    let _lock = acquire_port_lock()?; // held for the lifetime of the process
+    let port = crate::api::server::z8s_port();
+    check_port(port)?;
+    let _lock = acquire_port_lock()?;
     std::fs::write(lock_file_path(), format!("{}\n", std::process::id())).ok();
+
+    daemonize(foreground);
 
     tracing_subscriber::fmt()
         .with_env_filter(

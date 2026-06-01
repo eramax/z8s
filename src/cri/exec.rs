@@ -210,16 +210,14 @@ fn spawn_with_pty(
         .open(&slave_name)
         .map_err(|e| format!("open slave {}: {}", slave_name, e))?;
 
+    // Set a clean cooked-mode terminal suitable for an interactive shell.
     if let Ok(mut t) = termios::tcgetattr(&slave) {
-        termios::cfmakeraw(&mut t);
-        t.output_flags |= OutputFlags::OPOST | OutputFlags::ONLCR | OutputFlags::ONOCR;
-        t.local_flags |= LocalFlags::ECHO
-            | LocalFlags::ECHOE
-            | LocalFlags::ECHOK
-            | LocalFlags::ISIG
-            | LocalFlags::ICANON;
-        t.local_flags &= !LocalFlags::ECHOCTL;
-        t.input_flags |= InputFlags::ICRNL | InputFlags::IXON;
+        t.output_flags = OutputFlags::OPOST | OutputFlags::ONLCR | OutputFlags::ONOCR;
+        t.local_flags = LocalFlags::ECHO | LocalFlags::ECHOE | LocalFlags::ECHOK
+            | LocalFlags::ECHOCTL | LocalFlags::ISIG | LocalFlags::ICANON;
+        t.input_flags = InputFlags::ICRNL | InputFlags::IXON | InputFlags::BRKINT
+            | InputFlags::IGNPAR | InputFlags::ISTRIP;
+        t.control_flags = nix::sys::termios::ControlFlags::CS8;
         let _ = termios::tcsetattr(&slave, SetArg::TCSANOW, &t);
     }
     set_winsize(slave.as_raw_fd(), 80, 24);
@@ -318,16 +316,15 @@ fn try_open_namespace_fds(container_pid: u32) -> NamespaceFds {
     }
 }
 
-/// Enter namespaces (user → pid → mnt → net), fork to get a real PID in
-/// the container's PID namespace, mount fresh procfs scoped to that namespace,
-/// then exec. The parent uses libc::_exit() (raw syscall, no destructors) so
-/// the child's inherited fds (PTY, pipes) aren't closed prematurely.
+/// Enter user, mnt, net namespaces and mount a fresh procfs so exec'd
+/// processes have a working /proc. We avoid setns(CLONE_NEWPID) because on
+/// this kernel entering a child PID namespace via setns still shows the
+/// parent namespace's processes in a fresh proc mount — only fork() after
+/// setns gives real isolation, but the fork breaks PTY/TTY exec. The
+/// container's init retains its isolated procfs from mount_filesystems(true).
 fn exec_container_pre_exec(ctx: &ExecCtx) -> Result<(), std::io::Error> {
     if let Some(ref user) = ctx.ns.user {
         let _ = nix::sched::setns(user, CloneFlags::CLONE_NEWUSER);
-    }
-    if let Some(ref pid) = ctx.ns.pid {
-        let _ = nix::sched::setns(pid, CloneFlags::CLONE_NEWPID);
     }
     if ctx.use_mnt_ns {
         if let Some(ref mnt) = ctx.ns.mnt {
@@ -335,22 +332,13 @@ fn exec_container_pre_exec(ctx: &ExecCtx) -> Result<(), std::io::Error> {
                 std::io::Error::new(std::io::ErrorKind::Other, format!("setns(CLONE_NEWNS): {e}"))
             })?;
         }
+        let _ = mount(Some("proc"), "/proc", Some("proc"),
+            MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC | MsFlags::MS_NODEV, None::<&str>);
     }
     if ctx.iso_net {
         if let Some(ref net) = ctx.ns.net {
             let _ = nix::sched::setns(net, CloneFlags::CLONE_NEWNET);
         }
-    }
-    if ctx.use_mnt_ns && ctx.ns.pid.is_some() {
-        let child = unsafe { nix::libc::fork() };
-        if child > 0 {
-            let mut status: i32 = 0;
-            unsafe { nix::libc::waitpid(child, &mut status as *mut i32, 0) };
-            let code = if nix::libc::WIFEXITED(status) { nix::libc::WEXITSTATUS(status) } else { 1 };
-            unsafe { nix::libc::_exit(code); }
-        }
-        let _ = mount(Some("proc"), "/proc", Some("proc"),
-            MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC | MsFlags::MS_NODEV, None::<&str>);
     }
     if let Some(g) = ctx.c_gid {
         let _ = nix::unistd::setgid(nix::unistd::Gid::from_raw(g));
