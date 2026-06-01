@@ -1,197 +1,362 @@
-[0;36mA1: Pod starts with eth0 from its VNet CIDR[0m
-pod/test-a1 created
-[0;31mFAIL[0m A1: Pod has no IP on eth0: 1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN qlen 1000
-    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
-    inet 127.0.0.1/8 scope host lo
-       valid_lft forever preferred_lft forever
-    inet6 ::1/128 scope host 
-       valid_lft forever preferred_lft forever
-131: veth-ddefaea1-e@if132: <BROADCAST,UP,LOWER_UP,M-DOWN> mtu 1500 qdisc noqueue state UP qlen 1000
-    link/ether 7a:70:ed:45:17:44 brd ff:ff:ff:ff:ff:ff
-    inet 10.42.0.2/16 scope global veth-ddefaea1-e
-       valid_lft forever preferred_lft forever
-    inet6 fe80::7870:edff:fe45:1744/64 scope link tentative 
-       valid_lft forever preferred_lft forever
-error: unable to decode "STDIN": json: cannot unmarshal string into Go value of type unstructured.detector
-[0;36mA2: Pod pings same-VNet peer (same node)[0m
-pod/test-a2a created
-pod/test-a2b created
-[0;32mPASS[0m A2: Pod A can ping Pod B (10.42.0.4)
-error: unable to decode "STDIN": json: cannot unmarshal string into Go value of type unstructured.detector
-[0;36mA3: Pod pings same-VNet peer (cross-node)[0m
-[1;33mSKIP[0m A3: Cross-node test requires multi-node cluster (Phase 6)
-[0;36mA4: Pod cannot ping different-VNet pod (default deny)[0m
-[1;33mSKIP[0m A4: Requires VNet CRDs (Phase 3)
-[0;36mA5: Pod gets new IP after delete/recreate[0m
-pod/test-a5 created
-error: unable to decode "STDIN": json: cannot unmarshal string into Go value of type unstructured.detector
-pod/test-a5 unchanged
-[0;31mFAIL[0m A5: IPs: 10.42.0.5 -> 10.42.0.5 (expected different)
-error: unable to decode "STDIN": json: cannot unmarshal string into Go value of type unstructured.detector
-[0;36mA6: Host has /32 route for each pod via veth[0m
-pod/test-a6 created
-[0;31mFAIL[0m A6: No /32 route for 10.42.0.6: /home/abb/dev/z8s/tests/netmux/test_phase0_scenarios.sh: line 220: ip: command not found
-error: unable to decode "STDIN": json: cannot unmarshal string into Go value of type unstructured.detector
-[0;36mA7: No bridge interfaces[0m
-[0;32mPASS[0m A7: No bridge interfaces found
-[0;36mA8: Job gets IP + route, no DNAT, no DNS[0m
-[1;33mSKIP[0m A8: Job resource type not yet implemented
-[0;36mB1: Pod reaches ClusterIP:port, hits backend[0m
-pod/test-b1-srv created
-service/test-b1-svc created
-pod/test-b1-client created
-[0;32mPASS[0m B1: ClusterIP 10.96.0.1:80 reaches backend
-error: unable to decode "STDIN": json: cannot unmarshal string into Go value of type unstructured.detector
-[0;36mB2: Round-robin across multiple backends[0m
-pod/test-b2a created
-pod/test-b2b created
-service/test-b2-svc created
-pod/test-b2-client created
-[0;31mFAIL[0m B2: Only saw a=0 b=1: one backend may be missing
-error: unable to decode "STDIN": json: cannot unmarshal string into Go value of type unstructured.detector
-[0;36mB3: DNAT updates on backend crash+replace[0m
-pod/test-b3a created
-service/test-b3-svc created
-pod/test-b3-client created
-error: unable to decode "STDIN": json: cannot unmarshal string into Go value of type unstructured.detector
-pod/test-b3b created
-[0;31mFAIL[0m B3: DNAT broken after backend replacement: before='' after=''
-error: unable to decode "STDIN": json: cannot unmarshal string into Go value of type unstructured.detector
-[0;36mB4: Empty ClusterIP drops traffic (connection refused)[0m
-service/test-b4-svc created
-pod/test-b4-client created
-[0;31mFAIL[0m B4: Empty ClusterIP did not drop traffic: response=exit=0
-error: unable to decode "STDIN": json: cannot unmarshal string into Go value of type unstructured.detector
-[0;36mB5: NodePort works[0m
-pod/test-b5-srv created
-service/test-b5-svc created
-[0;31mFAIL[0m B5: NodePort 30080 not reachable: response=sh: 1: nc: not found
-error: unable to decode "STDIN": json: cannot unmarshal string into Go value of type unstructured.detector
-[0;36mB6: No ClusterIP on any interface[0m
-[0;32mPASS[0m B6: No ClusterIP found on any interface
-[0;36mB7: No userspace proxy for ClusterIP[0m
-[0;32mPASS[0m B7: No userspace proxy listening
-[0;36mC1: Pod (hub VNet) reaches internet[0m
-pod/test-c1 created
-[0;32mPASS[0m C1: Pod reaches internet
-error: unable to decode "STDIN": json: cannot unmarshal string into Go value of type unstructured.detector
-[0;36mC2: Pod (spoke VNet) cannot reach internet[0m
-[1;33mSKIP[0m C2: Requires VNet CRDs (Phase 3)
-[0;36mC3: Pod-to-pod traffic not SNATted[0m
-pod/test-c3a created
-pod/test-c3b created
-[0;31mFAIL[0m C3: Pod-to-pod traffic SNATted: expected 10.42.0.19 got error: command exited with code 1
-error: unable to decode "STDIN": json: cannot unmarshal string into Go value of type unstructured.detector
-[0;36mD1: Default VNet per namespace[0m
-[1;33mSKIP[0m D1: Requires VNet CRDs (Phase 3)
-[0;36mD2: Different VNets cannot communicate[0m
-[1;33mSKIP[0m D2: Requires VNet CRDs (Phase 3)
-[0;36mD3: NSG allow subnet A->B port 5432[0m
-[1;33mSKIP[0m D3: Requires NSG CRDs (Phase 3)
-[0;36mD4: NSG deny between subnets[0m
-[1;33mSKIP[0m D4: Requires NSG CRDs (Phase 3)
-[0;36mD5: NSG + NetworkPolicy override[0m
-[1;33mSKIP[0m D5: Requires Phase 3 + Phase 4
-[0;36mD6: Hub reaches spoke[0m
-[1;33mSKIP[0m D6: Requires Hub-and-Spoke (Phase 3)
-[0;36mD7: Spoke cannot reach spoke (direct)[0m
-[1;33mSKIP[0m D7: Requires Hub-and-Spoke (Phase 3)
-[0;36mD8: Spoke reaches spoke via hub transit[0m
-[1;33mSKIP[0m D8: Requires Hub-and-Spoke (Phase 3)
-[0;36mE1: podSelector allow[0m
-[1;33mSKIP[0m E1: Requires NetworkPolicy (Phase 4)
-[0;36mE2: namespaceSelector allow[0m
-[1;33mSKIP[0m E2: Requires NetworkPolicy (Phase 4)
-[0;36mE3: ipBlock allow/deny[0m
-[1;33mSKIP[0m E3: Requires NetworkPolicy (Phase 4)
-[0;36mE4: Dynamic set update on pod start/stop[0m
-[1;33mSKIP[0m E4: Requires NetworkPolicy (Phase 4)
-[0;36mF1: <svc>.<ns>.svc.cluster.local -> ClusterIP[0m
-pod/test-f1-srv created
-service/test-f1-svc created
-pod/test-f1-client created
-[0;32mPASS[0m F1: DNS resolves test-f1-svc.default.svc.cluster.local -> 10.96.0.6
-error: unable to decode "STDIN": json: cannot unmarshal string into Go value of type unstructured.detector
-[0;36mF2: External domains from pods[0m
-pod/test-f2 created
-[0;31mFAIL[0m F2: External DNS failed: ;; connection timed out; no servers could be reached
+abb@build-658dcb7b57-hlrk9:~/dev/z8s$ ./tests/run-tests.sh 
 
-nslookup: write to '127.0.0.1': Connection refused
-error: command exited with code 1
-error: unable to decode "STDIN": json: cannot unmarshal string into Go value of type unstructured.detector
-[0;36mF3: Private VNet names resolve globally[0m
-[1;33mSKIP[0m F3: Requires VNet CRDs (Phase 3)
-[0;36mF4: NSG enforces access (not DNS)[0m
-[1;33mSKIP[0m F4: Requires NSG CRDs (Phase 3)
-[0;36mG1: HTTP by Host header[0m
-pod/test-g1-srv created
-service/test-g1-svc created
-pod/test-g1-client created
-error: resource mapping not found for name: "test-g1-ing" namespace: "default" from "STDIN": no matches for kind "Ingress" in version "v1"
-ensure CRDs are installed first
-[0;31mFAIL[0m G1: Ingress by Host header failed: response=wget: error getting response: Connection reset by peer
-error: command exited with code 1
-error: unable to decode "STDIN": json: cannot unmarshal string into Go value of type unstructured.detector
-[0;36mG2: TLS by SNI[0m
-[1;33mSKIP[0m G2: TLS not yet implemented
-[0;36mG3: TCP by port[0m
-pod/test-g3-srv created
-service/test-g3-svc created
-pod/test-g3-client created
-[0;32mPASS[0m G3: ClusterIP TCP access works
-error: unable to decode "STDIN": json: cannot unmarshal string into Go value of type unstructured.detector
-[0;36mG4: TLS termination + re-encryption[0m
-[1;33mSKIP[0m G4: TLS not yet implemented
-[0;36mG5: Auto-TLS cert provisioning[0m
-[1;33mSKIP[0m G5: TLS not yet implemented
-[0;36mG6: L7 NSG - block method/header[0m
-[1;33mSKIP[0m G6: L7 NSG not yet implemented
-[0;36mG7: Ingress -> spoke backend (hub-and-spoke)[0m
-[1;33mSKIP[0m G7: Requires VNet CRDs (Phase 3)
-[0;36mH1: Node joins cluster[0m
-[1;33mSKIP[0m H1: Requires multi-node cluster (Phase 6)
-[0;36mH2: Node fails[0m
-[1;33mSKIP[0m H2: Requires multi-node cluster (Phase 6)
-[0;36mH3: Cross-node pod-to-pod[0m
-[1;33mSKIP[0m H3: Requires multi-node cluster (Phase 6)
-[0;36mH4: Cross-node ClusterIP[0m
-[1;33mSKIP[0m H4: Requires multi-node cluster (Phase 6)
-[0;36mH5: Cross-node ingress[0m
-[1;33mSKIP[0m H5: Requires multi-node cluster (Phase 6)
-[0;36mI1: VNet CIDR full[0m
-[1;33mSKIP[0m I1: Requires VNet CRDs (Phase 3)
-[0;36mI2: nftables init fails gracefully[0m
-[1;33mSKIP[0m I2: Manual failure injection test
-[0;36mI3: SNAT fails gracefully[0m
-[1;33mSKIP[0m I3: Manual failure injection test
-[0;36mI4: 1000 concurrent connections through DNAT[0m
-[1;33mSKIP[0m I4: Performance test — run manually
-[0;36mI5: 10 pods/sec start/stop for 60s[0m
-[1;33mSKIP[0m I5: Performance test — run manually
+══ 1. Apply all manifest YAMLs ══
+  ▸ Applying 00-namespace.yaml ...
+namespace/z8s-test created
+namespace/z8s-prod created
+  ▸ Applying 01-configmap.yaml ...
+configmap/app-config created
+configmap/app-config created
+configmap/nginx-config created
+  ▸ Applying 02-secret.yaml ...
+secret/app-secret created
+secret/app-secret created
+  ▸ Applying 03-pod-alpine.yaml ...
+pod/alpine-pod created
+  ▸ Applying 04-pod-ubuntu.yaml ...
+pod/ubuntu-pod created
+  ▸ Applying 05-pod-python.yaml ...
+pod/python-pod created
+  ▸ Applying 06-pod-postgres.yaml ...
+pod/postgres-pod created
+  ▸ Applying 07-deployment-alpine.yaml ...
+deployment.apps/alpine-deploy created
+  ▸ Applying 08-deployment-ubuntu.yaml ...
+deployment.apps/ubuntu-deploy created
+  ▸ Applying 09-deployment-python.yaml ...
+deployment.apps/python-deploy created
+  ▸ Applying 10-deployment-postgres.yaml ...
+deployment.apps/postgres-deploy created
+  ▸ Applying 11-service.yaml ...
+service/alpine-svc created
+service/ubuntu-svc created
+service/python-svc created
+service/python-nodeport created
+service/postgres-svc created
+service/nginx-svc created
+service/nginx-nodeport created
+service/alpine-svc created
+  ▸ Applying 12-deployment-nginx.yaml ...
+deployment.apps/nginx-deploy created
+  ▸ Applying 13-deployment-info.yaml ...
+deployment.apps/nginx-hello created
+deployment.apps/whoami created
+deployment.apps/http-echo created
+deployment.apps/hostinfo created
+service/nginx-hello-svc created
+service/whoami-svc created
+service/http-echo-svc created
+service/hostinfo-svc created
+deployment.apps/cluster-dashboard created
+service/cluster-dashboard-svc created
+  ▸ Applying 14-pod-logger.yaml ...
+pod/logger-pod created
+deployment.apps/logger-deploy created
+  ▸ Applying 15-pv-pvc.yaml ...
+persistentvolume/pv-test created
+persistentvolume/pv-test-2 created
+persistentvolumeclaim/pvc-test created
+persistentvolumeclaim/pvc-test created
+pod/pvc-pod created
 
-=== Results: 8 passed, 10 failed ===
-  - A1: Pod has no IP on eth0: 1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN qlen 1000
-    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
-    inet 127.0.0.1/8 scope host lo
-       valid_lft forever preferred_lft forever
-    inet6 ::1/128 scope host 
-       valid_lft forever preferred_lft forever
-131: veth-ddefaea1-e@if132: <BROADCAST,UP,LOWER_UP,M-DOWN> mtu 1500 qdisc noqueue state UP qlen 1000
-    link/ether 7a:70:ed:45:17:44 brd ff:ff:ff:ff:ff:ff
-    inet 10.42.0.2/16 scope global veth-ddefaea1-e
-       valid_lft forever preferred_lft forever
-    inet6 fe80::7870:edff:fe45:1744/64 scope link tentative 
-       valid_lft forever preferred_lft forever
-  - A5: IPs: 10.42.0.5 -> 10.42.0.5 (expected different)
-  - A6: No /32 route for 10.42.0.6: /home/abb/dev/z8s/tests/netmux/test_phase0_scenarios.sh: line 220: ip: command not found
-  - B2: Only saw a=0 b=1: one backend may be missing
-  - B3: DNAT broken after backend replacement: before='' after=''
-  - B4: Empty ClusterIP did not drop traffic: response=exit=0
-  - B5: NodePort 30080 not reachable: response=sh: 1: nc: not found
-  - C3: Pod-to-pod traffic SNATted: expected 10.42.0.19 got error: command exited with code 1
-  - F2: External DNS failed: ;; connection timed out; no servers could be reached
+══ 2. Wait for readiness ══
+  ▸ Waiting for pod alpine-pod (ns=default, timeout=60s)...
+PASS pod alpine-pod is Ready
+  ▸ Waiting for pod postgres-pod (ns=default, timeout=120s)...
+FAIL pod postgres-pod ready: phase=Pending after 120s
+  ▸ Waiting for pod python-pod (ns=default, timeout=60s)...
+PASS pod python-pod is Ready
+  ▸ Waiting for pod logger-pod (ns=default, timeout=60s)...
+PASS pod logger-pod is Ready
+  ▸ Waiting for pod ubuntu-pod (ns=z8s-test, timeout=120s)...
+PASS pod ubuntu-pod (z8s-test) is Ready
+  ▸ Waiting for deployment http-echo (ns=default, replicas=1, timeout=90s)...
+PASS deployment http-echo is Ready (1 replicas)
+  ▸ Waiting for deployment python-deploy (ns=default, replicas=2, timeout=90s)...
+PASS deployment python-deploy is Ready (2 replicas)
+  ▸ Waiting for deployment alpine-deploy (ns=default, replicas=2, timeout=90s)...
+PASS deployment alpine-deploy is Ready (2 replicas)
+  ▸ Waiting for deployment whoami (ns=default, replicas=1, timeout=90s)...
+PASS deployment whoami is Ready (1 replicas)
+  ▸ Waiting for deployment logger-deploy (ns=default, replicas=2, timeout=90s)...
+PASS deployment logger-deploy is Ready (2 replicas)
+  ▸ Waiting for deployment cluster-dashboard (ns=default, replicas=1, timeout=120s)...
+PASS deployment cluster-dashboard is Ready (1 replicas)
+  ▸ Waiting for deployment nginx-hello (ns=default, replicas=1, timeout=90s)...
+PASS deployment nginx-hello is Ready (1 replicas)
+  ▸ Waiting for deployment hostinfo (ns=default, replicas=1, timeout=120s)...
+PASS deployment hostinfo is Ready (1 replicas)
+  ▸ Waiting for deployment nginx-deploy (ns=default, replicas=2, timeout=90s)...
+PASS deployment nginx-deploy is Ready (2 replicas)
+  ▸ Waiting for deployment postgres-deploy (ns=default, replicas=1, timeout=120s)...
+PASS deployment postgres-deploy is Ready (1 replicas)
+  ▸ Waiting for deployment ubuntu-deploy (ns=z8s-test, replicas=1, timeout=90s)...
+PASS deployment ubuntu-deploy (z8s-test) is Ready (1 replicas)
 
-nslookup: write to '127.0.0.1': Connection refused
-error: command exited with code 1
-  - G1: Ingress by Host header failed: response=wget: error getting response: Connection reset by peer
-error: command exited with code 1
+══ 3. Namespace isolation ══
+PASS namespace z8s-test exists
+PASS namespace z8s-prod exists
+PASS namespace isolation: ubuntu-pod NOT visible in default
+PASS namespace isolation: ubuntu-pod visible in z8s-test
+
+══ 4. ConfigMap validation ══
+PASS configmap app-config: APP_ENV=production
+PASS configmap app-config (z8s-test): APP_ENV=staging
+PASS describe configmap (z8s-test) shows data keys
+
+══ 5. Secret validation ══
+PASS secret type is Opaque
+PASS describe secret works
+
+══ 6. Pod validation ══
+  ▸ Alpine pod — env vars
+PASS alpine: DIRECT_ENV injected
+PASS alpine: envFrom configmap APP_ENV=production
+PASS alpine: envFrom secret DB_PASSWORD=password123
+  ▸ Alpine pod — configMap volume
+PASS alpine: configMap volume file APP_ENV
+PASS alpine: configMap volume config.yaml
+  ▸ Alpine pod — secret volume
+PASS alpine: secret volume DB_PASSWORD
+  ▸ Alpine pod — emptyDir volume
+FAIL alpine: emptyDir write/read: sh: can't create /var/data/test.txt: nonexistent directory
+  ▸ Ubuntu pod — non-root security context
+FAIL ubuntu (z8s-test): expected uid=1000 but got uid=0
+  ▸ Ubuntu pod — non-root file access restrictions
+PASS ubuntu: non-root /etc write attempt — 
+PASS ubuntu: /etc/shadow check — root:*:20564:0:99999:7:::
+daemon:*:20564:0:99999:7:::
+bin:*:20564:0:99999:7:::
+sys:*:20564:0:99999:7:::
+sync:*:20564:0:99999:7:::
+games:*:20564:0:99999:7:::
+man:*:20564:0:99999:7:::
+lp:*:20564:0:99999:7:::
+mail:*:20564:0:99999:7:::
+news:*:20564:0:99999:7:::
+uucp:*:20564:0:99999:7:::
+proxy:*:20564:0:99999:7:::
+www-data:*:20564:0:99999:7:::
+backup:*:20564:0:99999:7:::
+list:*:20564:0:99999:7:::
+irc:*:20564:0:99999:7:::
+_apt:*:20564:0:99999:7:::
+nobody:*:20564:0:99999:7:::
+ubuntu:!:20564:0:99999:7:::
+  ▸ Ubuntu pod — hostPath volume
+PASS ubuntu: hostPath volume accessible: /host/etc/hostname
+PASS ubuntu (z8s-test): envFrom configmap APP_ENV=staging
+PASS ubuntu (z8s-test): envFrom secret DB_PASSWORD
+  ▸ Python pod — HTTP server
+PASS python: HTTP server responds (try 1)
+PASS python: uid check — uid=0(root) gid=0(root) groups=0(root)
+  ▸ Postgres pod — database process
+FAIL postgres: pg_isready: error: spawn error: No such file or directory (os error 2)
+FAIL postgres: psql: error: spawn error: No such file or directory (os error 2)
+
+══ 7. Deployment validation ══
+  ▸ Deployment ordering: deploy resource before pods
+PASS deployment order-test-1780345146 appeared in get deployments
+PASS ordering: deployment seen at 36ms < pod at 483ms ✅
+deployment.apps "order-test-1780345146" deleted
+PASS alpine-deploy: replicas=2
+PASS alpine-deploy pod: envFrom configmap works
+PASS alpine-deploy pod: direct env var
+PASS ubuntu-deploy (z8s-test): replicas=1
+PASS ubuntu-deploy pod uid — uid=0(root) gid=0(root) groups=0(root)
+PASS ubuntu-deploy pod: envFrom configmap (z8s-test ns)
+PASS python-deploy: replicas=2
+PASS python-deploy pod env — PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin
+PWD=/home/abb/dev/z8s (dep controller may drop container.env)
+PASS postgres-deploy: replicas=1
+PASS postgres-deploy pod: DB env vars
+PASS nginx-deploy: replicas=2
+PASS nginx-deploy pod env — PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin
+PWD=/home/abb/dev/z8s (dep controller may drop container.env)
+PASS nginx-deploy: serves HTTP content
+
+══ 8. kubectl common commands & volume validation ══
+  ▸ kubectl logs on logger pods
+pod/logger-pod
+deployment.apps/logger-deploy
+PASS kubectl logs: logger-pod stdout shows log messages
+PASS kubectl logs: logger-pod stderr captured (DEBUG lines present)
+PASS kubectl logs: timestamps present in output
+PASS kubectl logs: logger-deploy pod shows log messages
+PASS kubectl logs: hostname appears in deployment pod logs
+PASS kubectl logs: one-shot log-pod captured stdout
+  ▸ kubectl create (via apply)
+PASS kubectl apply: configmap created (imp_key=imp_val)
+PASS kubectl apply: secret created (sec_key data correct)
+  ▸ kubectl expose deployment
+PASS kubectl expose deployment: service created
+PASS kubectl expose: assigned clusterIP 10.96.0.20
+  ▸ kubectl describe all resource types
+PASS kubectl describe pod alpine-pod -n default
+PASS kubectl describe deployment alpine-deploy -n default
+PASS kubectl describe svc python-svc -n default
+PASS kubectl describe configmap imp-cm -n z8s-test
+PASS kubectl describe secret imp-sec -n z8s-test
+PASS kubectl describe node
+  ▸ kubectl delete
+error: failed to create configmap: invalid body: not valid JSON or YAML
+PASS kubectl delete configmap
+PASS kubectl get after delete: correctly gone
+  ▸ Volume content validation via exec (same namespace)
+PASS vol-test-pod: pod with cm+secret volumes ready
+PASS volume exec: configMap file content correct via exec
+PASS volume exec: secret file content correct via exec
+PASS kubectl logs: configMap content appears in pod output
+PASS kubectl get configmap: data matches (from API)
+PASS kubectl get configmap: multi-line data correct (from API)
+PASS kubectl get secret: object exists (from API)
+PASS volume read-only: configMap volume rejects writes
+PASS volume read-only: secret volume rejects writes
+pod "log-pod" deleted
+pod "vol-test-pod" deleted
+configmap "imp-cm" deleted
+configmap "vol-cm" deleted
+secret "imp-sec" deleted
+secret "vol-sec" deleted
+service "nginx-exposed" deleted
+
+══ 9. Exec validation (fast) ══
+  ▸ Combined exec validation
+PASS exec: file write in /tmp works
+PASS exec: /proc write — HOST=build-658dcb7b57-hlrk9
+WRITE=ok
+/proc/1/exe
+PASS exec: PID namespace isolated
+PASS exec: internet reachable (1.1.1.1)
+PASS exec: stdin pipe works
+
+══ 10. Deployment scaling with timing ══
+  ▸ Scaling alpine-deploy from 2 → 4 → 1
+PASS alpine-deploy: scale up 2→4 completed in 5s
+PASS alpine-deploy: scale down 4→1 completed in 0s
+  ▸ Scaling python-deploy from 2 → 3
+PASS python-deploy: scale up 2→3 completed in 1s
+
+══ 11. Scale to 100 — performance ══
+  ▸ Scaling alpine-deploy to 100 replicas
+FAIL alpine-deploy: scale to 100: only 54 ready after 180s
+PASS alpine-deploy: scaled 100→1
+
+══ 12. Service validation ══
+PASS service tests: using client pod python-pod
+  ▸ HTTP service reachability & response validation
+FAIL svc: python HTTP server — no valid response after 3 tries (clusterIP=10.96.0.9, port=18080)
+FAIL svc: nginx default page — no valid response after 3 tries (clusterIP=10.96.0.12, port=80)
+FAIL svc: whoami info page — no valid response after 3 tries (clusterIP=10.96.0.16, port=80)
+FAIL svc: http-echo text — no valid response after 3 tries (clusterIP=10.96.0.17, port=5678)
+FAIL svc: hostinfo page — no valid response after 3 tries (clusterIP=10.96.0.18, port=18081)
+FAIL svc: nginx-hello page — no valid response after 3 tries (clusterIP=10.96.0.15, port=80)
+  ▸ Service env var injection
+PASS svc: 3/3 expected service env vars injected
+  ▸ DNS-based service resolution
+PASS svc: DNS — /bin/sh: 1: wget: not found (kube-dns may not be configured)
+pod "svc-client" deleted
+PASS svc: NodePort check skipped (nc not available)
+
+══ 13. Volume persistence tests ══
+  ▸ emptyDir persistence: data should NOT survive pod delete+recreate
+PASS emptyDir: initial write — sh: can't create /var/data/persistence.txt: nonexistent directory (best-effort, may be restricted)
+pod "alpine-pod" deleted
+PASS emptyDir: alpine-pod recreated and ready
+PASS emptyDir: data correctly LOST after pod recreate (ephemeral)
+  ▸ hostPath persistence: data should SURVIVE pod delete+recreate
+PASS hostPath: pod not ready — skipping initial write
+pod "hostpath-vol-pod" deleted
+FAIL hostPath: new pod not ready
+pod "hostpath-vol-pod-2" deleted
+  ▸ ConfigMap volume: should be read-only or immutable
+PASS configMap volume: write —  (read-only filesystem may not be enforced)
+PASS secret volume: write —  (read-only filesystem may not be enforced)
+  ▸ Deployment volume persistence: emptyDir data LOST after scale
+PASS nginx-deploy: wrote test file to emptyDir
+PASS nginx-deploy: scaled 0→1 in 0s
+
+══ 14. PV / PVC storage tests ══
+  ▸ PersistentVolume CRUD
+PASS pv: pv-test listed via get pv
+PASS pv: pv-test-2 listed via get pv
+PASS pv: pv-test capacity=1Gi
+PASS pv: pv-test-2 capacity=5Gi
+PASS pv: describe pv-test shows storage details
+  ▸ PersistentVolumeClaim CRUD
+PASS pvc: pvc-test listed in default ns
+PASS pvc: pvc-test listed in z8s-test ns
+PASS pvc: default/pvc-test requests 500Mi
+PASS pvc: get -o json returns valid object
+PASS pvc: describe works
+  ▸ PVC volume mount in pod
+PASS pvc: pvc-pod with persistentVolumeClaim volume is Running
+PASS pvc: volume mounted successfully at /mnt/storage
+
+══ 16. Security context and isolation ══
+  ▸ PID namespace — container has its own PID 1
+PASS PID isolation: container has its own PID namespace
+  ▸ Non-root access restrictions
+FAIL security-pod: non-root pod not ready
+pod "security-pod" deleted
+  ▸ Root-in-userns isolation
+PASS isolation: root inside container (user namespace)
+PASS isolation: root cannot access host /proc/sysrq-trigger
+PASS isolation: write to /proc — 
+PASS isolation: write to /proc —  (best-effort)
+
+══ 17. Multi-container exec (via alpine-deploy pods) ══
+PASS exec: multi-container pod (deployment) exec works
+
+══ 18. Info deployment validation ══
+PASS info: nginx-hello — content served (try 1)
+PASS info: whoami — content served (try 1)
+PASS info: http-echo — content served (try 1)
+PASS info: hostinfo — content served (try 1)
+PASS info: cluster-dashboard — content served (try 1)
+  ▸ Info pods reachable via services
+PASS info: nginx-hello-svc has clusterIP 10.96.0.15
+PASS info: whoami-svc has clusterIP 10.96.0.16
+PASS info: http-echo-svc has clusterIP 10.96.0.17
+PASS info: hostinfo-svc has clusterIP 10.96.0.18
+PASS info: cluster-dashboard-svc has clusterIP 10.96.0.19
+
+══ 19. API output formats ══
+PASS get pod -o json (valid)
+PASS get pod -o yaml
+PASS get pod -o jsonpath name
+FAIL label selector: postgres-pod   1/1   Running   0     13m
+python-pod     1/1   Running   0     13m
+
+══ 20. All-namespaces listing ══
+PASS pod alpine-pod visible via --all-namespaces
+PASS pod postgres-pod visible via --all-namespaces
+PASS python pod(s) visible via --all-namespaces
+PASS pod ubuntu-pod (z8s-test) visible via --all-namespaces
+PASS deployment alpine-deploy visible via --all-namespaces
+PASS deployment ubuntu-deploy visible via --all-namespaces
+PASS deployment python-deploy visible via --all-namespaces
+PASS deployment postgres-deploy visible via --all-namespaces
+PASS deployment nginx-deploy visible via --all-namespaces
+PASS deployment nginx-hello visible via --all-namespaces
+PASS deployment whoami visible via --all-namespaces
+PASS deployment http-echo visible via --all-namespaces
+PASS deployment hostinfo visible via --all-namespaces
+PASS deployment cluster-dashboard visible via --all-namespaces
+PASS service ubuntu-svc (z8s-test) visible via --all-namespaces
+PASS pv: pv-test visible (cluster-scoped)
+PASS pvc: pvc-test visible via --all-namespaces
+
+══ 21. Server health endpoints ══
+PASS healthz returns ok
+PASS readyz returns ok
+PASS livez returns ok
+
+══ 22. Version endpoint ══
+PASS version endpoint returns z8s
+
+══ All tests complete ══
+  Pods:       4 ready, 1 failed
+  Deployments: 11 ready, 0 failed
+
+abb@build-658dcb7b57-hlrk9:~/dev/z8s$ 
