@@ -6,6 +6,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use futures_util::{SinkExt, StreamExt};
 use nix::fcntl::OFlag;
+use nix::mount::{mount, MsFlags};
 use nix::pty;
 use nix::sched::CloneFlags;
 use nix::sys::termios::{self, InputFlags, LocalFlags, OutputFlags, SetArg};
@@ -235,7 +236,7 @@ fn spawn_with_pty(
     unsafe {
         child_cmd.as_std_mut().pre_exec(move || {
             if let Some(ref ns) = ns {
-                let _ = enter_container_namespaces(ns, isolated_net, isolated_net);
+                let _ = enter_container_namespaces(ns, isolated_net, true);
                 let _ = nix::unistd::chdir("/");
             }
             let _ = nix::unistd::setsid();
@@ -305,30 +306,24 @@ fn enter_container_namespaces(
     isolated_net: bool,
     use_mnt_ns: bool,
 ) -> Result<(), std::io::Error> {
-    // Try full namespace entry first (with user namespace).
-    // If user-ns setns fails (common in nested environments), retry without it.
     if let Some(ref user) = ns.user {
-        let user_result = nix::sched::setns(user, CloneFlags::CLONE_NEWUSER).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::Other, format!("setns(CLONE_NEWUSER): {e}"))
-        });
-        if user_result.is_err() {
-            return enter_mnt_net_ns(ns, isolated_net, use_mnt_ns);
-        }
+        let _ = nix::sched::setns(user, CloneFlags::CLONE_NEWUSER);
     }
-    enter_mnt_net_ns(ns, isolated_net, use_mnt_ns)
-}
-
-/// Enter only mnt/net namespaces (fallback when user namespace setns fails).
-fn enter_mnt_net_ns(
-    ns: &NamespaceFds,
-    isolated_net: bool,
-    use_mnt_ns: bool,
-) -> Result<(), std::io::Error> {
     if use_mnt_ns {
         if let Some(ref mnt) = ns.mnt {
             nix::sched::setns(mnt, CloneFlags::CLONE_NEWNS).map_err(|e| {
                 std::io::Error::new(std::io::ErrorKind::Other, format!("setns(CLONE_NEWNS): {e}"))
             })?;
+            // Mount a fresh procfs so the exec'd process can see itself in /proc.
+            // We avoid setns(CLONE_NEWPID) because it creates a ghost PID not
+            // visible in the container's existing procfs, breaking tools like ps.
+            let _ = mount(
+                Some("proc"),
+                "/proc",
+                Some("proc"),
+                MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC | MsFlags::MS_NODEV,
+                None::<&str>,
+            );
         }
     }
     if isolated_net {
@@ -391,10 +386,7 @@ fn build_command(
 
         let ns = try_open_namespace_fds(container_pid);
         let can_enter_mnt = ns.mnt.is_some();
-        let fs_isolated = rootfs::container_fs_isolated(container_pid, root);
-        // Use in-container paths only when we can enter the mount namespace.
-        // Otherwise use host-rootfs paths so wrap_dynamic_linker can find the binary.
-        let (exec_path, prog_args) = if fs_isolated && can_enter_mnt {
+        let (exec_path, prog_args) = if can_enter_mnt {
             rootfs::build_container_argv_in_mount_ns(cmd, &args_owned, root)
         } else {
             rootfs::build_container_argv(cmd, &args_owned, root)
@@ -403,7 +395,7 @@ fn build_command(
         // container rootfs — don't enter the mount namespace so the host PATH
         // is searched instead (e.g. wget in a scratch/minimal image).
         let binary_in_rootfs = exec_path.contains('/');
-        let use_mnt_ns = fs_isolated && binary_in_rootfs && can_enter_mnt;
+        let use_mnt_ns = binary_in_rootfs && can_enter_mnt;
         let (program, prog_args) = if use_mnt_ns {
             (exec_path, prog_args)
         } else {
