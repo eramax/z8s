@@ -90,6 +90,7 @@ impl Config {
         let mut i = 1;
         while i < args.len() {
             match args[i].as_str() {
+                "run" | "restart" | "node" => {} // handled by main
                 "--help" | "-h" => {
                     eprintln!("{}", HELP);
                     std::process::exit(0);
@@ -268,7 +269,7 @@ USAGE:
     z8s [OPTIONS]
     z8s join <ws-url> [--token <token>]   (join a cluster as a worker)
     z8s restart                           (restart a running instance)
-    z8s node start --port <PORT> [--service-cidr <CIDR>] [--pod-cidr <CIDR>]   (start a new cluster node)
+    z8s node start --port <PORT> [--peer-addr <IP>] [--service-cidr <CIDR>] [--pod-cidr <CIDR>]   (start a new cluster node)
 
 OPTIONS:
     --port <PORT>             API server listen port        [default: 6443]
