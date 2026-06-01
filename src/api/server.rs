@@ -41,6 +41,8 @@ pub struct AppState {
     pub registry: Arc<ComponentRegistry>,
     pub ctx: Arc<ReconcileContext>,
     pub gossip_state: Option<Arc<tokio::sync::Mutex<crate::store::gossip::GossipState>>>,
+    /// Wakes the reconciler immediately when a Pod assignment arrives via gossip.
+    pub reconciler_notify: Arc<tokio::sync::Notify>,
 }
 
 impl AppState {
@@ -80,6 +82,7 @@ pub async fn build_app_state(
     registry: Arc<ComponentRegistry>,
     ctx: Arc<ReconcileContext>,
     gossip_state: Option<Arc<tokio::sync::Mutex<crate::store::gossip::GossipState>>>,
+    reconciler_notify: Arc<tokio::sync::Notify>,
 ) -> AppState {
     // Log store state on startup
     let pods = store.get_by_kind("Pod").await.len();
@@ -104,6 +107,7 @@ pub async fn build_app_state(
         registry,
         ctx,
         gossip_state,
+        reconciler_notify,
     }
 }
 
@@ -142,7 +146,8 @@ pub async fn gossip_ws_handler(
     match state.gossip_state {
         Some(ref gs) => {
             let gs = gs.clone();
-            ws.on_upgrade(move |socket| crate::store::ws::handle_gossip_ws(socket, gs))
+            let notify = state.reconciler_notify.clone();
+            ws.on_upgrade(move |socket| crate::store::ws::handle_gossip_ws(socket, gs, notify))
                 .into_response()
         }
         None => (
@@ -159,9 +164,11 @@ pub async fn run_server(
     registry: Arc<ComponentRegistry>,
     ctx: Arc<ReconcileContext>,
     gossip_state: Option<Arc<tokio::sync::Mutex<crate::store::gossip::GossipState>>>,
+    reconciler_notify: Arc<tokio::sync::Notify>,
 ) {
-    let state = build_app_state(store, process_tracker, registry, ctx, gossip_state).await;
+    let state = build_app_state(store, process_tracker, registry, ctx, gossip_state, reconciler_notify).await;
     let app = build_router(state);
+
     let addr: std::net::SocketAddr = format!("0.0.0.0:{}", z8s_port())
         .parse()
         .expect("Invalid listen address");
@@ -580,9 +587,10 @@ mod tests {
         let supervisor = Arc::new(crate::cri::runtime::ProcessSupervisor::new(
             image,
             cgroup.clone(),
-            Arc::new(crate::netmux::NetMux::new(&crate::config::get().pod_cidr).unwrap()),
+            Arc::new(crate::netmux::NetMux::new(&crate::config::get().pod_cidr, &crate::config::get().node_name).unwrap()),
         ));
         let container_runtime = Arc::new(crate::cri::runtime::ContainerRuntime::new(
+
             supervisor.clone(),
             cgroup,
         ));
@@ -591,9 +599,10 @@ mod tests {
             restart_counts: supervisor.restart_counts.clone(),
             cri: container_runtime.clone(),
             store: store.clone(),
+            broadcast_tx: tokio::sync::RwLock::new(None),
         });
         let test_netmux =
-            Arc::new(crate::netmux::NetMux::new(&crate::config::get().pod_cidr).unwrap());
+            Arc::new(crate::netmux::NetMux::new(&crate::config::get().pod_cidr, &crate::config::get().node_name).unwrap());
         let network = Arc::new(crate::components::network::service::NetworkManager::new(
             store.clone(),
             process_tracker.clone(),
@@ -612,7 +621,7 @@ mod tests {
         });
         let registry = Arc::new(crate::components::ComponentRegistry::new());
         let gossip_state = None;
-        let state = build_app_state(store, process_tracker, registry, ctx, gossip_state).await;
+        let state = build_app_state(store, process_tracker, registry, ctx, gossip_state, Arc::new(tokio::sync::Notify::new())).await;
         build_router(state)
     }
 
@@ -629,7 +638,7 @@ mod tests {
         let supervisor = Arc::new(crate::cri::runtime::ProcessSupervisor::new(
             image,
             cgroup.clone(),
-            Arc::new(crate::netmux::NetMux::new(&crate::config::get().pod_cidr).unwrap()),
+            Arc::new(crate::netmux::NetMux::new(&crate::config::get().pod_cidr, &crate::config::get().node_name).unwrap()),
         ));
         let container_runtime = Arc::new(crate::cri::runtime::ContainerRuntime::new(
             supervisor.clone(),
@@ -640,9 +649,10 @@ mod tests {
             restart_counts: supervisor.restart_counts.clone(),
             cri: container_runtime.clone(),
             store: store.clone(),
+            broadcast_tx: tokio::sync::RwLock::new(None),
         });
         let test_netmux =
-            Arc::new(crate::netmux::NetMux::new(&crate::config::get().pod_cidr).unwrap());
+            Arc::new(crate::netmux::NetMux::new(&crate::config::get().pod_cidr, &crate::config::get().node_name).unwrap());
         let network = Arc::new(crate::components::network::service::NetworkManager::new(
             store.clone(),
             process_tracker.clone(),
@@ -662,7 +672,7 @@ mod tests {
         let registry = Arc::new(crate::components::ComponentRegistry::new());
         let gossip_state = None;
         let state =
-            build_app_state(store.clone(), process_tracker, registry, ctx, gossip_state).await;
+            build_app_state(store.clone(), process_tracker, registry, ctx, gossip_state, Arc::new(tokio::sync::Notify::new())).await;
         (build_router(state), store)
     }
 

@@ -10,7 +10,11 @@ use crate::store::StoreBackend;
 use crate::store::gossip::{GossipMessage, GossipState, SyncEntry};
 
 /// Handle an incoming WebSocket connection from a peer.
-pub async fn handle_gossip_ws(ws: WebSocket, state: Arc<tokio::sync::Mutex<GossipState>>) {
+pub async fn handle_gossip_ws(
+    ws: WebSocket,
+    state: Arc<tokio::sync::Mutex<GossipState>>,
+    notify: Arc<tokio::sync::Notify>,
+) {
     info!("Gossip peer connected");
 
     let (mut ws_sender, mut ws_receiver) = ws.split();
@@ -47,7 +51,7 @@ pub async fn handle_gossip_ws(ws: WebSocket, state: Arc<tokio::sync::Mutex<Gossi
         match ws_receiver.next().await {
             Some(Ok(Message::Text(text))) => {
                 if let Ok(msg) = serde_json::from_str::<GossipMessage>(&text) {
-                    handle_message(msg, &msg_tx, &state).await;
+                    handle_message(msg, &msg_tx, &state, &notify).await;
                 }
             }
             Some(Ok(Message::Close(_))) => {
@@ -71,6 +75,7 @@ async fn handle_message(
     msg: GossipMessage,
     tx: &tokio::sync::mpsc::UnboundedSender<Message>,
     state: &Arc<tokio::sync::Mutex<GossipState>>,
+    notify: &Arc<tokio::sync::Notify>,
 ) {
     match msg {
         GossipMessage::Gossip {
@@ -86,6 +91,13 @@ async fn handle_message(
             };
             if should_apply {
                 if let Ok(resource) = serde_json::from_slice::<crate::store::AnyResource>(&value) {
+                    // Wake the reconciler if this is a Pod assignment for the local node
+                    if let crate::store::AnyResource::Pod(ref p) = resource {
+                        let local = crate::config::get().node_name.clone();
+                        if p.assigned_node.as_deref() == Some(local.as_str()) {
+                            notify.notify_one();
+                        }
+                    }
                     if let Err(e) = db.apply(resource).await {
                         tracing::warn!("Failed to apply gossiped resource {}: {}", key, e);
                     } else {
@@ -122,6 +134,13 @@ async fn handle_message(
                 if let Ok(resource) =
                     serde_json::from_slice::<crate::store::AnyResource>(&entry.value)
                 {
+                    // Wake the reconciler on Pod assignments for this node
+                    if let crate::store::AnyResource::Pod(ref p) = resource {
+                        let local = crate::config::get().node_name.clone();
+                        if p.assigned_node.as_deref() == Some(local.as_str()) {
+                            notify.notify_one();
+                        }
+                    }
                     db.apply(resource).await.ok();
                 }
                 state
@@ -148,6 +167,7 @@ pub async fn run_gossip_client(
     peer_url: String,
     state: Arc<tokio::sync::Mutex<GossipState>>,
     mut broadcast_rx: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+    notify: Arc<tokio::sync::Notify>,
 ) {
     loop {
         match tokio_tungstenite::connect_async(&peer_url).await {
@@ -177,6 +197,13 @@ pub async fn run_gossip_client(
                                                 };
                                                 if should_apply {
                                                     if let Ok(resource) = serde_json::from_slice::<crate::store::AnyResource>(&value) {
+                                                        // Wake reconciler on Pod assignments for local node
+                                                        if let crate::store::AnyResource::Pod(ref p) = resource {
+                                                            let local = crate::config::get().node_name.clone();
+                                                            if p.assigned_node.as_deref() == Some(local.as_str()) {
+                                                                notify.notify_one();
+                                                            }
+                                                        }
                                                         db.apply(resource).await.ok();
                                                     }
                                                 }
@@ -185,6 +212,13 @@ pub async fn run_gossip_client(
                                                 let db = { state.lock().await.db.clone() };
                                                 for entry in entries.iter() {
                                                     if let Ok(resource) = serde_json::from_slice::<crate::store::AnyResource>(&entry.value) {
+                                                        // Wake reconciler on Pod assignments for local node
+                                                        if let crate::store::AnyResource::Pod(ref p) = resource {
+                                                            let local = crate::config::get().node_name.clone();
+                                                            if p.assigned_node.as_deref() == Some(local.as_str()) {
+                                                                notify.notify_one();
+                                                            }
+                                                        }
                                                         db.apply(resource).await.ok();
                                                     }
                                                     state.lock().await.seen.insert(entry.key.clone(), entry.term);

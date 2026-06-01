@@ -243,7 +243,8 @@ pub async fn run_node(
 
     let mut registry = ComponentRegistry::new();
     registry.register(Box::new(PodResource::new()));
-    registry.register(Box::new(DeploymentResource::new(store.clone())));
+    registry.register(Box::new(DeploymentResource::new(store.clone(), redb.clone())));
+
     registry.register(Box::new(ServiceResource::new(
         store.clone(),
         network.clone(),
@@ -286,13 +287,15 @@ pub async fn run_node(
         ctx.clone(),
         process_tracker.clone(),
     ));
+    let reconciler_notify = reconciler.notify.clone();
     let rec = reconciler.clone();
     tokio::spawn(async move { rec.run().await });
 
     // ── Gossip setup (no blocking) ────────────────────────────────────
     let gossip_state = {
-        let mut gs = crate::store::gossip::GossipState::new(cfg.node_name.clone(), store.clone());
-        let state = std::sync::Arc::new(tokio::sync::Mutex::new(gs));
+        let state = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::store::gossip::GossipState::new(cfg.node_name.clone(), store.clone()),
+        ));
 
         for (name, addr) in &cfg.peers {
             let url = format!("ws://{}/ws/gossip", addr);
@@ -303,8 +306,9 @@ pub async fn run_node(
             // Register the peer channel directly — no blocking
             st.lock().await.add_peer(tx);
 
+            let notify = reconciler_notify.clone();
             tokio::spawn(async move {
-                crate::store::ws::run_gossip_client(n, url, st, rx).await;
+                crate::store::ws::run_gossip_client(n, url, st, rx, notify).await;
             });
 
             let ae_state = state.clone();
@@ -347,8 +351,9 @@ pub async fn run_node(
     let reg2 = registry.clone();
     let ctx2 = ctx.clone();
     let gs = gossip_state.clone();
+    let srv_notify = reconciler_notify.clone();
     tokio::spawn(async move {
-        crate::api::server::run_server(store_clone, pt2, reg2, ctx2, gs).await;
+        crate::api::server::run_server(store_clone, pt2, reg2, ctx2, gs, srv_notify).await;
     });
 
     if let Some(ref db) = redb {

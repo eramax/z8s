@@ -8,16 +8,14 @@ use crate::store::StoreBackend;
 use crate::store::leases::{renew_lease, run_lease_loop};
 use crate::types::{AnyResource, LeaseRecord, NodeState};
 
-async fn pick_node(
+/// Build a snapshot of live nodes and their current pod counts in one pass.
+/// Returns a Vec of (node_name, pod_count) sorted least-loaded first.
+async fn node_load_snapshot(
     store: &Arc<dyn StoreBackend>,
     db: &Arc<crate::store::RedbBackend>,
-) -> Option<String> {
-    let mut best: Option<(String, u32)> = None;
-    
-    // Always include the local node
+) -> Vec<(String, u32)> {
+    // Collect all known node names (local + gossiped)
     let mut node_names = vec![crate::config::get().node_name.clone()];
-    
-    // Include all gossiped nodes
     for t in store.get_by_kind("Node").await {
         if let AnyResource::Node(n) = t.resource {
             if let Some(name) = n.metadata.name {
@@ -28,25 +26,34 @@ async fn pick_node(
         }
     }
 
-    for node_name in node_names {
-        // Read local state for this node if we have it (e.g. for the local node itself)
-        if let Some(rec) = db.read_node(&node_name).await {
+    // Count pod assignments in a single pass over all pods
+    let mut counts: std::collections::HashMap<String, u32> = node_names
+        .iter()
+        .map(|n| (n.clone(), 0u32))
+        .collect();
+    for t in store.get_by_kind("Pod").await {
+        if let AnyResource::Pod(p) = t.resource {
+            if let Some(node) = p.assigned_node {
+                counts.entry(node).and_modify(|c| *c += 1);
+            }
+        }
+    }
+
+    // Filter out dead nodes
+    let mut result = Vec::new();
+    for name in node_names {
+        if let Some(rec) = db.read_node(&name).await {
             if rec.state == NodeState::Dead {
                 continue;
             }
         }
-        
-        // Count pods assigned to this node
-        let count = store.get_by_kind("Pod").await.iter()
-            .filter(|t| matches!(&t.resource, AnyResource::Pod(p) if p.assigned_node.as_deref() == Some(node_name.as_str())))
-            .count() as u32;
-
-        if best.is_none() || count < best.as_ref().unwrap().1 {
-            best = Some((node_name, count));
-        }
+        let cnt = counts.get(&name).copied().unwrap_or(0);
+        result.push((name, cnt));
     }
-    
-    best.map(|(n, _)| n)
+
+    // Stable sort: least-loaded first
+    result.sort_by_key(|(_, c)| *c);
+    result
 }
 
 pub async fn scheduler_tick(
@@ -64,49 +71,43 @@ pub async fn scheduler_tick(
 
     let pods = store.get_by_kind("Pod").await;
 
+    // Snapshot node load once — O(nodes + pods) instead of O(pods * pods).
+    // We maintain a local counter and update it as we assign, so each subsequent
+    // assignment sees the updated load and distributes evenly.
+    let mut node_loads = node_load_snapshot(store, db).await;
+    if node_loads.is_empty() {
+        return 0;
+    }
+
+    // --- Pass 1: schedule unassigned pods ---
+    let mut to_broadcast: Vec<AnyResource> = Vec::new();
     for t in &pods {
         if let AnyResource::Pod(p) = &t.resource {
             if p.assigned_node.is_some() {
                 continue;
             }
-            if let Some(node) = pick_node(store, db).await {
-                let mut pod = p.clone();
-                pod.assigned_node = Some(node.clone());
-                pod.scheduler_epoch = lease.epoch;
-                match store.apply(AnyResource::Pod(pod.clone())).await {
-                    Ok(()) => {
-                        if let Some(state) = gs {
-                            state.lock().await.broadcast_write(&AnyResource::Pod(pod.clone())).await;
-                        }
-                        // Verify by reading back
-                        let ns = p.metadata.namespace.as_deref().unwrap_or("default");
-                        let uid = format!("Pod/{}/{}", ns, t.resource.name());
-                        match store.get(&uid).await {
-                            Some(tracker) => {
-                                if let AnyResource::Pod(p) = &tracker.resource {
-                                    tracing::info!(
-                                        "Assigned {} -> {}, verify: assigned_node={:?}",
-                                        t.resource.name(),
-                                        node,
-                                        p.assigned_node
-                                    );
-                                }
-                            }
-                            None => tracing::warn!(
-                                "Assigned {} but verify not found!",
-                                t.resource.name()
-                            ),
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!("Failed to assign {} -> {}: {}", t.resource.name(), node, e)
-                    }
+            // Pick the least-loaded node (first after sort)
+            let node = node_loads[0].0.clone();
+            let mut pod = p.clone();
+            pod.assigned_node = Some(node.clone());
+            pod.scheduler_epoch = lease.epoch;
+            match store.apply(AnyResource::Pod(pod.clone())).await {
+                Ok(()) => {
+                    tracing::info!("Assigned {} -> {}", t.resource.name(), node);
+                    // Update local load counter so next pod sees the correct balance
+                    node_loads[0].1 += 1;
+                    node_loads.sort_by_key(|(_, c)| *c);
+                    to_broadcast.push(AnyResource::Pod(pod));
+                    total += 1;
                 }
-                total += 1;
+                Err(e) => {
+                    tracing::error!("Failed to assign {} -> {}: {}", t.resource.name(), node, e);
+                }
             }
         }
     }
 
+    // --- Pass 2: re-assign pods on dead nodes ---
     for t in &pods {
         if let AnyResource::Pod(p) = &t.resource {
             if let Some(ref assigned) = p.assigned_node {
@@ -115,22 +116,30 @@ pub async fn scheduler_tick(
                         continue;
                     }
                 }
-                if let Some(node) = pick_node(store, db).await {
-                    let mut pod = p.clone();
-                    pod.assigned_node = Some(node.clone());
-                    pod.scheduler_epoch = lease.epoch;
-                    store.apply(AnyResource::Pod(pod.clone())).await.ok();
-                    if let Some(state) = gs {
-                        state.lock().await.broadcast_write(&AnyResource::Pod(pod)).await;
-                    }
-                    total += 1;
-                    info!(
-                        "Re-assigned {} from dead {} -> {}",
-                        t.resource.name(),
-                        assigned,
-                        node
-                    );
+                if node_loads.is_empty() {
+                    continue;
                 }
+                let node = node_loads[0].0.clone();
+                let mut pod = p.clone();
+                pod.assigned_node = Some(node.clone());
+                pod.scheduler_epoch = lease.epoch;
+                if store.apply(AnyResource::Pod(pod.clone())).await.is_ok() {
+                    node_loads[0].1 += 1;
+                    node_loads.sort_by_key(|(_, c)| *c);
+                    info!("Re-assigned {} from dead {} -> {}", t.resource.name(), assigned, node);
+                    to_broadcast.push(AnyResource::Pod(pod));
+                    total += 1;
+                }
+            }
+        }
+    }
+
+    // --- Broadcast all assignments in one go, outside any per-pod lock ---
+    if !to_broadcast.is_empty() {
+        if let Some(state) = gs {
+            let gs_lock = state.lock().await;
+            for resource in &to_broadcast {
+                gs_lock.broadcast_write(resource).await;
             }
         }
     }

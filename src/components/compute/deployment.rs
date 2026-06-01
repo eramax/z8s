@@ -64,11 +64,12 @@ pub fn create_pod_from_template(deploy: &Deployment, name: &str) -> Result<Pod> 
 
 pub struct DeploymentResource {
     pub store: Arc<dyn StoreBackend>,
+    pub db: Option<Arc<crate::store::RedbBackend>>,
 }
 
 impl DeploymentResource {
-    pub fn new(store: Arc<dyn StoreBackend>) -> Self {
-        Self { store }
+    pub fn new(store: Arc<dyn StoreBackend>, db: Option<Arc<crate::store::RedbBackend>>) -> Self {
+        Self { store, db }
     }
 }
 
@@ -107,6 +108,19 @@ impl DeploymentResource {
         let AnyResource::Deployment(deploy) = &tracker.resource else {
             return Ok(());
         };
+
+        // Only the lease holder (cluster leader) should run deployment reconciliation.
+        // If no db is available (memory-only mode), allow all nodes to reconcile.
+        let local_node = crate::config::get().node_name.clone();
+        if let Some(ref db) = self.db {
+            if let Some(lease) = db.read_lease().await {
+                if lease.holder != local_node {
+                    return Ok(());
+                }
+            } else {
+                return Ok(()); // No lease yet; don't act
+            }
+        }
 
         let spec = deploy.spec.as_ref().context("Deployment has no spec")?;
         let name = deploy.metadata.name.as_deref().unwrap_or("unknown");

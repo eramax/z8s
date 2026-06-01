@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use tokio::sync::Notify;
 use tokio::time::Duration;
 
 use crate::components::{ComponentRegistry, ReconcileContext};
@@ -8,6 +9,9 @@ pub struct Reconciler {
     pub registry: Arc<ComponentRegistry>,
     pub ctx: Arc<ReconcileContext>,
     pub process_tracker: Arc<ProcessTracker>,
+    /// External callers (e.g. gossip handler) call `notify.notify_one()` to
+    /// wake the reconciler immediately instead of waiting for the 2s ticker.
+    pub notify: Arc<Notify>,
 }
 
 impl Reconciler {
@@ -20,6 +24,7 @@ impl Reconciler {
             registry,
             ctx,
             process_tracker,
+            notify: Arc::new(Notify::new()),
         }
     }
 
@@ -27,7 +32,10 @@ impl Reconciler {
         let mut ticker = tokio::time::interval(Duration::from_secs(2));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            ticker.tick().await;
+            tokio::select! {
+                _ = ticker.tick() => {}
+                _ = self.notify.notified() => {}
+            }
             let reaped = self.process_tracker.reap_zombies();
             if !reaped.is_empty() {
                 self.process_tracker
