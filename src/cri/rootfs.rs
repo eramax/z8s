@@ -584,6 +584,7 @@ pub fn setup_container_rootfs(
     // Fallback: chroot
     warn!("pivot_root failed in root mode, falling back to chroot");
     if !volumes.is_empty() {
+        warn!("Binding volumes in chroot fallback (may fail with EPERM)");
         crate::cri::volumes::bind_mount_volumes(rootfs_path, volumes);
     }
     chroot(rootfs_path).context("Failed to chroot")?;

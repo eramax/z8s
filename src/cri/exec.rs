@@ -398,6 +398,9 @@ fn build_command(
         };
 
         let ns_fds = try_open_namespace_fds(container_pid);
+        if ns_fds.mnt.is_none() {
+            tracing::warn!("exec: cannot open mnt namespace for PID {} (stale PID?). Falling back to host namespace.", container_pid);
+        }
         let can_enter_mnt = ns_fds.mnt.is_some();
         let (exec_path, prog_args) = if can_enter_mnt {
             rootfs::build_container_argv_in_mount_ns(cmd, &args_owned, root)
@@ -585,7 +588,12 @@ async fn exec_ws_tty(socket: WebSocket, cmd: &str, args: &[&str], rootfs_pid: Op
                             _ => {}
                         }
                     }
-                    Some(Ok(Message::Close(_))) | None => {
+                    Some(Ok(Message::Close(frame))) => {
+                        let _ = child.kill().await;
+                        let _ = ws_tx.send(Message::Close(frame)).await;
+                        break;
+                    }
+                    None => {
                         let _ = child.kill().await;
                         break;
                     }
@@ -712,7 +720,20 @@ async fn exec_ws_pipes(
                             drop(child_stdin.take());
                         }
                     }
-                    Some(Ok(Message::Close(_))) | None => {
+                    Some(Ok(Message::Close(frame))) => {
+                        drop(child_stdin.take());
+                        let _ = child.kill().await;
+                        {
+                            let mut tx = ws_tx.lock().await;
+                            let _ = tx.send(Message::Close(frame)).await;
+                        }
+                        if !child_done {
+                            exit_code = child.wait().await.ok().and_then(|s| s.code()).unwrap_or(137);
+                            child_done = true;
+                        }
+                        break;
+                    }
+                    None => {
                         drop(child_stdin.take());
                         let _ = child.kill().await;
                         if !child_done {
