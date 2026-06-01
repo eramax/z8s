@@ -8,13 +8,13 @@ pub async fn list_nodes(
     headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
     let local = make_local_node();
-    let mut nodes = vec![local];
+    let mut nodes_with_sync: Vec<(Node, Option<chrono::DateTime<chrono::Utc>>)> = vec![(local.clone(), Some(chrono::Utc::now()))];
 
     // Add nodes from store (gossiped from peers)
     for t in state.store.get_by_kind("Node").await {
-        if let AnyResource::Node(n) = t.resource {
-            if !nodes.iter().any(|i| i.metadata.name == n.metadata.name) {
-                nodes.push(n);
+        if let AnyResource::Node(n) = &t.resource {
+            if !nodes_with_sync.iter().any(|(i, _)| i.metadata.name == n.metadata.name) {
+                nodes_with_sync.push((n.clone(), Some(t.last_updated)));
             }
         }
     }
@@ -41,15 +41,17 @@ pub async fn list_nodes(
         .collect();
         return (
             StatusCode::OK,
-            Json(node_list_to_table(&nodes, &pods, svc_count, &running)),
+            Json(node_list_to_table(&nodes_with_sync, &pods, svc_count, &running)),
         )
             .into_response();
     }
 
+    let items: Vec<Node> = nodes_with_sync.into_iter().map(|(n, _)| n).collect();
+
     Json(List {
         kind: Some("NodeList".into()),
         api_version: None,
-        items: nodes,
+        items,
         metadata: make_list_meta(),
     })
     .into_response()
@@ -74,7 +76,7 @@ pub async fn get_node(
 }
 
 fn node_list_to_table(
-    nodes: &[Node],
+    nodes: &[(Node, Option<chrono::DateTime<chrono::Utc>>)],
     pods: &[ResourceTracker],
     svc_count: usize,
     running: &[String],
@@ -88,20 +90,36 @@ fn node_list_to_table(
         {"name": "RAM", "type": "string", "priority": 0},
         {"name": "Pods", "type": "string", "priority": 0},
         {"name": "Svc", "type": "string", "priority": 0},
+        {"name": "Last Sync", "type": "string", "priority": 0},
     ]);
 
     // Pre-count pods per node and total services
 
     let now = std::time::SystemTime::now();
+    let now_utc = chrono::Utc::now();
     let rows: Vec<serde_json::Value> = nodes
         .iter()
-        .map(|node| {
+        .map(|(node, last_sync)| {
             let name = node.metadata.name.as_deref().unwrap_or("");
             let age = node
                 .metadata
                 .creation_timestamp
                 .as_ref()
                 .map(|t| crate::api::server::format_ts_relative(&t.0, now))
+                .unwrap_or_else(|| "<unknown>".into());
+
+            let sync_str = last_sync
+                .as_ref()
+                .map(|t| {
+                    let secs = now_utc.signed_duration_since(*t).num_seconds().max(0);
+                    if secs < 60 {
+                        format!("{}s", secs)
+                    } else if secs < 3600 {
+                        format!("{}m", secs / 60)
+                    } else {
+                        format!("{}h", secs / 3600)
+                    }
+                })
                 .unwrap_or_else(|| "<unknown>".into());
 
             let ready = node
@@ -185,7 +203,7 @@ fn node_list_to_table(
             }
 
             serde_json::json!({
-                "cells": [name, ready, "worker", age, cpu_cap, mem_cap, pod_str, svc_count],
+                "cells": [name, ready, "worker", age, cpu_cap, mem_cap, pod_str, svc_count.to_string(), sync_str],
                 "object": node,
             })
         })
