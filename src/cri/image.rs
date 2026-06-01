@@ -132,8 +132,8 @@ impl ImageManager {
         if Path::new(&cache_path).exists() && Path::new(&cache_meta).exists() {
             if let Ok(cached_ref) = std::fs::read_to_string(&cache_meta) {
                 if cached_ref.trim() == image_ref {
-                    info!("Mounting overlay rootfs for {} at {}", image_ref, container_rootfs);
-                    return Self::mount_overlay_rootfs(&cache_path, &container_rootfs, &meta_path, image_ref);
+                    info!("Copying cached rootfs for {} to {}", image_ref, container_rootfs);
+                    return Self::copy_cache_to_container(&cache_path, &container_rootfs, &meta_path, image_ref);
                 }
             }
         }
@@ -157,7 +157,7 @@ impl ImageManager {
             if let Ok(cached_ref) = std::fs::read_to_string(&cache_meta) {
                 if cached_ref.trim() == image_ref {
                     info!("Cache populated by concurrent pull for {}", image_ref);
-                    return Self::mount_overlay_rootfs(&cache_path, &container_rootfs, &meta_path, image_ref);
+                    return Self::copy_cache_to_container(&cache_path, &container_rootfs, &meta_path, image_ref);
                 }
             }
         }
@@ -212,8 +212,8 @@ impl ImageManager {
         std::fs::write(&cache_meta, image_ref)
             .context("Failed to write cache metadata")?;
 
-        Self::mount_overlay_rootfs(&cache_path, &container_rootfs, &meta_path, image_ref)
-            .context("Failed to mount overlay rootfs")
+        Self::copy_cache_to_container(&cache_path, &container_rootfs, &meta_path, image_ref)
+            .context("Failed to copy image cache to container rootfs")
     }
 
     fn mount_overlay_rootfs(cache_path: &str, container_rootfs: &str, meta_path: &str, image_ref: &str) -> Result<String> {
