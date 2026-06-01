@@ -153,10 +153,17 @@ pub async fn run_server(
 ) {
     let state = build_app_state(store, process_tracker, registry, ctx, gossip_state).await;
     let app = build_router(state);
-    let addr = format!("0.0.0.0:{}", z8s_port());
+    let addr: std::net::SocketAddr = format!("0.0.0.0:{}", z8s_port())
+        .parse().expect("Invalid listen address");
     info!("Starting k8s API server on {}", addr);
-    let listener = tokio::net::TcpListener::bind(&addr).await
+    let socket = tokio::net::TcpSocket::new_v4()
+        .expect("Failed to create TCP socket");
+    socket.set_reuseaddr(true)
+        .expect("Failed to set SO_REUSEADDR");
+    socket.bind(addr)
         .unwrap_or_else(|e| panic!("Failed to bind to {} — port in use? ({})", addr, e));
+    let listener = socket.listen(1024)
+        .expect("Failed to listen");
     axum::serve(listener, app).await.unwrap();
 }
 

@@ -43,60 +43,102 @@ use tokio::signal::unix::{SignalKind, signal as unix_signal};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
-fn lock_file_path() -> String {
-    format!("/tmp/z8s-{}.lock", crate::api::server::z8s_port())
+fn lock_file_path(port: u16) -> String {
+    format!("/tmp/z8s-{}.lock", port)
 }
 
-/// Acquire an exclusive file lock. If another z8s on this port already holds
-/// the lock, bail immediately. The lock is released automatically when the
-/// process exits (even on SIGKILL, the kernel cleans up file locks).
-fn acquire_port_lock() -> Result<std::fs::File> {
+fn acquire_port_lock(port: u16) -> Result<std::fs::File> {
     use std::os::unix::io::AsRawFd;
-    let path = lock_file_path();
+    let path = lock_file_path(port);
     let file = std::fs::File::create(&path)
         .map_err(|e| anyhow::anyhow!("Failed to create lock file {path}: {e}"))?;
     let ret = unsafe { nix::libc::flock(file.as_raw_fd(), nix::libc::LOCK_EX | nix::libc::LOCK_NB) };
     if ret != 0 {
-        anyhow::bail!("z8s is already running on port {} (lock held). If stale, remove {path} and retry.", crate::api::server::z8s_port());
+        anyhow::bail!("z8s is already running on port {port} (lock held). If stale, remove {path} and retry.");
     }
     Ok(file)
 }
 
-fn check_port(port: u16) -> Result<()> {
-    let addr = format!("0.0.0.0:{port}");
-    let listener = std::net::TcpListener::bind(&addr);
-    if let Err(e) = listener {
-        if e.kind() == std::io::ErrorKind::AddrInUse {
-            anyhow::bail!("Port {port} is already in use");
-        }
-        anyhow::bail!("Failed to bind to {addr}: {e}");
-    }
-    Ok(())
+fn daemonize(port: u16, foreground: bool) -> Result<std::fs::File> {
+    let _ = foreground;
+    let lock = acquire_port_lock(port)?;
+    // Write PID into the lock file so `z8s restart` can find us.
+    use std::io::Write;
+    let mut file = lock;
+    file.set_len(0).ok();
+    write!(file, "{}\n", std::process::id()).ok();
+    file.flush().ok();
+    Ok(file)
 }
 
-fn daemonize(foreground: bool) {
-    if foreground {
-        return;
+fn find_z8s_pid() -> Result<i32> {
+    let entries = match std::fs::read_dir("/proc") {
+        Ok(e) => e,
+        Err(_) => anyhow::bail!("Cannot access /proc"),
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if !name_str.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        if let Ok(pid) = name_str.parse::<i32>() {
+            if let Ok(comm) = std::fs::read_to_string(format!("/proc/{pid}/comm")) {
+                if comm.trim() == "z8s" {
+                    return Ok(pid);
+                }
+            }
+        }
     }
-    // Detach from the terminal by forking. Parent exits, child continues.
-    match unsafe { nix::libc::fork() } {
-        0 => {
-            // Child: create new session, detach from terminal.
-            let _ = unsafe { nix::libc::setsid() };
-            let _ = std::fs::File::create("/dev/null").map(|nul| {
-                let fd = nul.into_raw_fd();
-                unsafe { nix::libc::dup2(fd, 0); nix::libc::dup2(fd, 1); nix::libc::dup2(fd, 2); }
-            });
+    anyhow::bail!("No z8s process found");
+}
+
+fn restart_z8s(port: u16) -> Result<()> {
+    let lock_path = lock_file_path(port);
+
+    // Try to read PID from lock file.
+    let lock_pid: Option<i32> = std::fs::read_to_string(&lock_path).ok()
+        .and_then(|s| s.trim().parse().ok());
+
+    let pid = if let Some(pid) = lock_pid {
+        if nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok() {
+            pid
+        } else {
+            eprintln!("Warning: lock file has stale PID {pid}, searching for z8s process...");
+            find_z8s_pid()?
         }
-        pid if pid > 0 => {
-            // Parent: exit immediately.
-            std::process::exit(0);
-        }
-        _ => {
-            eprintln!("fork failed");
-            std::process::exit(1);
-        }
+    } else {
+        find_z8s_pid()?
+    };
+
+    if nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), nix::sys::signal::Signal::SIGTERM).is_err() {
+        anyhow::bail!("Failed to signal z8s (PID {pid}). Is it running?");
     }
+    eprintln!("Sent SIGTERM to z8s (PID {pid}), waiting for exit...");
+
+    // Wait for the process to exit.
+    for _ in 0..50 {
+        if nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_err() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    std::thread::sleep(std::time::Duration::from_secs(1));
+
+    let self_path = std::env::current_exe()
+        .map_err(|_| anyhow::anyhow!("Cannot determine executable path"))?;
+    std::process::Command::new(&self_path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .stdin(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("Failed to start z8s: {e}"))?;
+    eprintln!("z8s restarted.");
+    Ok(())
 }
 
 #[tokio::main]
@@ -104,27 +146,60 @@ async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let foreground = args.iter().any(|a| a == "--foreground" || a == "-f");
 
+    // ── Commands that don't require config ───────────────────────────
+    let cmd = args.get(1).map(|s| s.as_str());
+    let self_port = args.iter().position(|a| a == "--port")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(6443);
+
+    if cmd == Some("restart") {
+        return restart_z8s(self_port);
+    }
+
+    if cmd == Some("node") {
+        match args.get(2).map(|s| s.as_str()) {
+            Some("start") => {
+                let node_port = args.iter().position(|a| a == "--port")
+                    .and_then(|i| args.get(i + 1))
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(7443);
+                let service_cidr = args.iter().position(|a| a == "--service-cidr")
+                    .and_then(|i| args.get(i + 1)).map(|s| s.to_string());
+                let pod_cidr = args.iter().position(|a| a == "--pod-cidr")
+                    .and_then(|i| args.get(i + 1)).map(|s| s.to_string());
+                let peer = format!("127.0.0.1:{}", self_port);
+                let node_name = format!("node-{node_port}");
+                let self_path = std::env::current_exe()
+                    .map_err(|_| anyhow::anyhow!("Cannot determine executable path"))?;
+                let mut cmd = std::process::Command::new(&self_path);
+                cmd.arg("--port").arg(node_port.to_string())
+                    .arg("--peers").arg(format!("{}={}", node_name, peer))
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .stdin(std::process::Stdio::null());
+                if let Some(cidr) = service_cidr {
+                    cmd.arg("--service-cidr").arg(cidr);
+                }
+                if let Some(cidr) = pod_cidr {
+                    cmd.arg("--pod-cidr").arg(cidr);
+                }
+                cmd.spawn()
+                    .map_err(|e| anyhow::anyhow!("Failed to start node: {e}"))?;
+                eprintln!("Node started on port {}.", node_port);
+                return Ok(());
+            }
+            _ => {
+                anyhow::bail!("Usage: z8s node start --port <PORT> [--service-cidr <CIDR>] [--pod-cidr <CIDR>]");
+            }
+        }
+    }
+
     crate::config::init();
-    let port = crate::api::server::z8s_port();
-    check_port(port)?;
-    let _lock = acquire_port_lock()?;
-    std::fs::write(lock_file_path(), format!("{}\n", std::process::id())).ok();
-
-    daemonize(foreground);
-
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .with_target(true)
-        .with_thread_ids(true)
-        .init();
-
     let cfg = crate::config::get();
+    let port = cfg.api_port;
 
     // ── Join mode ──────────────────────────────────────────────────
-    let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(|s| s.as_str()) == Some("join") {
         let url = args.get(2).expect("Usage: z8s join <ws-url> [--token <token>]");
         let token = if args.len() > 3 && args[3] == "--token" {
@@ -136,6 +211,8 @@ async fn main() -> Result<()> {
         join_cluster(url, token).await;
         return Ok(());
     }
+
+    let _lock = daemonize(port, foreground)?;
 
     info!(
         "z8s v{} starting — port={}, service-cidr={}.{}.{}.{}/{}, domain={}, manifests={}",
@@ -464,7 +541,7 @@ async fn main() -> Result<()> {
         let _ = crate::cri::RuntimeProvider::stop_pod(cri.as_ref(), &spec).await;
     }
 
-    let _ = std::fs::remove_file(lock_file_path());
+    let _ = std::fs::remove_file(lock_file_path(port));
     info!("z8s shutdown complete.");
     Ok(())
 }

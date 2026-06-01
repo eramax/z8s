@@ -267,6 +267,8 @@ z8s — minimal Kubernetes-compatible container orchestrator
 USAGE:
     z8s [OPTIONS]
     z8s join <ws-url> [--token <token>]   (join a cluster as a worker)
+    z8s restart                           (restart a running instance)
+    z8s node start --port <PORT> [--service-cidr <CIDR>] [--pod-cidr <CIDR>]   (start a new cluster node)
 
 OPTIONS:
     --port <PORT>             API server listen port        [default: 6443]
