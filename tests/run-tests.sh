@@ -12,8 +12,25 @@ PASS=0; FAIL=0; ERRORS=()
 
 GREEN='\033[0;32m'; RED='\033[0;31m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
 
-pass() { echo -e "${GREEN}PASS${NC} $1"; PASS=$((PASS+1)); }
-fail() { local m="$1" d="${2:-}"; echo -e "${RED}FAIL${NC} $m${d:+: $d}"; ERRORS+=("$m${d:+: $d}"); FAIL=$((FAIL+1)); }
+LAST_TEST_TIME=$(date +%s)
+
+pass() { 
+    local now=$(date +%s)
+    local diff=$((now - LAST_TEST_TIME))
+    echo -e "${GREEN}PASS${NC} $1 (took ${diff}s)"
+    LAST_TEST_TIME=$now
+    PASS=$((PASS+1))
+}
+
+fail() { 
+    local m="$1" d="${2:-}"
+    local now=$(date +%s)
+    local diff=$((now - LAST_TEST_TIME))
+    echo -e "${RED}FAIL${NC} $m${d:+: $d} (took ${diff}s)"
+    ERRORS+=("$m${d:+: $d}")
+    LAST_TEST_TIME=$now
+    FAIL=$((FAIL+1))
+}
 LAST_SECTION_TIME=$(date +%s)
 LAST_SECTION_NAME=""
 
@@ -26,8 +43,12 @@ section() {
     echo -e "\n${YELLOW}══ $1 ══${NC}"
     LAST_SECTION_NAME="$1"
     LAST_SECTION_TIME=$now
+    LAST_TEST_TIME=$now
 }
-sub() { echo -e "${CYAN}  ▸ $1${NC}"; }
+sub() { 
+    echo -e "${CYAN}  ▸ $1${NC}"
+    LAST_TEST_TIME=$(date +%s)
+}
 
 k() { /home/abb/.local/bin/kubectl --server="$SERVER" "$@" 2>&1 || true; }
 kapply() { /home/abb/.local/bin/kubectl --server="$SERVER" "$@" 2>&1; }
