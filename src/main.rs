@@ -122,12 +122,16 @@ fn scan_lock_files() -> Vec<(u16, i32)> {
 /// process signals or be killed. We treat them as dead for lock purposes
 /// so their resources can be reclaimed.
 fn is_pid_alive(pid: i32) -> bool {
-    // Check for unrecoverable states (Z = zombie, D = uninterruptible sleep)
+    // Check for unrecoverable states (Z = zombie, D = uninterruptible sleep).
+    // /proc/<pid>/status format: "State:\tZ (zombie)" or "State:\tD (disk sleep)"
     if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/status")) {
         for line in stat.lines() {
             if line.starts_with("State:") {
-                if line.contains("(Z") || line.contains("(D") {
-                    return false;
+                // State character is the first non-whitespace after "State:"
+                if let Some(state) = line.split(':').nth(1).and_then(|s| s.trim().chars().next()) {
+                    if state == 'Z' || state == 'D' {
+                        return false;
+                    }
                 }
                 break;
             }

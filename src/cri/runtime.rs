@@ -1047,8 +1047,20 @@ impl ProcessSupervisor {
             self.stop_container(&cfg.container_id).await;
             self.restart_counts.lock().await.remove(&cfg.container_id);
         }
-        self.cgroup_manager.remove_cgroup(&spec.pod_uid).ok();
-        crate::cri::volumes::cleanup_emptydir(&spec.pod_uid);
+        // Run filesystem operations in spawn_blocking: on overlayfs in container
+        // environments, statx/lookup can enter D-state. If that happens on the async
+        // thread, the entire runtime stalls (timeout wrappers can't fire).
+        // spawn_blocking isolates D-state to a dedicated thread — the async thread
+        // stays responsive and the timeout will fire after 3s, detaching the stuck thread.
+        let cg = self.cgroup_manager.clone();
+        let uid = spec.pod_uid.clone();
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            tokio::task::spawn_blocking(move || {
+                cg.remove_cgroup(&uid).ok();
+                crate::cri::volumes::cleanup_emptydir(&uid);
+            }),
+        ).await;
     }
 
     pub fn is_pid_alive(pid: u32) -> bool {

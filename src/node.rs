@@ -342,8 +342,33 @@ pub async fn run_node(
     let _ = shutdown_rx.changed().await;
     info!("Shutting down all services...");
 
+    // ── Watchdog: force-exit if cleanup stalls in D-state ─────────────
+    // Any kernel I/O on the async runtime thread (kill(), netlink send, file read, etc.)
+    // can enter TASK_UNINTERRUPTIBLE (D-state). Once in D-state, the thread is unkillable
+    // AND the async runtime can't poll the timeout wrapper around cleanup — same thread.
+    // The watchdog runs on a plain std::thread (I/O-safe, never D-state) and calls
+    // process::exit(0) after 15s if cleanup hasn't finished. process::exit() terminates
+    // ALL threads, including D-state ones, via exit_group().
+    let cleanup_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let done = cleanup_done.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(15));
+            if !done.load(std::sync::atomic::Ordering::SeqCst) {
+                eprintln!("[watchdog] cleanup timed out — force exiting");
+                unsafe { nix::libc::_exit(0); }
+            }
+        });
+    }
+
     // ── Cleanup: stop all pods ────────────────────────────────────────
-    let resources = store.get_all().await;
+    let resources = match tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        store.get_all(),
+    ).await {
+        Ok(r) => r,
+        Err(_) => { warn!("Timeout reading store — skipping pod cleanup"); vec![] }
+    };
     for tracker in &resources {
         let spec = crate::components::compute::spec_builder::build_spec(&tracker.resource, store.as_ref()).await;
         let _ = tokio::time::timeout(
@@ -353,9 +378,6 @@ pub async fn run_node(
     }
 
     // ── Cleanup: remove nftables rules ────────────────────────────────
-    // Must have a timeout: batch.send() uses spawn_blocking which blocks
-    // in kernel netlink I/O. If the kernel doesn't respond, the thread
-    // enters D-state and can't even be killed by SIGKILL.
     let _ = tokio::time::timeout(
         std::time::Duration::from_secs(3),
         netmux.nft.cleanup(),
@@ -373,6 +395,10 @@ pub async fn run_node(
     // Lock files are cleaned up automatically when the process exits
     // (flock is released when the fd is closed).
 
+    cleanup_done.store(true, std::sync::atomic::Ordering::SeqCst);
     info!("z8s shutdown complete.");
-    Ok(())
+    // Use libc::_exit instead of std::process::exit to skip Rust runtime cleanup
+    // and glibc atexit handlers — those can block on tokio runtime threads that
+    // are stuck in D-state, preventing exit_group() from being called.
+    unsafe { nix::libc::_exit(0); }
 }
