@@ -184,16 +184,22 @@ if [[ "${Z8S_SKIP_RESET:-}" != "1" ]]; then
     else
         fail "z8s node start" "could not start cluster"
     fi
-    sub "Wait for API"
+    sub "Wait for API and nodes"
     ok=0
-    for _ in 1 2 3 4 5 6 7 8 9 10; do
+    for _ in $(seq 1 30); do
         if curl -sf "${SERVER%/}/healthz" >/dev/null 2>&1; then ok=1; break; fi
         sleep 1
     done
     if [[ $ok -eq 1 ]]; then
         pass "API healthz ok on $SERVER"
     else
-        fail "API healthz" "not ready after 10s"
+        fail "API healthz" "not ready after 30s — run: sudo $Z8S_BIN node start"
+    fi
+    node_count=$(k get nodes --no-headers 2>/dev/null | wc -l | tr -d ' ')
+    if [[ "${node_count:-0}" -ge 1 ]]; then
+        pass "cluster has $node_count node(s) registered"
+    else
+        fail "kubectl get nodes" "no nodes — z8s may not be running on $SERVER"
     fi
 else
     echo "Skipping cluster reset (Z8S_SKIP_RESET=1)"
