@@ -140,6 +140,21 @@ impl DeploymentResource {
             .map(|t| t.resource.name().to_string())
             .collect();
 
+        while matching_pods.len() > replicas {
+            if let Some(excess_name) = matching_pods.pop() {
+                let all_pods = self.store.get_by_kind("Pod").await;
+                if let Some(remove) = all_pods.iter().find(|t| t.resource.name() == excess_name) {
+                    tracing::info!(
+                        "Removing excess pod {} for deployment {}",
+                        excess_name,
+                        name
+                    );
+                    ctx.process_tracker.stop_pod(&remove.resource).await;
+                    self.store.delete(&remove.resource).await.ok();
+                }
+            }
+        }
+
         let mut created_ids = Vec::new();
         while matching_pods.len() + created_ids.len() < replicas {
             let pod_name = format!(
@@ -164,22 +179,6 @@ impl DeploymentResource {
 
         for id in created_ids {
             matching_pods.push(id);
-        }
-
-        let expected_count = matching_pods.len().saturating_sub(replicas);
-        for _ in 0..expected_count {
-            if let Some(excess_name) = matching_pods.pop() {
-                let all_pods = self.store.get_by_kind("Pod").await;
-                if let Some(remove) = all_pods.iter().find(|t| t.resource.name() == excess_name) {
-                    tracing::info!(
-                        "Removing excess pod {} for deployment {}",
-                        excess_name,
-                        name
-                    );
-                    ctx.process_tracker.stop_pod(&remove.resource).await;
-                    self.store.delete(&remove.resource).await.ok();
-                }
-            }
         }
 
         Ok(())

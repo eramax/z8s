@@ -118,6 +118,8 @@ pub async fn count_deployment_pods(
         })
         .collect();
 
+    let desired = deploy.spec.as_ref().and_then(|s| s.replicas).unwrap_or(1) as usize;
+
     let mut ready = 0;
     for t in &matching {
         for c in extract_containers(&t.resource) {
@@ -129,7 +131,9 @@ pub async fn count_deployment_pods(
         }
     }
 
-    (ready, matching.len())
+    let total = matching.len().min(desired);
+    let ready = ready.min(desired);
+    (ready, total)
 }
 
 pub fn deployment_list_to_table(items: &[serde_json::Value]) -> serde_json::Value {
@@ -161,10 +165,7 @@ pub fn deployment_list_to_table(items: &[serde_json::Value]) -> serde_json::Valu
 }
 
 pub fn pod_managed_by_deployment(pod: &crate::types::Pod, deploy_name: &str) -> bool {
-    pod.metadata
-        .name
-        .as_deref()
-        .map_or(false, |n| n.starts_with(&format!("{deploy_name}-pod-")))
+    crate::components::compute::deployment::pod_owned_by_deployment(pod, deploy_name)
 }
 
 pub async fn list_deployments_all(
