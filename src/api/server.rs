@@ -344,9 +344,7 @@ pub fn age_from_timestamp(ts: &str) -> String {
     }
 }
 
-pub fn make_table(columns: serde_json::Value, rows: Vec<serde_json::Value>) -> serde_json::Value {
-    serde_json::json!({ "kind": "Table", "apiVersion": "meta.k8s.io/v1", "columnDefinitions": columns, "rows": rows })
-}
+pub use crate::api::table::{build_table, format_ts_relative, make_table};
 
 pub fn ok_status() -> Status {
     Status {
@@ -361,160 +359,6 @@ pub fn make_list_meta() -> ListMeta {
         resource_version: Some("1".into()),
         ..Default::default()
     }
-}
-
-// ── Enriched response views for custom resources ──────────────────────────
-
-/// Build enriched JSON for a VNet item with computed fields (subnet/pod/service counts).
-pub fn enrich_vnet(
-    mut v: serde_json::Value,
-    subnets: usize,
-    pods: usize,
-    svcs: usize,
-) -> serde_json::Value {
-    let spec = v
-        .as_object_mut()
-        .and_then(|o| o.get_mut("spec"))
-        .and_then(|s| s.as_object_mut());
-    if let Some(s) = spec {
-        s.insert("subnetCount".into(), serde_json::json!(subnets));
-        s.insert("podCount".into(), serde_json::json!(pods));
-        s.insert("serviceCount".into(), serde_json::json!(svcs));
-    }
-    v
-}
-
-/// Build enriched JSON for a Subnet item with computed fields (pod/service counts).
-pub fn enrich_subnet(mut v: serde_json::Value, pods: usize, svcs: usize) -> serde_json::Value {
-    let spec = v
-        .as_object_mut()
-        .and_then(|o| o.get_mut("spec"))
-        .and_then(|s| s.as_object_mut());
-    if let Some(s) = spec {
-        s.insert("podCount".into(), serde_json::json!(pods));
-        s.insert("serviceCount".into(), serde_json::json!(svcs));
-    }
-    v
-}
-
-/// Build enriched JSON for an NSG item with computed fields.
-pub fn enrich_nsg(
-    mut v: serde_json::Value,
-    rules: usize,
-    allows: usize,
-    denies: usize,
-    targets: &str,
-) -> serde_json::Value {
-    let spec = v
-        .as_object_mut()
-        .and_then(|o| o.get_mut("spec"))
-        .and_then(|s| s.as_object_mut());
-    if let Some(s) = spec {
-        s.insert("ruleCount".into(), serde_json::json!(rules));
-        s.insert("allowCount".into(), serde_json::json!(allows));
-        s.insert("denyCount".into(), serde_json::json!(denies));
-        s.insert("targets".into(), serde_json::json!(targets));
-    }
-    v
-}
-
-/// Build enriched JSON for a RouteTable item with computed fields.
-pub fn enrich_routetable(
-    mut v: serde_json::Value,
-    rules: usize,
-    allows: usize,
-    denies: usize,
-    methods: &[String],
-) -> serde_json::Value {
-    let spec = v
-        .as_object_mut()
-        .and_then(|o| o.get_mut("spec"))
-        .and_then(|s| s.as_object_mut());
-    if let Some(s) = spec {
-        s.insert("ruleCount".into(), serde_json::json!(rules));
-        s.insert("allowCount".into(), serde_json::json!(allows));
-        s.insert("denyCount".into(), serde_json::json!(denies));
-        s.insert("methods".into(), serde_json::json!(methods));
-    }
-    v
-}
-
-/// Build a kubectl-compatible Table response from column definitions and JSON items.
-/// This enables `kubectl get` to show custom columns instead of just NAME/AGE.
-pub fn build_table(items: &[serde_json::Value], cols: &[(&str, &str, &str)]) -> serde_json::Value {
-    let mut col_defs = Vec::new();
-    col_defs.push(serde_json::json!({"name":"Name","type":"string","format":"name","description":"Name","priority":0}));
-    for (name, json_path, col_type) in cols {
-        col_defs.push(serde_json::json!({"name":name,"type":col_type,"jsonPath":json_path,"description":name,"priority":0}));
-    }
-    col_defs.push(serde_json::json!({"name":"Age","type":"date","description":"Age","priority":0}));
-
-    let now = std::time::SystemTime::now();
-    let rows: Vec<serde_json::Value> = items
-        .iter()
-        .map(|item| {
-            let name = item["metadata"]["name"].as_str().unwrap_or("");
-            let age = format_ts_relative(
-                item["metadata"]["creationTimestamp"].as_str().unwrap_or(""),
-                now,
-            );
-            let mut cells = vec![serde_json::json!(name)];
-            for (_, json_path, _) in cols {
-                cells.push(extract_json_path(item, json_path));
-            }
-            cells.push(serde_json::json!(age));
-            serde_json::json!({"cells": cells, "object": item})
-        })
-        .collect();
-
-    serde_json::json!({
-        "kind": "Table",
-        "apiVersion": "meta.k8s.io/v1",
-        "metadata": {},
-        "columnDefinitions": col_defs,
-        "rows": rows,
-    })
-}
-
-/// Convert a RFC3339 timestamp to a human-readable relative age (e.g. "5m", "2h", "7d").
-pub fn format_ts_relative(ts: &str, now: std::time::SystemTime) -> String {
-    if let Some(ts_secs) = crate::config::parse_rfc3339_secs(ts) {
-        let now_secs = now.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
-        let delta = (now_secs - ts_secs).max(0) as u64;
-        if delta < 60 {
-            return format!("{}s", delta);
-        }
-        if delta < 3600 {
-            return format!("{}m", delta / 60);
-        }
-        if delta < 86400 {
-            return format!("{}h", delta / 3600);
-        }
-        return format!("{}d", delta / 86400);
-    }
-    ts.to_string()
-}
-
-/// Extract a value from a JSON object using a jsonPath expression (e.g. ".spec.cidr").
-fn extract_json_path(obj: &serde_json::Value, path: &str) -> serde_json::Value {
-    if !path.starts_with('.') {
-        return serde_json::Value::Null;
-    }
-    let parts: Vec<&str> = path[1..].split('.').collect();
-    let mut current = obj;
-    for part in &parts {
-        current = match current {
-            serde_json::Value::Object(m) => m.get(*part).unwrap_or(&serde_json::Value::Null),
-            _ => return serde_json::Value::Null,
-        };
-    }
-    if let Some(s) = current.as_str() {
-        // Try to parse as number for "integer" columns
-        if let Ok(n) = s.parse::<i64>() {
-            return serde_json::json!(n);
-        }
-    }
-    current.clone()
 }
 
 pub fn json_merge_patch(base: &mut serde_json::Value, patch: &serde_json::Value) {
@@ -662,11 +506,6 @@ impl IntoResponse for ApiError {
         (self.status, Json(body)).into_response()
     }
 }
-
-// ── E2E tests ────────────────────────────────────────────────────────────────
-
-pub static NODEPORT_COUNTER: std::sync::atomic::AtomicU16 =
-    std::sync::atomic::AtomicU16::new(30000);
 
 #[cfg(test)]
 mod tests {

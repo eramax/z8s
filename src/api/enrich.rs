@@ -7,7 +7,11 @@ use axum::response::IntoResponse;
 
 use crate::api::compat::{self, WireContext};
 use crate::api::server::*;
+use crate::api::table::{self, build_table, make_table};
 use crate::store::AnyResource;
+
+static NODEPORT_COUNTER: std::sync::atomic::AtomicU16 =
+    std::sync::atomic::AtomicU16::new(30000);
 
 pub fn fill_deployment_metadata(deploy: &mut crate::types::Deployment) {
     let meta = &mut deploy.metadata;
@@ -1024,7 +1028,7 @@ fn node_list_to_table(
                 .metadata
                 .creation_timestamp
                 .as_ref()
-                .map(|t| format_ts_relative(&t.0, now))
+                .map(|t| table::format_ts_relative(&t.0, now))
                 .unwrap_or_else(|| "<unknown>".into());
 
             let sync_str = last_sync
@@ -1279,7 +1283,7 @@ pub async fn list_vnets(
         ];
         return (
             StatusCode::OK,
-            Json(build_table(
+            Json(table::build_table(
                 resp.0["items"].as_array().unwrap_or(&Vec::new()),
                 cols,
             )),

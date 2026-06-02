@@ -9,6 +9,7 @@ pub mod handlers;
 pub mod proto;
 pub mod resource_handler;
 pub mod subresource;
+pub mod table;
 pub mod server;
 pub mod watch;
 pub mod types;
