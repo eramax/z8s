@@ -197,7 +197,7 @@ section "1. Apply all manifest YAMLs"
 for f in "$YAML_DIR"/*.yaml; do
     base=$(basename "$f")
     sub "Applying $base ..."
-    kapply apply --validate=false -f "$f" 2>&1 || true
+    kapply apply -f "$f" 2>&1 || true
 done
 
 # ── 2. Wait for all pods and deployments to be ready ───────────────────────────
@@ -524,7 +524,7 @@ section "7. Deployment validation"
 sub "Deployment ordering: deploy resource before pods"
 DEPLOY_NAME="order-test-$(date +%s)"
 T0=$(date +%s%N)
-kapply apply --validate=false -f - >/dev/null 2>&1 <<EOF
+kapply apply -f - >/dev/null 2>&1 <<EOF
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -746,7 +746,7 @@ else
 fi
 
 # Explicit previous test: one-shot log pod
-kapply apply --validate=false -f - >/dev/null 2>&1 <<'EOF'
+kapply apply -f - >/dev/null 2>&1 <<'EOF'
 apiVersion: v1
 kind: Pod
 metadata:
@@ -772,7 +772,7 @@ fi
 
 # 8b. kubectl create via YAML apply (z8s doesn't support --from-literal)
 sub "kubectl create (via apply)"
-kapply apply --validate=false -f - >/dev/null 2>&1 <<'EOF'
+kapply apply -f - >/dev/null 2>&1 <<'EOF'
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -785,7 +785,7 @@ EOF
 out=$(k get configmap imp-cm -n z8s-test -o jsonpath='{.data.imp_key}' 2>&1)
 if [[ "$out" == "imp_val" ]]; then pass "kubectl apply: configmap created (imp_key=imp_val)"; else fail "kubectl apply configmap" "got '$out'"; fi
 
-kapply apply --validate=false -f - >/dev/null 2>&1 <<'EOF'
+kapply apply -f - >/dev/null 2>&1 <<'EOF'
 apiVersion: v1
 kind: Secret
 metadata:
@@ -849,7 +849,7 @@ fi
 
 # 8f. ConfigMap + Secret volume validation via exec (same namespace!)
 sub "Volume content validation via exec (same namespace)"
-kapply apply --validate=false -f - >/dev/null 2>&1 <<'EOF'
+kapply apply -f - >/dev/null 2>&1 <<'EOF'
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -1102,7 +1102,7 @@ pass "alpine-deploy: scaled 100→1"
 section "12. Service validation"
 
 # Spawn a dedicated client pod for service testing (so we don't depend on alpine-pod)
-kapply apply --validate=false -f - >/dev/null 2>&1 <<'EOF'
+kapply apply -f - >/dev/null 2>&1 <<'EOF'
 apiVersion: v1
 kind: Pod
 metadata:
@@ -1215,7 +1215,7 @@ fi
 k delete pod alpine-pod --wait=true --timeout=30s 2>/dev/null || true
 sleep 2
 
-kapply apply --validate=false -f - >/dev/null 2>&1 <<'EOF'
+kapply apply -f - >/dev/null 2>&1 <<'EOF'
 apiVersion: v1
 kind: Pod
 metadata:
@@ -1272,7 +1272,7 @@ fi
 # 10b. hostPath volume persistence
 sub "hostPath persistence: data should SURVIVE pod delete+recreate"
 TAG="z8s-${RANDOM}-hostpath"
-kapply apply --validate=false -f - >/dev/null 2>&1 <<EOF
+kapply apply -f - >/dev/null 2>&1 <<EOF
 apiVersion: v1
 kind: Pod
 metadata:
@@ -1308,7 +1308,7 @@ k delete pod hostpath-vol-pod --wait=true --timeout=30s 2>/dev/null || true
 sleep 2
 
 # New pod, same hostPath
-kapply apply --validate=false -f - >/dev/null 2>&1 <<EOF
+kapply apply -f - >/dev/null 2>&1 <<EOF
 apiVersion: v1
 kind: Pod
 metadata:
@@ -1473,7 +1473,7 @@ fi
 
 # 11b. Non-root pod can't access /proc/1/environ or root-owned files
 sub "Non-root access restrictions"
-kapply apply --validate=false -f - >/dev/null 2>&1 <<'EOF'
+kapply apply -f - >/dev/null 2>&1 <<'EOF'
 apiVersion: v1
 kind: Pod
 metadata:
