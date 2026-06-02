@@ -22,6 +22,7 @@ pub const NLM_F_ACK: u16 = 4;
 pub const NLMSG_ERROR: u16 = 2;
 
 pub const RTN_UNICAST: u8 = 1;
+pub const RTN_LOCAL: u8 = 2;
 pub const RT_TABLE_MAIN: u32 = 254;
 pub const RT_SCOPE_UNIVERSE: u8 = 0;
 pub const RT_SCOPE_LINK: u8 = 253;
@@ -290,11 +291,18 @@ pub fn set_link_up(ifindex: u32) -> Result<()> {
     check_nl_response(&resp, "set_link_up")
 }
 
-pub fn add_route(
+/// Route service ClusterIPs to the host loopback so prerouting DNAT can intercept pod traffic.
+pub fn add_local_service_cidr(dest: &Ipv4Addr, prefix: u8) -> Result<()> {
+    let lo = get_ifindex("lo").context("get lo ifindex")?;
+    add_route_with_type(dest, prefix, None, Some(lo), RTN_LOCAL)
+}
+
+fn add_route_with_type(
     dest: &Ipv4Addr,
     prefix: u8,
     gateway: Option<&Ipv4Addr>,
     oif: Option<u32>,
+    rtn_type: u8,
 ) -> Result<()> {
     let fd = netlink_socket()?;
 
@@ -318,17 +326,15 @@ pub fn add_route(
         RT_SCOPE_LINK
     };
     let attrs_len: usize = attrs.iter().map(|a| a.len()).sum();
-    let total_len = 16 + 12 + attrs_len; // nlmsghdr(16) + rtmsg(12) + attrs
+    let total_len = 16 + 12 + attrs_len;
     let mut buf = vec![0u8; total_len];
 
     buf[0..4].copy_from_slice(&(total_len as u32).to_ne_bytes());
     buf[4..6].copy_from_slice(&RTM_NEWROUTE.to_ne_bytes());
-    // Use CREATE without EXCL so existing routes are replaced (avoids EEXIST on re-run)
     buf[6..8].copy_from_slice(&(NLM_F_REQUEST | NLM_F_CREATE | NLM_F_ACK).to_ne_bytes());
     buf[8..12].copy_from_slice(&1u32.to_ne_bytes());
     buf[12..16].copy_from_slice(&0u32.to_ne_bytes());
 
-    // rtmsg: struct rtmsg — order: family, dst_len, src_len, tos, table, protocol, scope, type, flags
     buf[16] = AF_INET as u8;
     buf[17] = prefix;
     buf[18] = 0;
@@ -336,9 +342,8 @@ pub fn add_route(
     buf[20] = RT_TABLE_MAIN as u8;
     buf[21] = RTPROT_BOOT;
     buf[22] = scope;
-    buf[23] = RTN_UNICAST;
-    // Set RTNH_F_ONLINK for gateway routes (skip gateway reachability check)
-    let rtm_flags: u32 = if gateway.is_some() { 4 } else { 0 }; // RTNH_F_ONLINK = 4
+    buf[23] = rtn_type;
+    let rtm_flags: u32 = if gateway.is_some() { 4 } else { 0 };
     buf[24..28].copy_from_slice(&rtm_flags.to_ne_bytes());
 
     let mut offset = 28;
@@ -349,8 +354,16 @@ pub fn add_route(
 
     send_nlmsg(&fd, &buf)?;
     let resp = recv_nlmsg(&fd)?;
-    // fd auto-closed on drop
-    check_nl_response(&resp, "add_route")
+    check_nl_response(&resp, "add_route_with_type")
+}
+
+pub fn add_route(
+    dest: &Ipv4Addr,
+    prefix: u8,
+    gateway: Option<&Ipv4Addr>,
+    oif: Option<u32>,
+) -> Result<()> {
+    add_route_with_type(dest, prefix, gateway, oif, RTN_UNICAST)
 }
 
 pub fn del_route(

@@ -544,7 +544,22 @@ impl NetMux {
 
     /// Initialize nftables tables and chains.
     pub async fn init_nft(&self, pod_cidr: &str) -> Result<()> {
-        self.nft.init(pod_cidr).await
+        self.nft.init(pod_cidr).await?;
+        let cfg = crate::config::get();
+        let svc_base = Ipv4Addr::from(cfg.service_cidr_base);
+        if let Err(e) = netlink::add_local_service_cidr(&svc_base, cfg.service_cidr_prefix) {
+            warn!("Service CIDR local route: {} (ClusterIP may be unreachable)", e);
+        } else {
+            info!(
+                "Service CIDR {}.{}.{}.{}/{} routed locally for ClusterIP DNAT",
+                cfg.service_cidr_base[0],
+                cfg.service_cidr_base[1],
+                cfg.service_cidr_base[2],
+                cfg.service_cidr_base[3],
+                cfg.service_cidr_prefix
+            );
+        }
+        Ok(())
     }
 
     /// Add forward catch-all rule.
