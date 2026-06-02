@@ -67,11 +67,7 @@ fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
 /// Writable mount path when host paths like `/var/data` are not creatable (rootless degraded mode).
 pub fn bind_mount_volumes_degraded(volumes: &[ResolvedVolume]) {
     for vol in volumes {
-        let dst = if vol.container_path == "/var/data" {
-            "/tmp/data".to_string()
-        } else {
-            vol.container_path.to_string()
-        };
+        let dst = vol.container_path.clone();
         let src = Path::new(&vol.host_path);
         let dst_path = Path::new(&dst);
 
@@ -130,6 +126,18 @@ pub fn bind_mount_volumes_degraded(volumes: &[ResolvedVolume]) {
                 "Copied volume (degraded) {} → {}",
                 vol.host_path, vol.container_path
             );
+        } else if is_emptydir_host_path(&vol.host_path) {
+            if std::fs::create_dir_all(dst_path).is_ok() {
+                info!(
+                    "Created emptyDir mount point (degraded) at {}",
+                    dst_path.display()
+                );
+            } else {
+                warn!(
+                    "Failed to install volume (degraded) {} → {}",
+                    vol.host_path, vol.container_path
+                );
+            }
         } else {
             warn!(
                 "Failed to install volume (degraded) {} → {}",
@@ -238,6 +246,11 @@ pub fn bind_mount_volumes(rootfs_path: &str, volumes: &[ResolvedVolume]) {
                 info!(
                     "Symlinked emptyDir {} → {} (bind mount unavailable)",
                     vol.host_path, vol.container_path
+                );
+            } else if std::fs::create_dir_all(dst_path).is_ok() {
+                info!(
+                    "Created emptyDir directory {} (bind/symlink unavailable)",
+                    dst_path.display()
                 );
             } else {
                 warn!(
