@@ -191,6 +191,7 @@ Commands:
   reset        Stop all nodes, unmount volumes, wipe local DB/state
   restart      Restart the main z8s instance
   status       Show running z8s processes
+  set kubeconfig  Write ~/.kube/config for admin access
 
 Options:
   --port <PORT>  API server listen port     [default: 6443]
@@ -268,6 +269,15 @@ fn main() -> Result<()> {
 
         // ── Status ──────────────────────────────────────────────────────
         Some("status") => show_status(),
+
+        // ── Set kubeconfig ─────────────────────────────────────────────
+        Some("set") => match args.get(2).map(|s| s.as_str()) {
+            Some("kubeconfig") => set_kubeconfig(&args),
+            _ => {
+                eprintln!("Usage: z8s set kubeconfig [--data-dir <DIR>] [--port <PORT>]");
+                Ok(())
+            }
+        },
 
         // ── Default: PID 1 in container runs server; otherwise help ───────
         _ => {
@@ -693,6 +703,95 @@ fn show_status() -> Result<()> {
     if !found {
         println!("z8s not running.");
     }
+    Ok(())
+}
+
+fn set_kubeconfig(args: &[String]) -> Result<()> {
+    let data_dir = parse_opt_arg(args, "--data-dir")
+        .unwrap_or_else(|| "/var/lib/z8s".to_string());
+    let port = parse_port(args, 6443);
+    let server = format!("https://127.0.0.1:{port}");
+
+    // Read admin token
+    let token = crate::bootstrap::read_admin_token(&data_dir)
+        .ok_or_else(|| anyhow::anyhow!(
+            "No admin token found at {data_dir}/admin-token. Is z8s running?"
+        ))?;
+
+    // Read TLS cert
+    let cert_path = std::path::Path::new(&data_dir).join("tls-cert.pem");
+    if !cert_path.exists() {
+        anyhow::bail!(
+            "No TLS cert found at {}. Is z8s running?",
+            cert_path.display()
+        );
+    }
+
+    let kubeconfig_path = dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".kube")
+        .join("config");
+
+    // Read existing config or create new
+    let mut config: serde_json::Value = if kubeconfig_path.exists() {
+        let content = std::fs::read_to_string(&kubeconfig_path)?;
+        serde_json::from_str(&content)
+            .unwrap_or(serde_json::json!({"apiVersion": "v1", "kind": "Config", "clusters": [], "contexts": [], "users": []}))
+    } else {
+        serde_json::json!({"apiVersion": "v1", "kind": "Config", "clusters": [], "contexts": [], "users": [], "preferences": {}})
+    };
+
+    let cluster_name = format!("z8s-{}", port);
+    let user_name = "admin";
+
+    // Upsert cluster
+    let clusters = config["clusters"].as_array_mut().unwrap();
+    clusters.retain(|c| c["name"] != cluster_name);
+    clusters.push(serde_json::json!({
+        "name": cluster_name,
+        "cluster": {
+            "server": server,
+            "certificate-authority": cert_path.to_str().unwrap()
+        }
+    }));
+
+    // Upsert user
+    let users = config["users"].as_array_mut().unwrap();
+    users.retain(|u| u["name"] != user_name);
+    users.push(serde_json::json!({
+        "name": user_name,
+        "user": {
+            "token": token
+        }
+    }));
+
+    // Upsert context
+    let contexts = config["contexts"].as_array_mut().unwrap();
+    contexts.retain(|c| c["name"] != cluster_name);
+    contexts.push(serde_json::json!({
+        "name": cluster_name,
+        "context": {
+            "cluster": cluster_name,
+            "user": user_name,
+            "namespace": "default"
+        }
+    }));
+
+    config["current-context"] = serde_json::Value::String(cluster_name.clone());
+
+    // Write config
+    std::fs::create_dir_all(kubeconfig_path.parent().unwrap())?;
+    let yaml = serde_json::to_string_pretty(&config)?;
+    // Convert JSON to YAML-ish (simple replace for now)
+    std::fs::write(&kubeconfig_path, &yaml)?;
+
+    eprintln!("Kubeconfig updated: {}", kubeconfig_path.display());
+    eprintln!("  cluster:  {} ({})", cluster_name, server);
+    eprintln!("  user:     {}", user_name);
+    eprintln!("  context:  {}", cluster_name);
+    eprintln!();
+    eprintln!("Test with: kubectl get pods --kubeconfig {}", kubeconfig_path.display());
+
     Ok(())
 }
 

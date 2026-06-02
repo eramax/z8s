@@ -147,6 +147,37 @@ pub async fn run_node(
     if let Err(e) = crate::bootstrap::ensure_bootstrap_rbac(store.as_ref()).await {
         warn!("Failed to bootstrap RBAC roles: {}", e);
     }
+
+    // ── Bootstrap admin ServiceAccount + token ───────────────────────────
+    let admin_token = if let Some(ref data_dir) = cfg.data_dir {
+        match crate::bootstrap::ensure_admin_sa(store.as_ref(), data_dir).await {
+            Ok(token) => Some(token),
+            Err(e) => {
+                warn!("Failed to bootstrap admin SA: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // ── Auto-generate TLS certs if not provided ──────────────────────────
+    if cfg.tls_cert.is_none() && cfg.tls_key.is_none() {
+        if let Some(ref data_dir) = cfg.data_dir {
+            match crate::bootstrap::ensure_tls_certs(data_dir) {
+                Ok(certs) => {
+                    crate::config::set_tls_paths(
+                        Some(format!("{}/tls-cert.pem", data_dir)),
+                        Some(format!("{}/tls-key.pem", data_dir)),
+                    );
+                    let _ = admin_token; // keep alive for later use
+                }
+                Err(e) => {
+                    warn!("Failed to generate TLS certs: {}. Running without TLS.", e);
+                }
+            }
+        }
+    }
     if cfg.rbac_mode == crate::config::RbacMode::Permissive {
         warn!(
             "RBAC mode permissive: RoleBindings present but API requests are not denied"
@@ -242,6 +273,16 @@ pub async fn run_node(
     ));
 
     let sa_tokens = crate::api::auth::TokenRegistry::new();
+
+    // Register admin bootstrap token so it resolves to system:serviceaccount:default:admin
+    if let Some(ref token) = admin_token {
+        let sa_tokens_clone = sa_tokens.clone();
+        let token = token.clone();
+        tokio::spawn(async move {
+            sa_tokens_clone.register(token, "default".into(), "admin".into()).await;
+        });
+    }
+
     let process_tracker = Arc::new(ProcessTracker::new(
         supervisor.running.clone(),
         supervisor.restart_counts.clone(),

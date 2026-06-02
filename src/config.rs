@@ -352,6 +352,22 @@ pub fn dns_server() -> Option<&'static str> {
     DNS_SERVER.get().map(|s| s.as_str())
 }
 
+static TLS_CERT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+static TLS_KEY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+pub fn set_tls_paths(cert: Option<String>, key: Option<String>) {
+    if let Some(c) = cert { TLS_CERT.set(c).ok(); }
+    if let Some(k) = key { TLS_KEY.set(k).ok(); }
+}
+
+pub fn tls_cert_path() -> Option<&'static str> {
+    TLS_CERT.get().map(|s| s.as_str())
+}
+
+pub fn tls_key_path() -> Option<&'static str> {
+    TLS_KEY.get().map(|s| s.as_str())
+}
+
 /// Generate a random hex ID (8 hex chars) — replaces uuid::Uuid::new_v4()
 pub fn random_id() -> String {
     let mut buf = [0u8; 8];

@@ -298,7 +298,11 @@ pub async fn run_server(
     let listener = socket.listen(1024).expect("Failed to listen");
 
     let cfg = crate::config::get();
-    if let (Some(cert_path), Some(key_path)) = (&cfg.tls_cert, &cfg.tls_key) {
+    let tls_cert = cfg.tls_cert.as_deref()
+        .or_else(|| crate::config::tls_cert_path());
+    let tls_key = cfg.tls_key.as_deref()
+        .or_else(|| crate::config::tls_key_path());
+    if let (Some(cert_path), Some(key_path)) = (tls_cert, tls_key) {
         use tokio_rustls::rustls;
         info!("Starting TLS API server on {}", addr);
         let cert_file = std::fs::File::open(cert_path).expect("Cannot open TLS cert");

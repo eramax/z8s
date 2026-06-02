@@ -44,6 +44,14 @@ impl TokenRegistry {
             .map(|id| format!("system:serviceaccount:{}:{}", id.namespace, id.name))
     }
 
+    /// Register a static token (e.g., admin bootstrap token) that maps to a ServiceAccount identity.
+    pub async fn register(&self, token: String, namespace: String, name: String) {
+        self.by_token.write().await.insert(
+            token,
+            SaIdentity { namespace, name },
+        );
+    }
+
     /// Issue a fresh token for a pod, materialize secret files, return mount info.
     pub async fn prepare_pod_mount(
         &self,
