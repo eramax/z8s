@@ -12,7 +12,7 @@ use crate::cri::spec::ResolvedVolume;
 use crate::cri::volumes;
 use crate::types::Pod;
 
-pub const SA_CONTAINER_PATH: &str = "/var/run/secrets/z8s.io/serviceaccount";
+pub const SA_CONTAINER_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount";
 
 #[derive(Debug, Clone)]
 pub struct SaIdentity {

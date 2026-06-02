@@ -36,6 +36,7 @@ fn default_role_kind() -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct RoleRef {
     pub api_group: String,
     pub kind: String,
@@ -56,6 +57,7 @@ fn default_subject_kind() -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct RoleBinding {
     #[serde(rename = "apiVersion", default = "default_role_api_version")]
     pub api_version: String,
@@ -97,6 +99,7 @@ fn default_clusterrole_kind() -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct ClusterRoleBinding {
     #[serde(rename = "apiVersion", default = "default_role_api_version")]
     pub api_version: String,

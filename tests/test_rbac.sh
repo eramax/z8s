@@ -6,12 +6,13 @@ set -euo pipefail
 
 API="${Z8S_SERVER:-${API:-https://127.0.0.1:6443}}"
 KUBECTL="${KUBECTL:-kubectl}"
-k() { "$KUBECTL" --kubeconfig ~/.kube/config --validate=false "$@"; }
+k() { "$KUBECTL" --kubeconfig ~/.kube/config "$@"; }
+kapply() { "$KUBECTL" --kubeconfig ~/.kube/config --validate=false "$@"; }
 PASS=0; FAIL=0; SKIP=0
 
-pass() { echo "  PASS: $1"; ((PASS++)); }
-fail() { echo "  FAIL: $1 — $2"; ((FAIL++)); }
-skip() { echo "  SKIP: $1 — $2"; ((SKIP++)); }
+pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
+fail() { echo "  FAIL: $1 — $2"; FAIL=$((FAIL + 1)); }
+skip() { echo "  SKIP: $1 — $2"; SKIP=$((SKIP + 1)); }
 
 cleanup() {
     echo "Cleaning up..."
@@ -26,7 +27,7 @@ echo ""
 
 # ── Setup: Create a test pod ──────────────────────────────────────
 echo "Setup: Create test pod 'rbac-test-pod'"
-k apply -n default -f - <<'EOF' >/dev/null 2>&1
+kapply apply -n default -f - <<'EOF' >/dev/null 2>&1
 apiVersion: v1
 kind: Pod
 metadata:
@@ -48,7 +49,7 @@ fi
 # ── 1. Create a Role: pod-viewer can only get/list/watch pods ────
 echo ""
 echo "1. Create Role 'pod-viewer' (read-only pods)"
-k apply -n default -f - <<'EOF'
+kapply apply -n default -f - <<'EOF'
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -68,7 +69,7 @@ fi
 # ── 2. Create a RoleBinding: deploy-bot SA → pod-viewer role ────
 echo ""
 echo "2. Create RoleBinding: deploy-bot SA → pod-viewer"
-k apply -n default -f - <<'EOF'
+kapply apply -n default -f - <<'EOF'
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
@@ -146,20 +147,20 @@ else
     fail "Anonymous DELETE" "HTTP $RESP (expected 403)"
 fi
 
-# ── 8. Test: GET without RBAC headers still works (read-only) ───
+# ── 8. Test: GET without RBAC headers is denied (no anonymous binding) ───
 echo ""
-echo "8. Unauthenticated GET pods → 200 (read-only allowed)"
+echo "8. Unauthenticated GET pods → 403 (no anonymous binding)"
 RESP=$(curl -sk -o /dev/null -w "%{http_code}" "$API/api/v1/namespaces/default/pods")
-if [ "$RESP" = "200" ]; then
-    pass "Unauthenticated GET → 200 (read-only allowed)"
+if [ "$RESP" = "403" ]; then
+    pass "Unauthenticated GET → 403 (denied, no anonymous binding)"
 else
-    fail "Unauthenticated GET" "HTTP $RESP (expected 200)"
+    fail "Unauthenticated GET" "HTTP $RESP (expected 403)"
 fi
 
 # ── 9. Create a more powerful role: pod-manager ─────────────────
 echo ""
 echo "9. Create Role 'pod-manager' (full CRUD on pods)"
-k apply -n default -f - <<'EOF'
+kapply apply -n default -f - <<'EOF'
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -179,7 +180,7 @@ fi
 # ── 10. Bind deploy-bot to pod-manager too ──────────────────────
 echo ""
 echo "10. Bind deploy-bot SA → pod-manager (upgrade permissions)"
-k apply -n default -f - <<'EOF'
+kapply apply -n default -f - <<'EOF'
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
@@ -228,7 +229,7 @@ fi
 # ── 13. Test: deploy-bot SA still cannot touch services ─────────
 echo ""
 echo "13. deploy-bot SA cannot DELETE services (not in any Role)"
-k apply -n default -f - <<'EOF' >/dev/null 2>&1
+kapply apply -n default -f - <<'EOF' >/dev/null 2>&1
 apiVersion: v1
 kind: Service
 metadata:

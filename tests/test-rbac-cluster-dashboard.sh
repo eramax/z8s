@@ -15,6 +15,7 @@ pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 fail() { echo "  FAIL: $1 — ${2:-}"; FAIL=$((FAIL + 1)); }
 
 k() { "$KUBECTL" --kubeconfig ~/.kube/config "$@"; }
+kapply() { "$KUBECTL" --kubeconfig ~/.kube/config --validate=false "$@"; }
 
 cleanup() {
   echo "Cleaning up RBAC dashboard test resources..."
@@ -32,7 +33,7 @@ if ! k get --raw /healthz &>/dev/null; then
 fi
 
 echo "Applying stack..."
-k apply -f "$STACK"
+kapply apply -f "$STACK"
 
 echo "Waiting for cluster-dashboard Deployment..."
 if k wait --for=condition=Available "deployment/cluster-dashboard" -n default --timeout=120s 2>/dev/null; then
