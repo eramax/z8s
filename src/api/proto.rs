@@ -88,11 +88,13 @@ fn parse_object_meta(msg: &[u8], field: u32) -> serde_json::Value {
 
     let mut labels = serde_json::Map::new();
     let mut p = Parser::new(inner);
-    while let Some((f, Value::Bytes(b))) = p.next_field() {
+    while let Some((f, v)) = p.next_field() {
         if f == 11 {
             // map<string,string> encoded as repeated MapEntry messages
-            if let (Some(k), Some(v)) = (get_string_field(b, 1), get_string_field(b, 2)) {
-                labels.insert(k, serde_json::Value::String(v));
+            if let Value::Bytes(b) = v {
+                if let (Some(k), Some(v)) = (get_string_field(b, 1), get_string_field(b, 2)) {
+                    labels.insert(k, serde_json::Value::String(v));
+                }
             }
         }
     }
@@ -146,10 +148,12 @@ fn parse_deploy_spec(msg: &[u8], field: u32) -> serde_json::Value {
         .map(|sel| {
             let mut labels = serde_json::Map::new();
             let mut p = Parser::new(sel);
-            while let Some((f, Value::Bytes(b))) = p.next_field() {
+            while let Some((f, v)) = p.next_field() {
                 if f == 1 {
-                    if let (Some(k), Some(v)) = (get_string_field(b, 1), get_string_field(b, 2)) {
-                        labels.insert(k, serde_json::Value::String(v));
+                    if let Value::Bytes(b) = v {
+                        if let (Some(k), Some(v)) = (get_string_field(b, 1), get_string_field(b, 2)) {
+                            labels.insert(k, serde_json::Value::String(v));
+                        }
                     }
                 }
             }
@@ -176,9 +180,11 @@ fn parse_deploy_spec(msg: &[u8], field: u32) -> serde_json::Value {
 fn parse_containers(msg: &[u8], field: u32) -> Vec<serde_json::Value> {
     let mut out = Vec::new();
     let mut p = Parser::new(msg);
-    while let Some((f, Value::Bytes(b))) = p.next_field() {
+    while let Some((f, v)) = p.next_field() {
         if f == field {
-            out.push(parse_container(b));
+            if let Value::Bytes(b) = v {
+                out.push(parse_container(b));
+            }
         }
     }
     out
@@ -235,9 +241,11 @@ fn parse_container(msg: &[u8]) -> serde_json::Value {
 
 fn get_bytes_field<'a>(msg: &'a [u8], target: u32) -> Option<&'a [u8]> {
     let mut p = Parser::new(msg);
-    while let Some((f, Value::Bytes(b))) = p.next_field() {
+    while let Some((f, v)) = p.next_field() {
         if f == target {
-            return Some(b);
+            if let Value::Bytes(b) = v {
+                return Some(b);
+            }
         }
     }
     None
