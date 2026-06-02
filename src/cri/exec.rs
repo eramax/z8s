@@ -148,6 +148,8 @@ pub async fn exec_handler(
         .map(|i| i.env_vars.clone())
         .unwrap_or_default();
     let isolated_net = info.as_ref().map(|i| i.isolated_net).unwrap_or(false);
+    let run_as_user = info.as_ref().and_then(|i| i.run_as_user);
+    let run_as_group = info.as_ref().and_then(|i| i.run_as_group);
     ws.protocols([
         "v5.channel.k8s.io",
         "v4.channel.k8s.io",
@@ -161,6 +163,8 @@ pub async fn exec_handler(
             rootfs_pid,
             env_vars,
             isolated_net,
+            run_as_user,
+            run_as_group,
             tty,
             stdin_flag,
             stdout_flag,
@@ -192,6 +196,8 @@ struct ContainerExecInfo {
     rootfs_pid: Option<(String, u32)>,
     env_vars: Vec<(String, String)>,
     isolated_net: bool,
+    run_as_user: Option<u32>,
+    run_as_group: Option<u32>,
 }
 
 async fn resolve_container(
@@ -210,9 +216,9 @@ async fn resolve_container(
             .map(|(_, v)| v)
     }?;
 
-    let env_vars = rc.instance.env_vars.clone();
-    let rootfs = rc.instance.rootfs.clone();
     let pid = rc.instance.pid?;
+    let env_vars = merge_exec_env(&rc.instance.env_vars, pid);
+    let rootfs = rc.instance.rootfs.clone();
     let rootfs_pid = if rootfs.is_empty() {
         None
     } else {
@@ -223,6 +229,8 @@ async fn resolve_container(
         rootfs_pid,
         env_vars,
         isolated_net: rc.instance.isolated_net,
+        run_as_user: rc.instance.run_as_user,
+        run_as_group: rc.instance.run_as_group,
     })
 }
 
@@ -232,6 +240,8 @@ fn spawn_with_pty(
     rootfs_pid: Option<(&str, u32)>,
     env_vars: &[(String, String)],
     isolated_net: bool,
+    run_as_user: Option<u32>,
+    run_as_group: Option<u32>,
 ) -> Result<(pty::PtyMaster, Command), String> {
     let master = pty::posix_openpt(OFlag::O_RDWR | OFlag::O_NONBLOCK)
         .map_err(|e| format!("posix_openpt: {}", e))?;
@@ -263,7 +273,15 @@ fn spawn_with_pty(
         let _ = rootfs::setup_exec_mounts(root);
     }
 
-    let mut child_cmd = build_command(cmd, args, rootfs_pid, env_vars, isolated_net);
+    let mut child_cmd = build_command(
+        cmd,
+        args,
+        rootfs_pid,
+        env_vars,
+        isolated_net,
+        run_as_user,
+        run_as_group,
+    );
 
     child_cmd
         .stdin(Stdio::from(
@@ -315,12 +333,22 @@ fn spawn_with_pipes(
     rootfs_pid: Option<(&str, u32)>,
     env_vars: &[(String, String)],
     isolated_net: bool,
+    run_as_user: Option<u32>,
+    run_as_group: Option<u32>,
 ) -> Result<Command, String> {
     if let Some((root, _pid)) = rootfs_pid {
         let _ = rootfs::setup_exec_mounts(root);
     }
 
-    let mut child_cmd = build_command(cmd, args, rootfs_pid, env_vars, isolated_net);
+    let mut child_cmd = build_command(
+        cmd,
+        args,
+        rootfs_pid,
+        env_vars,
+        isolated_net,
+        run_as_user,
+        run_as_group,
+    );
 
     child_cmd
         .stdin(Stdio::piped())
@@ -385,19 +413,53 @@ fn is_root() -> bool {
     rootfs::is_root()
 }
 
+fn read_container_environ(pid: u32) -> Vec<(String, String)> {
+    let Ok(data) = std::fs::read(format!("/proc/{pid}/environ")) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for var in data.split(|&b| b == 0) {
+        if var.is_empty() {
+            continue;
+        }
+        let Some(eq) = var.iter().position(|&b| b == b'=') else {
+            continue;
+        };
+        let Ok(key) = std::str::from_utf8(&var[..eq]) else {
+            continue;
+        };
+        let Ok(val) = std::str::from_utf8(&var[eq + 1..]) else {
+            continue;
+        };
+        out.push((key.to_string(), val.to_string()));
+    }
+    out
+}
+
 fn read_container_path(pid: u32) -> String {
-    if let Ok(data) = std::fs::read(format!("/proc/{pid}/environ")) {
-        for var in data.split(|&b| b == 0) {
-            if var.starts_with(b"PATH=") {
-                if let Ok(s) = String::from_utf8(var[5..].to_vec()) {
-                    return s;
-                }
-            }
+    for (k, v) in read_container_environ(pid) {
+        if k == "PATH" {
+            return v;
         }
     }
     std::env::var("PATH").unwrap_or_else(|_| {
         "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string()
     })
+}
+
+fn merge_exec_env(
+    stored: &[(String, String)],
+    pid: u32,
+) -> Vec<(String, String)> {
+    let mut out = read_container_environ(pid);
+    let mut seen: std::collections::HashSet<String> =
+        out.iter().map(|(k, _)| k.clone()).collect();
+    for (k, v) in stored {
+        if seen.insert(k.clone()) {
+            out.push((k.clone(), v.clone()));
+        }
+    }
+    out
 }
 
 fn build_command(
@@ -406,6 +468,8 @@ fn build_command(
     rootfs_pid: Option<(&str, u32)>,
     env_vars: &[(String, String)],
     isolated_net: bool,
+    run_as_user: Option<u32>,
+    run_as_group: Option<u32>,
 ) -> Command {
     let apply_env = |c: &mut Command| {
         c.env_clear();
@@ -468,6 +532,8 @@ fn build_command(
         apply_env(&mut c);
 
         let iso_net = isolated_net;
+        let exec_gid = run_as_group;
+        let exec_uid = run_as_user;
         unsafe {
             c.as_std_mut().pre_exec(move || {
                 let _ = enter_container_namespaces(&ns_fds, iso_net, use_mnt_ns);
@@ -491,13 +557,11 @@ fn build_command(
                         }
                     }
                 }
-                // Use container-side UID (0 = root inside container). The host UID
-                // from /proc/<pid> metadata would be wrong inside a user namespace.
-                if let Err(e) = nix::unistd::setgid(nix::unistd::Gid::from_raw(0)) {
-                    tracing::warn!("exec: setgid(0) failed: {e}");
+                if let Some(gid) = exec_gid {
+                    let _ = nix::unistd::setgid(nix::unistd::Gid::from_raw(gid));
                 }
-                if let Err(e) = nix::unistd::setuid(nix::unistd::Uid::from_raw(0)) {
-                    tracing::warn!("exec: setuid(0) failed: {e}");
+                if let Some(uid) = exec_uid {
+                    let _ = nix::unistd::setuid(nix::unistd::Uid::from_raw(uid));
                 }
                 Ok(())
             });
@@ -519,6 +583,8 @@ async fn exec_ws(
     rootfs_pid: Option<(String, u32)>,
     env_vars: Vec<(String, String)>,
     isolated_net: bool,
+    run_as_user: Option<u32>,
+    run_as_group: Option<u32>,
     tty: bool,
     stdin_flag: bool,
     stdout_flag: bool,
@@ -547,6 +613,8 @@ async fn exec_ws(
             rootfs_pid.as_ref().map(|(r, p)| (r.as_str(), *p)),
             &env_vars,
             isolated_net,
+            run_as_user,
+            run_as_group,
         )
         .await
     } else {
@@ -557,6 +625,8 @@ async fn exec_ws(
             rootfs_pid.as_ref().map(|(r, p)| (r.as_str(), *p)),
             &env_vars,
             isolated_net,
+            run_as_user,
+            run_as_group,
             stdin_flag,
             stdout_flag,
             stderr_flag,
@@ -593,11 +663,20 @@ async fn exec_ws_tty(
     rootfs_pid: Option<(&str, u32)>,
     env_vars: &[(String, String)],
     isolated_net: bool,
+    run_as_user: Option<u32>,
+    run_as_group: Option<u32>,
 ) {
     let (mut ws_tx, mut ws_rx) = socket.split();
 
-    let (master, mut child_cmd) =
-        match spawn_with_pty(cmd, args, rootfs_pid, env_vars, isolated_net) {
+    let (master, mut child_cmd) = match spawn_with_pty(
+        cmd,
+        args,
+        rootfs_pid,
+        env_vars,
+        isolated_net,
+        run_as_user,
+        run_as_group,
+    ) {
             Ok(pair) => pair,
             Err(e) => {
                 send_error_and_close(&mut ws_tx, &format!("pty setup: {}", e)).await;
@@ -698,6 +777,8 @@ async fn exec_ws_pipes(
     rootfs_pid: Option<(&str, u32)>,
     env_vars: &[(String, String)],
     isolated_net: bool,
+    run_as_user: Option<u32>,
+    run_as_group: Option<u32>,
     stdin_flag: bool,
     stdout_flag: bool,
     stderr_flag: bool,
@@ -705,7 +786,15 @@ async fn exec_ws_pipes(
     let (ws_tx, mut ws_rx) = socket.split();
     let ws_tx = std::sync::Arc::new(tokio::sync::Mutex::new(ws_tx));
 
-    let mut child_cmd = match spawn_with_pipes(cmd, args, rootfs_pid, env_vars, isolated_net) {
+    let mut child_cmd = match spawn_with_pipes(
+        cmd,
+        args,
+        rootfs_pid,
+        env_vars,
+        isolated_net,
+        run_as_user,
+        run_as_group,
+    ) {
         Ok(c) => c,
         Err(e) => {
             let mut tx = ws_tx.lock().await;

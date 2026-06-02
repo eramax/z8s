@@ -102,6 +102,8 @@ pub struct ContainerInstance {
     pub pod_ip: Option<std::net::Ipv4Addr>,
     /// Host veth ifindex for this pod (NetMux).
     pub host_veth_ifindex: Option<u32>,
+    pub run_as_user: Option<u32>,
+    pub run_as_group: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -335,6 +337,8 @@ impl ProcessSupervisor {
                             isolated_net: false,
                             pod_ip: None,
                             host_veth_ifindex: None,
+                            run_as_user: None,
+                            run_as_group: None,
                         },
                         restart_count: 0,
                         log_buffer: Arc::new(Mutex::new(Vec::new())),
@@ -532,6 +536,8 @@ impl ProcessSupervisor {
         isolate_net: bool,
         pod_ip: Option<std::net::Ipv4Addr>,
         host_veth_ifindex: Option<u32>,
+        run_as_user: Option<u32>,
+        run_as_group: Option<u32>,
         stdout_r: std::os::fd::OwnedFd,
         stderr_r: std::os::fd::OwnedFd,
         probes: &[ProbeConfig],
@@ -541,8 +547,17 @@ impl ProcessSupervisor {
 
         let log_buffer = Self::spawn_log_tasks(stdout_r, stderr_r);
         let instance = Self::build_container_instance(
-            container_id, container_name, image, child_pid, rootfs_path,
-            env_owned, isolate_net, pod_ip, host_veth_ifindex,
+            container_id,
+            container_name,
+            image,
+            child_pid,
+            rootfs_path,
+            env_owned,
+            isolate_net,
+            pod_ip,
+            host_veth_ifindex,
+            run_as_user,
+            run_as_group,
         );
         Ok(Self::build_running_from_instance(instance, log_buffer, probes))
     }
@@ -674,6 +689,8 @@ impl ProcessSupervisor {
         isolate_net: bool,
         pod_ip: Option<std::net::Ipv4Addr>,
         host_veth_ifindex: Option<u32>,
+        run_as_user: Option<u32>,
+        run_as_group: Option<u32>,
     ) -> ContainerInstance {
         ContainerInstance {
             container_id: container_id.to_string(),
@@ -687,6 +704,8 @@ impl ProcessSupervisor {
             isolated_net: isolate_net,
             pod_ip,
             host_veth_ifindex,
+            run_as_user,
+            run_as_group,
         }
     }
 
@@ -778,9 +797,21 @@ impl ProcessSupervisor {
                 drop(ack_w);
 
                 return self.parent_post_fork(
-                    pid, &container_id, &container_name, image, rootfs_path,
-                    env_owned, pod_uid, isolate_net, pod_ip, host_veth_ifindex,
-                    stdout_r, stderr_r, &probes,
+                    pid,
+                    &container_id,
+                    &container_name,
+                    image,
+                    rootfs_path,
+                    env_owned,
+                    pod_uid,
+                    isolate_net,
+                    pod_ip,
+                    host_veth_ifindex,
+                    run_as_user,
+                    run_as_group,
+                    stdout_r,
+                    stderr_r,
+                    &probes,
                 );
             }
             Ok(nix::unistd::ForkResult::Child) => {
@@ -1038,9 +1069,21 @@ impl ProcessSupervisor {
                 drop(ack_w);
 
                 return self.parent_post_fork(
-                    child_pid as u32, &container_id, &container_name, image, rootfs_path,
-                    env_owned, pod_uid, isolate_net, pod_ip, host_veth_ifindex,
-                    stdout_r, stderr_r, &probes,
+                    child_pid as u32,
+                    &container_id,
+                    &container_name,
+                    image,
+                    rootfs_path,
+                    env_owned,
+                    pod_uid,
+                    isolate_net,
+                    pod_ip,
+                    host_veth_ifindex,
+                    run_as_user,
+                    run_as_group,
+                    stdout_r,
+                    stderr_r,
+                    &probes,
                 );
             }
             Ok(nix::unistd::ForkResult::Child) => {
@@ -1178,6 +1221,8 @@ impl ProcessSupervisor {
             rootfs_path,
             env_vars.to_vec(),
             isolate_net,
+            None,
+            None,
             None,
             None,
         );
