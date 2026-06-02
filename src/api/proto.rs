@@ -38,6 +38,8 @@ pub fn try_proto_to_json(bytes: &[u8]) -> Option<serde_json::Value> {
         "Namespace" => Some(decode_namespace(raw, &api_version)),
         "Pod" => Some(decode_pod(raw, &api_version)),
         "Deployment" => Some(decode_deployment(raw, &api_version)),
+        "ConfigMap" => Some(decode_configmap(raw, &api_version)),
+        "Secret" => Some(decode_secret(raw, &api_version)),
         _ => None,
     }
 }
@@ -73,6 +75,43 @@ fn decode_deployment(raw: &[u8], api_version: &str) -> serde_json::Value {
         "metadata": meta,
         "spec": spec,
     })
+}
+
+fn decode_configmap(raw: &[u8], api_version: &str) -> serde_json::Value {
+    let meta = parse_object_meta(raw, 1);
+    let data = parse_string_map(raw, 2);
+    serde_json::json!({
+        "apiVersion": api_version,
+        "kind": "ConfigMap",
+        "metadata": meta,
+        "data": data,
+    })
+}
+
+fn decode_secret(raw: &[u8], api_version: &str) -> serde_json::Value {
+    let meta = parse_object_meta(raw, 1);
+    let data = parse_string_map(raw, 2);
+    serde_json::json!({
+        "apiVersion": api_version,
+        "kind": "Secret",
+        "metadata": meta,
+        "data": data,
+    })
+}
+
+fn parse_string_map(msg: &[u8], field: u32) -> serde_json::Value {
+    let mut map = serde_json::Map::new();
+    let mut p = Parser::new(msg);
+    while let Some((f, v)) = p.next_field() {
+        if f == field {
+            if let Value::Bytes(b) = v {
+                if let (Some(k), Some(val)) = (get_string_field(b, 1), get_string_field(b, 2)) {
+                    map.insert(k, serde_json::Value::String(val));
+                }
+            }
+        }
+    }
+    serde_json::Value::Object(map)
 }
 
 // ── Field parsers ─────────────────────────────────────────────────────────────

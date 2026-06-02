@@ -41,6 +41,16 @@ pub fn prepare_create(resource: &mut AnyResource) {
     if let AnyResource::Pod(p) = resource {
         crate::components::compute::status::fill_pod_metadata(p);
     }
+    if let AnyResource::Secret(sec) = resource {
+        use base64::Engine;
+        if let Some(sd) = sec.string_data.take() {
+            let data = sec.data.get_or_insert_with(Default::default);
+            for (k, v) in sd {
+                data.entry(k)
+                    .or_insert_with(|| base64::engine::general_purpose::STANDARD.encode(&v));
+            }
+        }
+    }
 }
 
 pub fn prepare_update(resource: &mut AnyResource) {

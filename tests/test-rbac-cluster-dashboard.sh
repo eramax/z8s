@@ -26,7 +26,7 @@ echo "=== RBAC cluster-dashboard E2E (R8) ==="
 echo "Server: $SERVER"
 echo ""
 
-if ! k version --request-timeout=5s &>/dev/null; then
+if ! k get --raw /healthz &>/dev/null; then
   echo "ERROR: cannot reach API at $SERVER"
   exit 1
 fi

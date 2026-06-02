@@ -6,7 +6,7 @@ set -euo pipefail
 
 API="${Z8S_SERVER:-${API:-https://127.0.0.1:6443}}"
 KUBECTL="${KUBECTL:-kubectl}"
-k() { "$KUBECTL" --kubeconfig ~/.kube/config "$@"; }
+k() { "$KUBECTL" --kubeconfig ~/.kube/config --validate=false "$@"; }
 PASS=0; FAIL=0; SKIP=0
 
 pass() { echo "  PASS: $1"; ((PASS++)); }

@@ -55,6 +55,8 @@ pub async fn ensure_kubernetes_service(store: &dyn StoreBackend) -> Result<()> {
 
     let cluster_ip = kubernetes_cluster_ip();
     let svc = Service {
+        api_version: "v1".into(),
+        kind: "Service".into(),
         metadata: ObjectMeta {
             name: Some("kubernetes".into()),
             namespace: Some("default".into()),
