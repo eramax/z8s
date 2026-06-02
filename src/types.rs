@@ -43,7 +43,7 @@ pub struct Time(pub String);
 
 impl Time {
     pub fn now() -> Self {
-        Self(chrono::Utc::now().to_rfc3339())
+        Self(crate::config::now_rfc3339())
     }
 }
 
@@ -2286,7 +2286,7 @@ pub enum ResourceState {
 pub struct ResourceTracker {
     pub resource: AnyResource,
     pub state: ResourceState,
-    pub last_updated: chrono::DateTime<chrono::Utc>,
+    pub last_updated: String,
 }
 
 impl ResourceTracker {
@@ -2294,7 +2294,7 @@ impl ResourceTracker {
         Self {
             resource,
             state: ResourceState::Pending,
-            last_updated: chrono::Utc::now(),
+            last_updated: crate::config::now_rfc3339(),
         }
     }
 }

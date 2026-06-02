@@ -8,7 +8,7 @@ pub async fn list_nodes(
     headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
     let local = make_local_node();
-    let mut nodes_with_sync: Vec<(Node, Option<chrono::DateTime<chrono::Utc>>)> = vec![(local.clone(), Some(chrono::Utc::now()))];
+    let mut nodes_with_sync: Vec<(Node, Option<String>)> = vec![(local.clone(), Some(crate::config::now_rfc3339()))];
 
     // Add nodes from store (gossiped from peers)
     for t in state.store.get_by_kind("Node").await {
@@ -76,7 +76,7 @@ pub async fn get_node(
 }
 
 fn node_list_to_table(
-    nodes: &[(Node, Option<chrono::DateTime<chrono::Utc>>)],
+    nodes: &[(Node, Option<String>)],
     pods: &[ResourceTracker],
     svc_count: usize,
     running: &[String],
@@ -96,7 +96,7 @@ fn node_list_to_table(
     // Pre-count pods per node and total services
 
     let now = std::time::SystemTime::now();
-    let now_utc = chrono::Utc::now();
+    let now_utc = crate::config::now_rfc3339();
     let rows: Vec<serde_json::Value> = nodes
         .iter()
         .map(|(node, last_sync)| {
@@ -111,13 +111,18 @@ fn node_list_to_table(
             let sync_str = last_sync
                 .as_ref()
                 .map(|t| {
-                    let secs = now_utc.signed_duration_since(*t).num_seconds().max(0);
-                    if secs < 60 {
-                        format!("{}s", secs)
-                    } else if secs < 3600 {
-                        format!("{}m", secs / 60)
+                    if let Some(sync_secs) = crate::config::parse_rfc3339_secs(t) {
+                        let now_secs = crate::config::parse_rfc3339_secs(&now_utc).unwrap_or(0);
+                        let secs = (now_secs - sync_secs).max(0) as u64;
+                        if secs < 60 {
+                            format!("{}s", secs)
+                        } else if secs < 3600 {
+                            format!("{}m", secs / 60)
+                        } else {
+                            format!("{}h", secs / 3600)
+                        }
                     } else {
-                        format!("{}h", secs / 3600)
+                        "<unknown>".to_string()
                     }
                 })
                 .unwrap_or_else(|| "<unknown>".into());

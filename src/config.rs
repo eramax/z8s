@@ -281,6 +281,76 @@ pub fn dns_server() -> Option<&'static str> {
     DNS_SERVER.get().map(|s| s.as_str())
 }
 
+/// Generate a random hex ID (8 hex chars) — replaces uuid::Uuid::new_v4()
+pub fn random_id() -> String {
+    let mut buf = [0u8; 8];
+    getrandom::getrandom(&mut buf).expect("getrandom failed");
+    buf.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+/// Current time as RFC3339 string — replaces chrono::Utc::now().to_rfc3339()
+pub fn now_rfc3339() -> String {
+    let d = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = d.as_secs();
+    let nanos = d.subsec_nanos();
+    let days = secs / 86400;
+    let time_of_day = secs % 86400;
+    let hours = time_of_day / 3600;
+    let minutes = (time_of_day % 3600) / 60;
+    let seconds = time_of_day % 60;
+    let mut y = 1970u32;
+    let mut remaining = days;
+    loop {
+        let days_in_year = if is_leap(y) { 366 } else { 365 };
+        if remaining < days_in_year as u64 { break; }
+        remaining -= days_in_year as u64;
+        y += 1;
+    }
+    let leap = is_leap(y);
+    let md = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut m = 1u32;
+    for &d in &md {
+        if remaining < d as u64 { break; }
+        remaining -= d as u64;
+        m += 1;
+    }
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:06}Z", y, m, remaining + 1, hours, minutes, seconds, nanos / 1000)
+}
+
+fn is_leap(y: u32) -> bool { (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 }
+
+/// Parse RFC3339 timestamp and return seconds since epoch
+pub fn parse_rfc3339_secs(ts: &str) -> Option<i64> {
+    let ts = ts.trim_end_matches('Z');
+    let (date, time) = ts.split_once('T')?;
+    let parts: Vec<&str> = date.split('-').collect();
+    if parts.len() != 3 { return None; }
+    let y = parts[0].parse::<u32>().ok()?;
+    let m = parts[1].parse::<u32>().ok()?;
+    let d = parts[2].parse::<u32>().ok()?;
+    let time_part = time.split('.').next().unwrap_or(time);
+    let tp: Vec<&str> = time_part.split(':').collect();
+    if tp.len() != 3 { return None; }
+    let h = tp[0].parse::<u32>().ok()?;
+    let min = tp[1].parse::<u32>().ok()?;
+    let s = tp[2].parse::<u32>().ok()?;
+    let mut total_days: u64 = 0;
+    for year in 1970..y { total_days += if is_leap(year) { 366 } else { 365 }; }
+    let md = [31, if is_leap(y) { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    for i in 0..(m - 1) as usize { total_days += md[i] as u64; }
+    total_days += (d - 1) as u64;
+    Some((total_days * 86400 + h as u64 * 3600 + min as u64 * 60 + s as u64) as i64)
+}
+
+/// Format seconds-since-epoch as human-readable age
+pub fn age_from_epoch_secs(secs: i64) -> String {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+    let diff = (now - secs).max(0) as u64;
+    if diff < 60 { format!("{}s", diff) } else if diff < 3600 { format!("{}m", diff / 60) } else if diff < 86400 { format!("{}h", diff / 3600) } else { format!("{}d", diff / 86400) }
+}
+
 const HELP: &str = "\
 z8s — minimal Kubernetes-compatible container orchestrator
 

@@ -60,7 +60,7 @@ impl StoreBackend for MemoryBackend {
         let mut store = self.resources.write().await;
         if let Some(tracker) = store.get_mut(uid) {
             tracker.state = state;
-            tracker.last_updated = chrono::Utc::now();
+            tracker.last_updated = crate::config::now_rfc3339();
         }
     }
 }

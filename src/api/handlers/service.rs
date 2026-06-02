@@ -116,7 +116,7 @@ pub async fn create_service(
         svc.metadata.namespace = Some(namespace.clone());
     }
     if svc.metadata.uid.is_none() {
-        svc.metadata.uid = Some(uuid::Uuid::new_v4().to_string());
+        svc.metadata.uid = Some(crate::config::random_id());
     }
     if svc.metadata.creation_timestamp.is_none() {
         svc.metadata.creation_timestamp = Some(now_time());

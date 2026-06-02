@@ -84,7 +84,7 @@ impl ProvisionerDispatcher {
             kind: "PersistentVolume".into(),
             metadata: ObjectMeta {
                 name: Some(pv_name.clone()),
-                uid: Some(uuid::Uuid::new_v4().to_string()),
+                uid: Some(crate::config::random_id()),
                 annotations: Some({
                     let mut m = std::collections::BTreeMap::new();
                     m.insert("z8s.io/provisioner".into(), class.provisioner.into());

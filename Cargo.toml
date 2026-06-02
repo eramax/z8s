@@ -20,8 +20,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt"] }
 notify = "8"
 anyhow = { version = "1", features = ["backtrace"] }
-uuid = { version = "1", features = ["v4"] }
-chrono = "0.4"
+getrandom = "0.2"
 axum = { version = "0.8", default-features = false, features = ["json", "tokio", "http1", "ws", "query"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 tokio-tungstenite = "0.21"

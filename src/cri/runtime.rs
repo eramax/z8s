@@ -92,7 +92,7 @@ pub struct ContainerInstance {
     pub image: String,
     pub pid: Option<u32>,
     pub rootfs: String,
-    pub started_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub started_at: Option<String>,
     pub env_vars: Vec<(String, String)>,
     /// container_port → 127.0.0.1 host port (pod network namespace publish)
     pub published_ports: std::collections::HashMap<u16, u16>,
@@ -681,7 +681,7 @@ impl ProcessSupervisor {
             image: image.to_string(),
             pid: Some(pid),
             rootfs: rootfs_path.to_string(),
-            started_at: Some(chrono::Utc::now()),
+            started_at: Some(crate::config::now_rfc3339()),
             env_vars,
             published_ports: std::collections::HashMap::new(),
             isolated_net: isolate_net,

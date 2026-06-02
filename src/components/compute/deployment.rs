@@ -145,7 +145,7 @@ impl DeploymentResource {
             let pod_name = format!(
                 "{}-pod-{}",
                 name,
-                uuid::Uuid::new_v4()
+                crate::config::random_id()
                     .to_string()
                     .split('-')
                     .next()

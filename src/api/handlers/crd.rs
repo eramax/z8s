@@ -27,7 +27,7 @@ pub async fn generic_create(
 ) -> Result<axum::response::Response, ApiError> {
     let meta = resource.metadata_mut();
     if meta.uid.is_none() {
-        meta.uid = Some(uuid::Uuid::new_v4().to_string());
+        meta.uid = Some(crate::config::random_id());
     }
     if meta.creation_timestamp.is_none() {
         meta.creation_timestamp = Some(now_time());
@@ -145,7 +145,7 @@ pub async fn generic_create_namespaced(
             meta.namespace = Some(namespace.to_string());
         }
         if meta.uid.is_none() {
-            meta.uid = Some(uuid::Uuid::new_v4().to_string());
+            meta.uid = Some(crate::config::random_id());
         }
         if meta.creation_timestamp.is_none() {
             meta.creation_timestamp = Some(now_time());

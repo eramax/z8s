@@ -190,7 +190,7 @@ mod tests {
     use crate::store::StoreBackend;
 
     fn temp_db() -> RedbBackend {
-        let dir = std::env::temp_dir().join(format!("z8s-test-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("z8s-test-{}", crate::config::random_id()));
         RedbBackend::open(&dir).unwrap()
     }
 

@@ -45,7 +45,7 @@ pub async fn create_namespace(
     let name = ns.metadata.name.clone().unwrap_or_else(|| {
         format!(
             "ns-{}",
-            uuid::Uuid::new_v4()
+            crate::config::random_id()
                 .to_string()
                 .split('-')
                 .next()

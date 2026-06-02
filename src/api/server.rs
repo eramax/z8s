@@ -187,11 +187,11 @@ pub async fn run_server(
 // ── Shared helpers ───────────────────────────────────────────────────────────
 
 pub fn now_time() -> crate::types::Time {
-    crate::types::Time(chrono::Utc::now().to_rfc3339())
+    crate::types::Time(crate::config::now_rfc3339())
 }
 
 pub fn now_rfc3339() -> String {
-    chrono::Utc::now().to_rfc3339()
+    crate::config::now_rfc3339()
 }
 
 pub fn make_namespace(name: &str, uid: &str) -> Namespace {
@@ -221,20 +221,8 @@ pub fn accepts_table(headers: &axum::http::HeaderMap) -> bool {
 }
 
 pub fn age_from_timestamp(ts: &str) -> String {
-    if let Ok(created) = chrono::DateTime::parse_from_rfc3339(ts) {
-        let secs = chrono::Utc::now()
-            .signed_duration_since(created)
-            .num_seconds()
-            .max(0);
-        if secs < 60 {
-            format!("{}s", secs)
-        } else if secs < 3600 {
-            format!("{}m", secs / 60)
-        } else if secs < 86400 {
-            format!("{}h", secs / 3600)
-        } else {
-            format!("{}d", secs / 86400)
-        }
+    if let Some(secs) = crate::config::parse_rfc3339_secs(ts) {
+        crate::config::age_from_epoch_secs(secs)
     } else {
         "<unknown>".into()
     }
@@ -374,12 +362,9 @@ pub fn build_table(items: &[serde_json::Value], cols: &[(&str, &str, &str)]) -> 
 
 /// Convert a RFC3339 timestamp to a human-readable relative age (e.g. "5m", "2h", "7d").
 pub fn format_ts_relative(ts: &str, now: std::time::SystemTime) -> String {
-    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts) {
-        let delta = now
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs()
-            .saturating_sub(dt.timestamp() as u64);
+    if let Some(ts_secs) = crate::config::parse_rfc3339_secs(ts) {
+        let now_secs = now.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+        let delta = (now_secs - ts_secs).max(0) as u64;
         if delta < 60 {
             return format!("{}s", delta);
         }
