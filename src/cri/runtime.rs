@@ -93,35 +93,11 @@ impl ProcessSupervisor {
         pod_uid: &str,
         subnet: Option<String>,
     ) -> Result<RunningContainer> {
-        let oci = if cfg.entrypoint.is_empty() || cfg.working_dir.is_none() {
-            crate::cri::oci::read_image_config(rootfs_path)
-        } else {
-            crate::cri::oci::SavedImageConfig::default()
-        };
-        let oci_wd = oci.working_dir.clone();
-        let working_dir = cfg.working_dir.clone().or(oci_wd);
-        let (entrypoint, cmd_args) = if cfg.entrypoint.is_empty() {
-            let oci_ep = oci.entrypoint.as_ref().and_then(|v| v.first()).cloned();
-            let oci_cmd = oci.cmd.unwrap_or_default();
-            match (oci_ep, cfg.args.is_empty()) {
-                (Some(ep), true) => {
-                    let mut args = oci_cmd;
-                    (ep, args)
-                }
-                (Some(ep), false) => (ep, cfg.args.clone()),
-                (None, _) if !oci_cmd.is_empty() => {
-                    let prog = oci_cmd[0].clone();
-                    let args: Vec<String> = oci_cmd[1..].to_vec();
-                    (prog, args)
-                }
-                (None, false) if !cfg.args.is_empty() => {
-                    (cfg.args[0].clone(), cfg.args[1..].to_vec())
-                }
-                (None, _) => (cfg.entrypoint.clone(), cfg.args.clone()),
-            }
-        } else {
-            (cfg.entrypoint.clone(), cfg.args.clone())
-        };
+        let resolved =
+            crate::cri::spawn::entrypoint::resolve_entrypoint(cfg, rootfs_path);
+        let entrypoint = resolved.entrypoint;
+        let cmd_args = resolved.args;
+        let working_dir = resolved.working_dir;
         let image = &cfg.image;
         let is_native = cfg.is_native;
         let env_vars = &cfg.env;
@@ -515,8 +491,11 @@ impl ProcessSupervisor {
     }
 
     pub async fn stop_container(&self, container_id: &str) {
-        let mut running = self.running.lock().await;
-        if let Some(rc) = running.remove(container_id) {
+        let rootfs = {
+            let mut running = self.running.lock().await;
+            let Some(rc) = running.remove(container_id) else {
+                return;
+            };
             if let Some(pid) = rc.instance.pid {
                 info!("Stopping container {} (PID {})", container_id, pid);
                 // Container is PID 1 in its own PID namespace. SIGTERM from the ancestor
@@ -528,6 +507,13 @@ impl ProcessSupervisor {
                 // Also kill the main PID in case the pgid kill missed it
                 let _ = kill(nix::unistd::Pid::from_raw(pid as i32), Signal::SIGKILL);
             }
+            rc.instance.rootfs.clone()
+        };
+        if rootfs.ends_with("/merged") {
+            let _ = tokio::task::spawn_blocking(move || {
+                crate::cri::image::ImageManager::unmount_overlay(&rootfs);
+            })
+            .await;
         }
     }
 

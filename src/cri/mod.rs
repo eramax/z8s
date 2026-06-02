@@ -1,8 +1,10 @@
+pub mod capability;
 pub mod cgroup;
 pub mod spawn;
 pub mod exec;
 pub mod health;
 pub mod image;
+pub mod image_store;
 pub mod oci;
 pub mod rootfs;
 pub mod runtime;

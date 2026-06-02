@@ -2,6 +2,7 @@
 
 pub mod child;
 mod context;
+pub(crate) mod entrypoint;
 mod pipes;
 mod pipeline;
 mod post_fork;

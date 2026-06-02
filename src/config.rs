@@ -71,6 +71,8 @@ pub struct Config {
     pub peers: Vec<(String, String)>,
     pub join_token: Option<String>,
     pub rbac_mode: RbacMode,
+    /// Use OverlayFS (lower=image cache) for container rootfs when possible.
+    pub overlay_rootfs: bool,
 }
 
 impl Config {
@@ -121,6 +123,7 @@ impl Config {
             peers: Vec::new(),
             join_token: None,
             rbac_mode: RbacMode::Enforce,
+            overlay_rootfs: false,
         }
     }
 
@@ -242,6 +245,9 @@ impl Config {
                             std::process::exit(1);
                         });
                     }
+                }
+                "--overlay-rootfs" => {
+                    cfg.overlay_rootfs = true;
                 }
                 "--vnet-cidr-size" => {
                     i += 1;
@@ -412,6 +418,7 @@ OPTIONS:
     --peers <NAME=IP,...>     Other server nodes for gossip  [default: none]
     --join-token <TOKEN>      Token for worker node auth    [default: none]
     --rbac-mode <MODE>        RBAC enforcement: enforce|permissive [default: enforce]
+    --overlay-rootfs          Use OverlayFS for container rootfs (fallback: copy)
     --help                    Show this help
 
 EXAMPLES:

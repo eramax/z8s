@@ -67,18 +67,31 @@ pub async fn build_spec(
             .and_then(|sc| sc.run_as_group)
             .or_else(|| pod_sc.and_then(|sc| sc.run_as_group))
             .map(|g| g as u32);
-        let privileged = container
+        let mut privileged = container
             .security_context
             .as_ref()
             .and_then(|sc| sc.privileged)
             .unwrap_or(false);
-        let extra_capabilities = container
+        let mut extra_capabilities = container
             .security_context
             .as_ref()
             .and_then(|sc| sc.capabilities.as_ref())
             .and_then(|c| c.add.as_ref())
             .cloned()
             .unwrap_or_default();
+        let cap_profile = pod
+            .and_then(|p| p.metadata.annotations.as_ref())
+            .and_then(|a| a.get(crate::cri::capability::ANNOTATION_CAP_PROFILE))
+            .map(|s| s.as_str())
+            .or(if is_native {
+                Some("host-native")
+            } else {
+                None
+            });
+        if let Some(profile) = cap_profile {
+            (privileged, extra_capabilities) =
+                crate::cri::capability::apply_cap_profile(profile, privileged, extra_capabilities);
+        }
 
         let mut volumes = if let Some(pod) = pod {
             if !is_native {

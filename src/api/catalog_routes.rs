@@ -180,4 +180,35 @@ mod tests {
     fn from_catalog_builds_router() {
         let _router: Router<AppState> = from_catalog();
     }
+
+    /// Core kinds must be reachable via cluster list + namespaced collection + namespaced item.
+    #[test]
+    fn compat_three_url_shapes_for_core_kinds() {
+        use crate::api::catalog::{compat_mount_serves_version, CATALOG};
+        let core = [("pods", "v1"), ("deployments", "apps/v1")];
+        for (plural, version) in core {
+            let entry = CATALOG
+                .iter()
+                .find(|e| e.plural == plural && e.list_api_version == version)
+                .unwrap_or_else(|| panic!("catalog missing {plural} {version}"));
+            let mount = COMPAT_MOUNTS
+                .iter()
+                .find(|m| compat_mount_serves_version(m, entry.list_api_version))
+                .unwrap_or_else(|| panic!("no compat mount for {version}"));
+            assert!(
+                mount.flags.namespaced,
+                "{plural} should be namespaced on {}",
+                mount.prefix
+            );
+            if version == "v1" {
+                assert!(mount.flags.cluster_list, "{plural} needs cluster list");
+            }
+            if version == "apps/v1" {
+                assert!(
+                    mount.flags.cluster_list || mount.flags.namespaced,
+                    "{plural} needs apps/v1 routes"
+                );
+            }
+        }
+    }
 }

@@ -149,7 +149,7 @@ impl ImageManager {
                         "Copying cached rootfs for {} to {}",
                         image_ref, container_rootfs
                     );
-                    return Self::copy_cache_to_container(
+                    return crate::cri::image_store::prepare_container_rootfs(
                         &cache_path,
                         &container_rootfs,
                         &meta_path,
@@ -186,7 +186,7 @@ impl ImageManager {
             if let Ok(cached_ref) = std::fs::read_to_string(&cache_meta) {
                 if cached_ref.trim() == image_ref {
                     info!("Cache populated by concurrent pull for {}", image_ref);
-                    return Self::copy_cache_to_container(
+                    return crate::cri::image_store::prepare_container_rootfs(
                         &cache_path,
                         &container_rootfs,
                         &meta_path,
@@ -259,11 +259,16 @@ impl ImageManager {
         }
         std::fs::write(&cache_meta, image_ref).context("Failed to write cache metadata")?;
 
-        Self::copy_cache_to_container(&cache_path, &container_rootfs, &meta_path, image_ref)
-            .context("Failed to copy image cache to container rootfs")
+        crate::cri::image_store::prepare_container_rootfs(
+            &cache_path,
+            &container_rootfs,
+            &meta_path,
+            image_ref,
+        )
+        .context("Failed to prepare container rootfs from image cache")
     }
 
-    fn mount_overlay_rootfs(
+    pub(crate) fn mount_overlay_rootfs(
         cache_path: &str,
         container_rootfs: &str,
         meta_path: &str,
@@ -326,7 +331,7 @@ impl ImageManager {
         Ok(merged)
     }
 
-    fn copy_cache_to_container(
+    pub(crate) fn copy_cache_to_container(
         cache_path: &str,
         container_rootfs: &str,
         meta_path: &str,
