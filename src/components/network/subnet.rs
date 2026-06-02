@@ -1,18 +1,14 @@
 use crate::components::{Component, ReconcileContext, ResourceCategory};
-use crate::netmux::NetMux;
 use crate::store::{AnyResource, ResourceTracker};
 use anyhow::Result;
 use async_trait::async_trait;
-use std::sync::Arc;
-use tracing::info;
 
-pub struct SubnetResource {
-    netmux: Arc<NetMux>,
-}
+/// Subnet reconcile runs in `netmux::sync_network`.
+pub struct SubnetResource;
 
 impl SubnetResource {
-    pub fn new(netmux: Arc<NetMux>) -> Self {
-        Self { netmux }
+    pub fn new(_netmux: std::sync::Arc<crate::netmux::NetMux>) -> Self {
+        Self
     }
 }
 
@@ -25,31 +21,15 @@ impl Component for SubnetResource {
         ResourceCategory::Network
     }
 
-    async fn reconcile(&self, _ctx: &ReconcileContext, tracker: &ResourceTracker) -> Result<()> {
-        if let AnyResource::Subnet(subnet) = &tracker.resource {
-            let name = subnet.metadata.name.as_deref().unwrap_or("unknown");
-            self.netmux.register_subnet_cidr(name, &subnet.spec.cidr)?;
-        }
+    async fn reconcile(&self, _ctx: &ReconcileContext, _tracker: &ResourceTracker) -> Result<()> {
         Ok(())
     }
 
-    async fn on_apply(&self, _ctx: &ReconcileContext, resource: &AnyResource) -> Result<()> {
-        if let AnyResource::Subnet(subnet) = resource {
-            let name = subnet.metadata.name.as_deref().unwrap_or("unknown");
-            info!(
-                "Subnet '{}' on_apply called",
-                name
-            );
-        }
+    async fn on_apply(&self, _ctx: &ReconcileContext, _resource: &AnyResource) -> Result<()> {
         Ok(())
     }
 
-    async fn on_delete(&self, _ctx: &ReconcileContext, resource: &AnyResource) -> Result<()> {
-        info!(
-            "Subnet removed: {} {}",
-            resource.namespace(),
-            resource.name()
-        );
+    async fn on_delete(&self, _ctx: &ReconcileContext, _resource: &AnyResource) -> Result<()> {
         Ok(())
     }
 }

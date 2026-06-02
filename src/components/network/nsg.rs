@@ -1,18 +1,14 @@
 use crate::components::{Component, ReconcileContext, ResourceCategory};
-use crate::netmux::NetMux;
 use crate::store::{AnyResource, ResourceTracker};
 use anyhow::Result;
 use async_trait::async_trait;
-use std::sync::Arc;
-use tracing::info;
 
-pub struct NsgResource {
-    pub netmux: Arc<NetMux>,
-}
+/// NSG reconcile runs in `netmux::sync_network`.
+pub struct NsgResource;
 
 impl NsgResource {
-    pub fn new(netmux: Arc<NetMux>) -> Self {
-        Self { netmux }
+    pub fn new(_netmux: std::sync::Arc<crate::netmux::NetMux>) -> Self {
+        Self
     }
 }
 
@@ -25,14 +21,7 @@ impl Component for NsgResource {
         ResourceCategory::Network
     }
 
-    async fn reconcile(&self, _ctx: &ReconcileContext, tracker: &ResourceTracker) -> Result<()> {
-        if let AnyResource::Nsg(nsg) = &tracker.resource {
-            self.netmux.apply_nsg(nsg).await?;
-            info!(
-                "NSG '{}' applied",
-                nsg.metadata.name.as_deref().unwrap_or("?")
-            );
-        }
+    async fn reconcile(&self, _ctx: &ReconcileContext, _tracker: &ResourceTracker) -> Result<()> {
         Ok(())
     }
 
@@ -40,8 +29,7 @@ impl Component for NsgResource {
         Ok(())
     }
 
-    async fn on_delete(&self, _ctx: &ReconcileContext, resource: &AnyResource) -> Result<()> {
-        info!("NSG removed: {} {}", resource.namespace(), resource.name());
+    async fn on_delete(&self, _ctx: &ReconcileContext, _resource: &AnyResource) -> Result<()> {
         Ok(())
     }
 }

@@ -239,14 +239,16 @@ impl NetworkManager {
         name.parse::<u16>().ok()
     }
 
-    /// Reconcile every Service once (called at end of a reconcile sweep, not per-pod).
+    /// Deprecated: use orchestrator `SyncNetwork` → `netmux::sync_network::reconcile_network`.
     pub async fn sync_all_services(&self) {
-        let trackers = self.store.get_by_kind("Service").await;
-        for t in &trackers {
-            if let AnyResource::Service(svc) = &t.resource {
-                self.sync_service(svc).await;
-            }
-        }
+        let snap = self.store.snapshot().await;
+        crate::netmux::sync_network::reconcile_network(
+            &snap,
+            &self.netmux,
+            &self.store,
+            &self.process_tracker,
+        )
+        .await;
     }
 
     /// Re-bind service proxies when a pod becomes ready (pods often start after their Service).
@@ -278,47 +280,7 @@ impl NetworkManager {
     }
 
     pub async fn remove_service(&self, ns: &str, name: &str) {
-        let prefix = format!("{}/{}", ns, name);
-        let mut proxies = self.proxies.lock().await;
-        let keys: Vec<_> = proxies
-            .iter()
-            .filter(|k| k.starts_with(&prefix))
-            .cloned()
-            .collect();
-        for key in keys {
-            proxies.remove(&key);
-            info!("Stopped service proxy for {}", key);
-            // Extract ClusterIP and port from store
-            let store_prefix = format!("{}/{}", ns, name);
-            if key.starts_with(&store_prefix) {
-                let trackers = self.store.get_by_kind("Service").await;
-                for t in &trackers {
-                    if t.resource.namespace() == ns && t.resource.name() == name {
-                        if let crate::store::AnyResource::Service(svc) = &t.resource {
-                            if let Some(spec) = &svc.spec {
-                                if let Some(cip) = &spec.cluster_ip {
-                                    if let Ok(ip) = cip.parse::<std::net::Ipv4Addr>() {
-                                        if let Some(port_str) = key.rsplit(':').next() {
-                                            if let Ok(port) = port_str.parse::<u16>() {
-                                                if let Err(e) =
-                                                    self.netmux.remove_service_dnat(ip, port).await
-                                                {
-                                                    tracing::warn!(
-                                                        "remove_dnat failed for {}: {}",
-                                                        key,
-                                                        e
-                                                    );
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        crate::netmux::sync_network::remove_service(&self.netmux, &self.store, ns, name).await;
     }
 }
 
@@ -371,7 +333,7 @@ impl Component for ServiceResource {
     }
 
     async fn reconcile(&self, _ctx: &ReconcileContext, _tracker: &ResourceTracker) -> Result<()> {
-        // Service proxies are synced once per sweep in Reconciler (sync_all_services).
+        // Service DNAT is applied in orchestrator SyncNetwork only.
         Ok(())
     }
 
@@ -379,10 +341,14 @@ impl Component for ServiceResource {
         Ok(())
     }
 
-    async fn on_delete(&self, _ctx: &ReconcileContext, resource: &AnyResource) -> Result<()> {
-        let ns = resource.namespace();
-        let name = resource.name();
-        self.network.remove_service(ns, name).await;
+    async fn on_delete(&self, ctx: &ReconcileContext, resource: &AnyResource) -> Result<()> {
+        crate::netmux::sync_network::remove_service(
+            &ctx.netmux,
+            &ctx.store,
+            resource.namespace(),
+            resource.name(),
+        )
+        .await;
         Ok(())
     }
 }

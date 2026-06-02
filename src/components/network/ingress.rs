@@ -1,19 +1,17 @@
 use crate::components::{Component, ReconcileContext, ResourceCategory};
-use crate::netmux::NetMux;
 use crate::store::{AnyResource, ResourceTracker};
 use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::Arc;
-use tracing::info;
 
+/// Ingress reconcile runs in `netmux::sync_network`.
 pub struct IngressResource {
     pub store: Arc<dyn crate::store::StoreBackend>,
-    pub netmux: Arc<NetMux>,
 }
 
 impl IngressResource {
-    pub fn new(store: Arc<dyn crate::store::StoreBackend>, netmux: Arc<NetMux>) -> Self {
-        Self { store, netmux }
+    pub fn new(store: Arc<dyn crate::store::StoreBackend>, _netmux: Arc<crate::netmux::NetMux>) -> Self {
+        Self { store }
     }
 }
 
@@ -25,32 +23,8 @@ impl Component for IngressResource {
     fn category(&self) -> ResourceCategory {
         ResourceCategory::Network
     }
-    async fn reconcile(&self, _ctx: &ReconcileContext, tracker: &ResourceTracker) -> Result<()> {
-        if let AnyResource::Ingress(ing) = &tracker.resource {
-            crate::netmux::ingress::apply_ingress(&self.netmux.ingress_state, ing)?;
-            let gw = self.netmux.gateway;
-            if let Some(spec) = &ing.spec {
-                if let Some(rules) = &spec.rules {
-                    let mut records = self.netmux.dns_records.write().unwrap_or_else(|e| {
-                        tracing::warn!("dns_records lock poisoned");
-                        e.into_inner()
-                    });
-                    for rule in rules {
-                        if let Some(host) = &rule.host {
-                            if !host.is_empty() {
-                                records.insert(host.clone(), gw);
-                                info!("DNS: {} → {} (ingress)", host, gw);
-                            }
-                        }
-                    }
-                }
-            }
-            info!(
-                "Ingress '{}/{}' applied",
-                ing.metadata.namespace.as_deref().unwrap_or("default"),
-                ing.metadata.name.as_deref().unwrap_or("?")
-            );
-        }
+
+    async fn reconcile(&self, _ctx: &ReconcileContext, _tracker: &ResourceTracker) -> Result<()> {
         Ok(())
     }
 
@@ -58,29 +32,19 @@ impl Component for IngressResource {
         Ok(())
     }
 
-    async fn on_delete(&self, _ctx: &ReconcileContext, resource: &AnyResource) -> Result<()> {
+    async fn on_delete(&self, ctx: &ReconcileContext, resource: &AnyResource) -> Result<()> {
         if let AnyResource::Ingress(ing) = resource {
-            crate::netmux::ingress::remove_ingress(&self.netmux.ingress_state, ing)?;
-            // Remove DNS records for ingress hosts
+            crate::netmux::ingress::remove_ingress(&ctx.netmux.ingress_state, ing)?;
             if let Some(spec) = &ing.spec {
                 if let Some(rules) = &spec.rules {
-                    let mut records = self.netmux.dns_records.write().unwrap_or_else(|e| {
-                        tracing::warn!("dns_records lock poisoned");
-                        e.into_inner()
-                    });
+                    let mut records = ctx.netmux.dns_records.write().unwrap_or_else(|e| e.into_inner());
                     for rule in rules {
                         if let Some(host) = &rule.host {
                             records.remove(host);
-                            info!("DNS: {} removed (ingress deleted)", host);
                         }
                     }
                 }
             }
-            info!(
-                "Ingress '{}/{}' removed",
-                ing.metadata.namespace.as_deref().unwrap_or("default"),
-                ing.metadata.name.as_deref().unwrap_or("?")
-            );
         }
         Ok(())
     }

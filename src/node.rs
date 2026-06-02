@@ -290,7 +290,6 @@ pub async fn run_node(
     let reconciler = Arc::new(Reconciler::new(
         registry.clone(),
         ctx.clone(),
-        network.clone(),
         process_tracker.clone(),
         store_events.clone(),
     ));

@@ -4,7 +4,6 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, Notify};
 use tokio::time::Duration;
 
-use crate::components::network::service::NetworkManager;
 use crate::components::{ComponentRegistry, ReconcileContext, ResourceCategory};
 use crate::scheduler::index::OrchestratorIndex;
 use crate::scheduler::process::ProcessTracker;
@@ -51,7 +50,6 @@ impl PendingWork {
 pub struct Orchestrator {
     pub registry: Arc<ComponentRegistry>,
     pub ctx: Arc<ReconcileContext>,
-    pub network: Arc<NetworkManager>,
     pub process_tracker: Arc<ProcessTracker>,
     pub notify: Arc<Notify>,
     pub store_events: StoreEventHub,
@@ -64,14 +62,12 @@ impl Orchestrator {
     pub fn new(
         registry: Arc<ComponentRegistry>,
         ctx: Arc<ReconcileContext>,
-        network: Arc<NetworkManager>,
         process_tracker: Arc<ProcessTracker>,
         store_events: StoreEventHub,
     ) -> Self {
         Self {
             registry,
             ctx,
-            network,
             process_tracker,
             notify: Arc::new(Notify::new()),
             store_events,
@@ -160,14 +156,14 @@ impl Orchestrator {
             let local_uids = self.index.lock().await.local_pod_uids();
             let local_pods = snap.filter_uids(local_uids.iter().map(String::as_str));
             sync_pods(&local_pods, self.process_tracker.clone()).await;
-            self.network.sync_all_services().await;
+            self.sync_network(&snap).await;
             return;
         }
 
         let index_dirty_network = self.index.lock().await.take_network_dirty();
         if work.network || index_dirty_network {
             self.dispatch(Task::SyncNetwork).await;
-            self.network.sync_all_services().await;
+            self.sync_network(&snap).await;
         }
 
         let mut trackers = snap.filter_uids(work.touched_uids.iter().map(String::as_str));
@@ -249,5 +245,15 @@ impl Orchestrator {
 
     async fn dispatch(&self, task: Task) {
         tracing::trace!(?task, "orchestrator task");
+    }
+
+    async fn sync_network(&self, snap: &StoreSnapshot) {
+        crate::netmux::sync_network::reconcile_network(
+            snap,
+            &self.ctx.netmux,
+            &self.ctx.store,
+            &self.process_tracker,
+        )
+        .await;
     }
 }

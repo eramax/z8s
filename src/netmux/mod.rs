@@ -1,3 +1,4 @@
+pub mod applier;
 pub mod dns;
 pub mod ingress;
 pub mod ipv6;
@@ -5,7 +6,10 @@ pub mod netlink;
 pub mod network;
 pub mod nftables;
 pub mod np_controller;
+pub mod planner;
 pub mod pool;
+pub mod state;
+pub mod sync_network;
 
 use anyhow::{Context, Result};
 use std::collections::HashMap;

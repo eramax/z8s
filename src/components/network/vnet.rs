@@ -1,18 +1,14 @@
 use crate::components::{Component, ReconcileContext, ResourceCategory};
-use crate::netmux::NetMux;
 use crate::store::{AnyResource, ResourceTracker};
 use anyhow::Result;
 use async_trait::async_trait;
-use std::sync::Arc;
-use tracing::info;
 
-pub struct VNetResource {
-    pub netmux: Arc<NetMux>,
-}
+/// VNet reconcile runs in `netmux::sync_network` (scheduler `SyncNetwork` only).
+pub struct VNetResource;
 
 impl VNetResource {
-    pub fn new(netmux: Arc<NetMux>) -> Self {
-        Self { netmux }
+    pub fn new(_netmux: std::sync::Arc<crate::netmux::NetMux>) -> Self {
+        Self
     }
 }
 
@@ -25,22 +21,7 @@ impl Component for VNetResource {
         ResourceCategory::Network
     }
 
-    async fn reconcile(&self, _ctx: &ReconcileContext, tracker: &ResourceTracker) -> Result<()> {
-        if let AnyResource::VNet(vnet) = &tracker.resource {
-            let cidr = vnet.spec.cidr.as_deref().unwrap_or("10.42.0.0/20");
-            self.netmux.apply_vnet(vnet, cidr).await?;
-            if vnet.spec.internet_access {
-                self.netmux
-                    .nft
-                    .add_snat(vnet.metadata.name.as_deref().unwrap_or("vnet"), cidr)
-                    .await?;
-            }
-            info!(
-                "VNet '{}' applied (CIDR {})",
-                vnet.metadata.name.as_deref().unwrap_or("?"),
-                cidr
-            );
-        }
+    async fn reconcile(&self, _ctx: &ReconcileContext, _tracker: &ResourceTracker) -> Result<()> {
         Ok(())
     }
 
@@ -48,8 +29,7 @@ impl Component for VNetResource {
         Ok(())
     }
 
-    async fn on_delete(&self, _ctx: &ReconcileContext, resource: &AnyResource) -> Result<()> {
-        info!("VNet removed: {} {}", resource.namespace(), resource.name());
+    async fn on_delete(&self, _ctx: &ReconcileContext, _resource: &AnyResource) -> Result<()> {
         Ok(())
     }
 }
