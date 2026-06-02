@@ -191,10 +191,9 @@ pub fn build_router(state: AppState) -> Router {
     let tokens_for_mw = state.process_tracker.tokens.clone();
     Router::new()
         .merge(crate::api::handlers::system::routes())
-        .merge(crate::api::handlers::deployment::routes())
         .merge(crate::api::handlers::metrics::routes())
         .merge(crate::api::catalog_routes::routes())
-        .merge(crate::api::handlers::pod::routes())
+        .merge(crate::api::subresource::routes())
         .merge(crate::api::handlers::apply::routes())
         .route("/ws/gossip", axum::routing::any(gossip_ws_handler))
         .fallback(fallback_handler)

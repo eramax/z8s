@@ -1,4 +1,4 @@
-//! Deployment `/scale` subresource (A2 — CRUD via catalog + `api::enrich`).
+//! Deployment `/scale` subresource.
 
 use crate::api::enrich;
 use crate::api::server::*;

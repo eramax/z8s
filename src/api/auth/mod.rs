@@ -122,8 +122,8 @@ pub fn api_group_for_resource(resource: &str) -> &'static str {
         "roles" | "rolebindings" | "clusterroles" | "clusterrolebindings" => {
             "rbac.authorization.k8s.io"
         }
-        "pods/exec" => "",
-        "pods/log" => "",
+        "pods/exec" | "pods/log" => "",
+        "deployments/scale" => "apps",
         "vnets" | "subnets" | "nsgs" | "routetables" => "z8s.io",
         "storageclasses" => "storage.k8s.io",
         _ => "",

@@ -1,7 +1,7 @@
 //! Routes generated from the resource catalog (A2).
 
 use axum::Router;
-use axum::routing::{delete, get, patch, post, put};
+use axum::routing::get;
 
 use crate::api::resource_handler;
 use crate::api::server::AppState;
@@ -19,15 +19,7 @@ pub fn routes() -> Router<AppState> {
         get(resource_handler::list_cluster).post(resource_handler::create_cluster);
 
     Router::new()
-        // z8s.io cluster-scoped (vnets enriched in enrich.rs; subnets/nsgs/routetables generic)
-        .route("/apis/z8s.io/v1/vnets", cluster_collection.clone())
-        .route("/apis/z8s.io/v1/vnets/{name}", cluster_item.clone())
-        .route("/apis/z8s.io/v1/subnets", cluster_collection.clone())
-        .route("/apis/z8s.io/v1/subnets/{name}", cluster_item.clone())
-        .route("/apis/z8s.io/v1/nsgs", cluster_collection.clone())
-        .route("/apis/z8s.io/v1/nsgs/{name}", cluster_item.clone())
-        .route("/apis/z8s.io/v1/routetables", cluster_collection.clone())
-        .route("/apis/z8s.io/v1/routetables/{name}", cluster_item.clone())
+        // Core v1
         .route(
             "/api/v1/{plural}",
             get(resource_handler::list_v1_plural).post(resource_handler::create_v1_plural),
@@ -44,6 +36,16 @@ pub fn routes() -> Router<AppState> {
             "/api/v1/namespaces/{namespace}/{plural}/{name}",
             namespaced_item.clone(),
         )
+        // z8s.io cluster-scoped (VNet list enriched in resource_handler)
+        .route(
+            "/apis/z8s.io/v1/{plural}",
+            get(resource_handler::list_v1_plural).post(resource_handler::create_v1_plural),
+        )
+        .route(
+            "/apis/z8s.io/v1/{plural}/{name}",
+            get(resource_handler::get_cluster).delete(resource_handler::delete_cluster),
+        )
+        // apps / networking / discovery / storage / rbac
         .route(
             "/apis/apps/v1/{plural}",
             get(resource_handler::list_v1_plural),

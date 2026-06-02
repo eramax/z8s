@@ -1,4 +1,4 @@
-//! Pod log/exec subresources (CRUD via catalog + `api::enrich`).
+//! Pod log/exec subresources.
 
 use crate::api::server::*;
 use axum::Router;

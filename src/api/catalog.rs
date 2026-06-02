@@ -263,6 +263,9 @@ pub fn authz_from_path(uri: &str) -> Option<(&'static str, &str, Option<&str>)> 
     if parts.len() >= 6 && parts[0] == "apis" && parts[3] == "namespaces" {
         let ns = parts[4];
         let plural = parts.get(5).copied()?;
+        if plural == "deployments" && parts.get(7) == Some(&"scale") {
+            return Some(("deployments/scale", ns, parts.get(6).copied()));
+        }
         return by_plural(plural).map(|e| (e.plural, ns, parts.get(6).copied()));
     }
 
@@ -305,11 +308,14 @@ pub fn authz_from_path(uri: &str) -> Option<(&'static str, &str, Option<&str>)> 
         return by_plural(plural).map(|e| (e.plural, "", parts.get(3).copied()));
     }
 
-    if parts.len() >= 5 && parts[0] == "apis" && parts[1] == "apps" && parts[2] == "v1" && parts[3] == "namespaces"
+    if parts.len() >= 4
+        && parts[0] == "apis"
+        && parts[1] == "apps"
+        && parts[2] == "v1"
+        && parts[3] != "namespaces"
     {
-        let ns = parts[4];
-        let plural = parts.get(5).copied()?;
-        return by_plural(plural).map(|e| (e.plural, ns, parts.get(6).copied()));
+        let plural = parts[3];
+        return by_plural(plural).map(|e| (e.plural, "", parts.get(4).copied()));
     }
 
     if parts.len() >= 5
@@ -365,6 +371,26 @@ mod tests {
     #[test]
     fn authz_skips_apply_endpoint() {
         assert!(authz_from_path("/api/v1/apply").is_none());
+    }
+
+    #[test]
+    fn authz_resolves_apps_deployments_and_scale() {
+        let (r, ns, name) =
+            authz_from_path("/apis/apps/v1/namespaces/default/deployments/nginx/scale").unwrap();
+        assert_eq!(r, "deployments/scale");
+        assert_eq!(ns, "default");
+        assert_eq!(name, Some("nginx"));
+        let (r, ns, _) = authz_from_path("/apis/apps/v1/deployments").unwrap();
+        assert_eq!(r, "deployments");
+        assert_eq!(ns, "");
+    }
+
+    #[test]
+    fn authz_resolves_z8s_vnet() {
+        let (r, ns, name) = authz_from_path("/apis/z8s.io/v1/vnets/default").unwrap();
+        assert_eq!(r, "vnets");
+        assert_eq!(ns, "");
+        assert_eq!(name, Some("default"));
     }
 
     #[test]
