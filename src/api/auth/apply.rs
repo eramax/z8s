@@ -56,40 +56,16 @@ fn json_object_to_resource(v: serde_json::Value) -> anyhow::Result<AnyResource> 
 }
 
 pub fn rbac_plural(resource: &AnyResource) -> String {
-    match resource.kind() {
-        "Pod" => "pods".to_string(),
-        "Deployment" => "deployments".to_string(),
-        "Service" => "services".to_string(),
-        "ConfigMap" => "configmaps".to_string(),
-        "Secret" => "secrets".to_string(),
-        "PersistentVolumeClaim" => "persistentvolumeclaims".to_string(),
-        "PersistentVolume" => "persistentvolumes".to_string(),
-        "Namespace" => "namespaces".to_string(),
-        "Node" => "nodes".to_string(),
-        "Ingress" => "ingresses".to_string(),
-        "NetworkPolicy" => "networkpolicies".to_string(),
-        "Role" => "roles".to_string(),
-        "RoleBinding" => "rolebindings".to_string(),
-        "ClusterRole" => "clusterroles".to_string(),
-        "ClusterRoleBinding" => "clusterrolebindings".to_string(),
-        "ServiceAccount" => "serviceaccounts".to_string(),
-        "VNet" => "vnets".to_string(),
-        "Subnet" => "subnets".to_string(),
-        "NSG" => "nsgs".to_string(),
-        "RouteTable" => "routetables".to_string(),
-        "StorageClass" => "storageclasses".to_string(),
-        "Endpoints" => "endpoints".to_string(),
-        "EndpointSlice" => "endpointslices".to_string(),
-        "Event" => "events".to_string(),
-        other => {
-            let lower = other.to_ascii_lowercase();
+    crate::api::catalog::by_kind(resource.kind())
+        .map(|e| e.plural.to_string())
+        .unwrap_or_else(|| {
+            let lower = resource.kind().to_ascii_lowercase();
             if lower.ends_with('s') {
                 lower
             } else {
                 format!("{lower}s")
             }
-        }
-    }
+        })
 }
 
 pub fn api_group_from_resource(resource: &AnyResource) -> String {

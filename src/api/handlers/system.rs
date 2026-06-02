@@ -16,185 +16,43 @@ pub async fn api_versions() -> Json<APIVersions> {
 }
 
 pub async fn api_v1_resources() -> Json<APIResourceList> {
+    let mut resources = crate::api::discovery::resources_for_api_version("v1");
+    resources.push(api_resource(
+        "pods/exec",
+        "",
+        true,
+        "PodExecOptions",
+        &["create", "get"],
+        &[],
+        &[],
+    ));
+    resources.push(api_resource("pods/log", "", true, "Pod", &["get"], &[], &[]));
     Json(APIResourceList {
         group_version: "v1".into(),
-        resources: vec![
-            api_resource(
-                "pods",
-                "pod",
-                true,
-                "Pod",
-                &["get", "list", "watch", "create", "update", "delete"],
-                &["po"],
-                &["all"],
-            ),
-            api_resource(
-                "pods/exec",
-                "",
-                true,
-                "PodExecOptions",
-                &["create", "get"],
-                &[],
-                &[],
-            ),
-            api_resource("pods/log", "", true, "Pod", &["get"], &[], &[]),
-            api_resource(
-                "namespaces",
-                "namespace",
-                false,
-                "Namespace",
-                &["get", "list", "create", "delete"],
-                &["ns"],
-                &[],
-            ),
-            api_resource(
-                "nodes",
-                "node",
-                false,
-                "Node",
-                &["get", "list"],
-                &["no"],
-                &[],
-            ),
-            api_resource(
-                "services",
-                "service",
-                true,
-                "Service",
-                &[
-                    "get", "list", "watch", "create", "update", "patch", "delete",
-                ],
-                &["svc"],
-                &[],
-            ),
-            api_resource(
-                "endpoints",
-                "endpoints",
-                true,
-                "Endpoints",
-                &["get", "list", "watch"],
-                &["ep"],
-                &[],
-            ),
-            api_resource(
-                "configmaps",
-                "configmap",
-                true,
-                "ConfigMap",
-                &["get", "list", "create", "delete"],
-                &["cm"],
-                &[],
-            ),
-            api_resource(
-                "secrets",
-                "secret",
-                true,
-                "Secret",
-                &["get", "list", "create", "delete"],
-                &[],
-                &[],
-            ),
-            api_resource(
-                "events",
-                "event",
-                true,
-                "Event",
-                &["get", "list", "watch"],
-                &["ev"],
-                &[],
-            ),
-            api_resource(
-                "persistentvolumes",
-                "persistentvolume",
-                false,
-                "PersistentVolume",
-                &["get", "list", "create", "delete"],
-                &["pv"],
-                &[],
-            ),
-            api_resource(
-                "persistentvolumeclaims",
-                "persistentvolumeclaim",
-                true,
-                "PersistentVolumeClaim",
-                &["get", "list", "create", "delete"],
-                &["pvc"],
-                &[],
-            ),
-        ],
+        resources,
     })
 }
 
 pub async fn api_groups() -> Json<APIGroupList> {
-    Json(APIGroupList {
-        groups: vec![
-            APIGroup {
-                name: "apps".into(),
-                versions: vec![gvd("apps/v1", "v1")],
-                preferred_version: Some(gvd("apps/v1", "v1")),
-                server_address_by_client_cidrs: None,
-            },
-            APIGroup {
-                name: "metrics.k8s.io".into(),
-                versions: vec![gvd("metrics.k8s.io/v1beta1", "v1beta1")],
-                preferred_version: Some(gvd("metrics.k8s.io/v1beta1", "v1beta1")),
-                server_address_by_client_cidrs: None,
-            },
-            APIGroup {
-                name: "authorization.k8s.io".into(),
-                versions: vec![gvd("authorization.k8s.io/v1", "v1")],
-                preferred_version: Some(gvd("authorization.k8s.io/v1", "v1")),
-                server_address_by_client_cidrs: None,
-            },
-            APIGroup {
-                name: "discovery.k8s.io".into(),
-                versions: vec![gvd("discovery.k8s.io/v1", "v1")],
-                preferred_version: Some(gvd("discovery.k8s.io/v1", "v1")),
-                server_address_by_client_cidrs: None,
-            },
-            APIGroup {
-                name: "networking.k8s.io".into(),
-                versions: vec![gvd("networking.k8s.io/v1", "v1")],
-                preferred_version: Some(gvd("networking.k8s.io/v1", "v1")),
-                server_address_by_client_cidrs: None,
-            },
-            APIGroup {
-                name: "storage.k8s.io".into(),
-                versions: vec![gvd("storage.k8s.io/v1", "v1")],
-                preferred_version: Some(gvd("storage.k8s.io/v1", "v1")),
-                server_address_by_client_cidrs: None,
-            },
-            APIGroup {
-                name: "z8s.io".into(),
-                versions: vec![gvd("z8s.io/v1", "v1")],
-                preferred_version: Some(gvd("z8s.io/v1", "v1")),
-                server_address_by_client_cidrs: None,
-            },
-            APIGroup {
-                name: "apiextensions.k8s.io".into(),
-                versions: vec![gvd("apiextensions.k8s.io/v1", "v1")],
-                preferred_version: Some(gvd("apiextensions.k8s.io/v1", "v1")),
-                server_address_by_client_cidrs: None,
-            },
-        ],
-    })
+    let mut groups = crate::api::discovery::api_groups_from_catalog();
+    groups.push(APIGroup {
+        name: "metrics.k8s.io".into(),
+        versions: vec![gvd("metrics.k8s.io/v1beta1", "v1beta1")],
+        preferred_version: Some(gvd("metrics.k8s.io/v1beta1", "v1beta1")),
+        server_address_by_client_cidrs: None,
+    });
+    groups.sort_by(|a, b| a.name.cmp(&b.name));
+    Json(APIGroupList { groups })
 }
 
 pub async fn api_apps_v1_resources() -> Json<APIResourceList> {
-    Json(APIResourceList {
-        group_version: "apps/v1".into(),
-        resources: vec![api_resource(
-            "deployments",
-            "deployment",
-            true,
-            "Deployment",
-            &[
-                "get", "list", "watch", "create", "update", "patch", "delete",
-            ],
-            &["deploy"],
-            &["all"],
-        )],
-    })
+    Json(crate::api::discovery::api_resource_list("apps/v1"))
+}
+
+pub async fn api_rbac_v1_resources() -> Json<APIResourceList> {
+    Json(crate::api::discovery::api_resource_list(
+        "rbac.authorization.k8s.io/v1",
+    ))
 }
 
 pub async fn api_authz_v1_resources() -> Json<APIResourceList> {
@@ -224,101 +82,15 @@ pub async fn api_authz_v1_resources() -> Json<APIResourceList> {
 }
 
 pub async fn api_discovery_v1_resources() -> Json<APIResourceList> {
-    Json(APIResourceList {
-        group_version: "discovery.k8s.io/v1".into(),
-        resources: vec![api_resource(
-            "endpointslices",
-            "endpointslice",
-            true,
-            "EndpointSlice",
-            &["get", "list", "watch"],
-            &[],
-            &[],
-        )],
-    })
+    Json(crate::api::discovery::api_resource_list("discovery.k8s.io/v1"))
 }
 
 pub async fn api_z8s_v1_resources() -> Json<serde_json::Value> {
-    fn col(name: &str, json_path: &str, col_type: &str) -> serde_json::Value {
-        serde_json::json!({"name": name, "type": col_type, "jsonPath": json_path, "description": name})
-    }
-    fn resource_with_cols(
-        name: &str,
-        singular: &str,
-        kind: &str,
-        verbs: &[&str],
-        short: &[&str],
-        cols: Vec<serde_json::Value>,
-    ) -> serde_json::Value {
-        let mut r = serde_json::json!({
-            "name": name, "singularName": singular, "namespaced": false, "kind": kind,
-            "verbs": verbs, "categories": ["all"],
-        });
-        if !short.is_empty() {
-            r["shortNames"] = serde_json::json!(short);
-        }
-        if !cols.is_empty() {
-            r["additionalPrinterColumns"] = serde_json::json!(cols);
-        }
-        r
-    }
-    Json(serde_json::json!({
-        "groupVersion": "z8s.io/v1",
-        "resources": [
-            resource_with_cols("vnets", "vnet", "VNet", &["get","list","create","delete"], &["vn"],
-                vec![col("CIDR", ".spec.cidr", "string"),
-                     col("Role", ".spec.role", "string"),
-                     col("Internet", ".spec.internetAccess", "boolean"),
-                     col("Subnets", ".spec._subnetCount", "integer"),
-                     col("Pods", ".spec._podCount", "integer"),
-                     col("Services", ".spec._serviceCount", "integer"),
-                     col("Age", ".metadata.creationTimestamp", "date")]),
-            resource_with_cols("subnets", "subnet", "Subnet", &["get","list","create","delete"], &["sn"],
-                vec![col("CIDR", ".spec.cidr", "string"),
-                     col("VNet", ".spec.vnet", "string"),
-                     col("Pods", ".spec._podCount", "integer"),
-                     col("Services", ".spec._serviceCount", "integer"),
-                     col("Age", ".metadata.creationTimestamp", "date")]),
-            resource_with_cols("nsgs", "nsg", "NSG", &["get","list","create","delete"], &["nsg"],
-                vec![col("Targets", ".spec._targets", "string"),
-                     col("Rules", ".spec._ruleCount", "integer"),
-                     col("Allows", ".spec._allowCount", "integer"),
-                     col("Denies", ".spec._denyCount", "integer"),
-                     col("Age", ".metadata.creationTimestamp", "date")]),
-            resource_with_cols("routetables", "routetable", "RouteTable", &["get","list","create","delete"], &["rt"],
-                vec![col("Rules", ".spec._ruleCount", "integer"),
-                     col("Allows", ".spec._allowCount", "integer"),
-                     col("Denies", ".spec._denyCount", "integer"),
-                     col("Methods", ".spec._methods", "string"),
-                     col("Age", ".metadata.creationTimestamp", "date")]),
-        ]
-    }))
+    Json(crate::api::discovery::z8s_v1_discovery_json())
 }
 
 pub async fn api_networking_v1_resources() -> Json<APIResourceList> {
-    Json(APIResourceList {
-        group_version: "networking.k8s.io/v1".into(),
-        resources: vec![
-            api_resource(
-                "ingresses",
-                "ingress",
-                true,
-                "Ingress",
-                &["get", "list", "watch", "create", "update", "delete"],
-                &["ing"],
-                &["all"],
-            ),
-            api_resource(
-                "networkpolicies",
-                "networkpolicy",
-                true,
-                "NetworkPolicy",
-                &["get", "list", "watch", "create", "update", "delete"],
-                &["netpol"],
-                &["all"],
-            ),
-        ],
-    })
+    Json(crate::api::discovery::api_resource_list("networking.k8s.io/v1"))
 }
 
 pub async fn api_extensions_v1_resources() -> Json<APIResourceList> {
@@ -337,18 +109,7 @@ pub async fn api_extensions_v1_resources() -> Json<APIResourceList> {
 }
 
 pub async fn api_storage_v1_resources() -> Json<APIResourceList> {
-    Json(APIResourceList {
-        group_version: "storage.k8s.io/v1".into(),
-        resources: vec![api_resource(
-            "storageclasses",
-            "storageclass",
-            false,
-            "StorageClass",
-            &["get", "list"],
-            &["sc"],
-            &[],
-        )],
-    })
+    Json(crate::api::discovery::api_resource_list("storage.k8s.io/v1"))
 }
 
 pub async fn self_subject_access_review(
@@ -590,6 +351,10 @@ pub fn routes() -> Router<AppState> {
         .route("/api/v1", get(api_v1_resources))
         .route("/apis", get(api_groups))
         .route("/apis/z8s.io/v1", get(api_z8s_v1_resources))
+        .route(
+            "/apis/rbac.authorization.k8s.io/v1",
+            get(api_rbac_v1_resources),
+        )
         .route("/apis/apps/v1", get(api_apps_v1_resources))
         .route(
             "/apis/networking.k8s.io/v1",

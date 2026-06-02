@@ -24,6 +24,7 @@ getrandom = "0.2"
 sha2 = "0.10"
 axum = { version = "0.8", default-features = false, features = ["json", "tokio", "http1", "ws", "query"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
 tokio-tungstenite = "0.21"
 async-trait = "0.1"
 rustables = "0.8"

@@ -390,7 +390,7 @@ pub async fn run_node(
     }
 
     {
-        let mut node = crate::api::handlers::node::make_local_node();
+        let mut node = crate::api::enrich::make_local_node();
         if node.metadata.creation_timestamp.is_none() {
             node.metadata.creation_timestamp = Some(crate::types::Time::now());
         }

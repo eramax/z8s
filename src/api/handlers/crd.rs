@@ -8,16 +8,34 @@ pub fn wants_table(accept: &axum::http::HeaderMap) -> bool {
 }
 
 pub async fn generic_list(s: &AppState, kind: &str, list_kind: &str) -> Json<serde_json::Value> {
-    let items: Vec<serde_json::Value> = s
+    generic_list_wire(s, kind, list_kind, "z8s.io/v1").await
+}
+
+pub async fn generic_list_wire(
+    s: &AppState,
+    kind: &str,
+    list_kind: &str,
+    api_version: &str,
+) -> Json<serde_json::Value> {
+    let mut items: Vec<serde_json::Value> = s
         .store
         .get_by_kind(kind)
         .await
         .into_iter()
         .filter_map(|t| serde_json::to_value(&t.resource).ok())
         .collect();
-    Json(
-        serde_json::json!({"apiVersion":"z8s.io/v1","kind":list_kind,"items":items,"metadata":make_list_meta()}),
-    )
+    if kind == "StorageClass" && items.is_empty() {
+        items = crate::storage::class::default_storage_classes()
+            .into_iter()
+            .filter_map(|sc| serde_json::to_value(sc).ok())
+            .collect();
+    }
+    Json(serde_json::json!({
+        "apiVersion": api_version,
+        "kind": list_kind,
+        "items": items,
+        "metadata": make_list_meta()
+    }))
 }
 
 pub async fn generic_create(
@@ -63,6 +81,14 @@ pub async fn generic_get(
             return Ok(Json(serde_json::to_value(&t.resource).unwrap_or_default()));
         }
     }
+    if kind == "StorageClass" {
+        if let Some(sc) = crate::storage::class::default_storage_classes()
+            .into_iter()
+            .find(|c| c.metadata.name.as_deref() == Some(name))
+        {
+            return Ok(Json(serde_json::to_value(sc).unwrap_or_default()));
+        }
+    }
     Err(ApiError::not_found(format!(
         "{} \"{}\" not found",
         kind.to_lowercase(),
@@ -97,6 +123,16 @@ pub async fn generic_list_namespaced(
     list_kind: &str,
     namespace: Option<&str>,
 ) -> Json<serde_json::Value> {
+    generic_list_namespaced_wire(s, kind, list_kind, namespace, "v1").await
+}
+
+pub async fn generic_list_namespaced_wire(
+    s: &AppState,
+    kind: &str,
+    list_kind: &str,
+    namespace: Option<&str>,
+    api_version: &str,
+) -> Json<serde_json::Value> {
     let items: Vec<serde_json::Value> = s
         .store
         .get_by_kind(kind)
@@ -106,7 +142,7 @@ pub async fn generic_list_namespaced(
         .filter_map(|t| serde_json::to_value(&t.resource).ok())
         .collect();
     Json(serde_json::json!({
-        "apiVersion":"v1",
+        "apiVersion": api_version,
         "kind": list_kind,
         "items": items,
         "metadata": make_list_meta()
