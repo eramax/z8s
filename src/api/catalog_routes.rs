@@ -3,7 +3,9 @@
 use axum::Router;
 use axum::routing::{MethodRouter, get};
 
-use crate::api::catalog::{CompatMount, COMPAT_MOUNTS};
+use crate::api::catalog::{
+    CompatMount, CompatSpecialHandlers, COMPAT_MOUNTS, COMPAT_SPECIAL_ROUTES,
+};
 use crate::api::resource_handler;
 use crate::api::server::AppState;
 
@@ -36,31 +38,21 @@ pub fn from_catalog() -> Router<AppState> {
         );
     }
 
+    for special in COMPAT_SPECIAL_ROUTES {
+        let (coll, item) = match special.handlers {
+            CompatSpecialHandlers::ClusterResource => {
+                (cluster_collection.clone(), cluster_item.clone())
+            }
+            CompatSpecialHandlers::ClusterPlural => {
+                (cluster_list_create.clone(), cluster_item.clone())
+            }
+            CompatSpecialHandlers::Namespaced => {
+                (namespaced_collection.clone(), namespaced_item.clone())
+            }
+        };
+        router = router.route(special.collection, coll).route(special.item, item);
+    }
     router
-        .route(
-            "/apis/storage.k8s.io/v1/storageclasses",
-            cluster_collection.clone(),
-        )
-        .route(
-            "/apis/storage.k8s.io/v1/storageclasses/{name}",
-            cluster_item.clone(),
-        )
-        .route(
-            "/apis/rbac.authorization.k8s.io/v1/{plural}",
-            cluster_list_create.clone(),
-        )
-        .route(
-            "/apis/rbac.authorization.k8s.io/v1/{plural}/{name}",
-            cluster_item.clone(),
-        )
-        .route(
-            "/apis/rbac.authorization.k8s.io/v1/namespaces/{namespace}/{plural}",
-            namespaced_collection,
-        )
-        .route(
-            "/apis/rbac.authorization.k8s.io/v1/namespaces/{namespace}/{plural}/{name}",
-            namespaced_item,
-        )
 }
 
 /// Legacy name — prefer [`from_catalog`].
@@ -117,6 +109,17 @@ fn mount_compat(
             }
             if f.cluster_item {
                 r = r.route("/apis/z8s.io/v1/{plural}/{name}", cluster_item);
+            }
+            if f.namespaced {
+                r = r
+                    .route(
+                        "/apis/z8s.io/v1/namespaces/{namespace}/{plural}",
+                        namespaced_collection,
+                    )
+                    .route(
+                        "/apis/z8s.io/v1/namespaces/{namespace}/{plural}/{name}",
+                        namespaced_item,
+                    );
             }
             r
         }

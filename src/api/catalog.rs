@@ -48,7 +48,7 @@ pub const COMPAT_MOUNTS: &[CompatMount] = &[
             cluster_list: true,
             cluster_item: true,
             cluster_create: true,
-            namespaced: false,
+            namespaced: true,
         },
     },
     CompatMount {
@@ -79,6 +79,55 @@ pub const COMPAT_MOUNTS: &[CompatMount] = &[
         },
     },
 ];
+
+/// Handler set for fixed-path compat routes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompatSpecialHandlers {
+    /// `list_cluster` / `create_cluster` (StorageClass).
+    ClusterResource,
+    /// `list_v1_plural` / `create_v1_plural` on `{plural}` (cluster RBAC).
+    ClusterPlural,
+    /// Namespaced catalog CRUD.
+    Namespaced,
+}
+
+/// Fixed-path compat routes (plural is not a path parameter).
+#[derive(Debug, Clone, Copy)]
+pub struct CompatSpecialRoute {
+    pub collection: &'static str,
+    pub item: &'static str,
+    pub handlers: CompatSpecialHandlers,
+}
+
+pub const COMPAT_SPECIAL_ROUTES: &[CompatSpecialRoute] = &[
+    CompatSpecialRoute {
+        collection: "/apis/storage.k8s.io/v1/storageclasses",
+        item: "/apis/storage.k8s.io/v1/storageclasses/{name}",
+        handlers: CompatSpecialHandlers::ClusterResource,
+    },
+    CompatSpecialRoute {
+        collection: "/apis/rbac.authorization.k8s.io/v1/{plural}",
+        item: "/apis/rbac.authorization.k8s.io/v1/{plural}/{name}",
+        handlers: CompatSpecialHandlers::ClusterPlural,
+    },
+    CompatSpecialRoute {
+        collection: "/apis/rbac.authorization.k8s.io/v1/namespaces/{namespace}/{plural}",
+        item: "/apis/rbac.authorization.k8s.io/v1/namespaces/{namespace}/{plural}/{name}",
+        handlers: CompatSpecialHandlers::Namespaced,
+    },
+];
+
+/// Whether a generic compat mount serves resources with this list `apiVersion`.
+pub fn compat_mount_serves_version(mount: &CompatMount, list_api_version: &str) -> bool {
+    matches!(
+        (mount.prefix, list_api_version),
+        ("/api/v1", "v1")
+            | ("/apis/apps/v1", "apps/v1")
+            | ("/apis/z8s.io/v1", "z8s.io/v1")
+            | ("/apis/networking.k8s.io/v1", "networking.k8s.io/v1")
+            | ("/apis/discovery.k8s.io/v1", "discovery.k8s.io/v1")
+    )
+}
 
 macro_rules! entry {
     ($kind:expr, $plural:expr, $list:expr, $ns:expr, $cat:expr, $wire:expr, $rbac:expr) => {
@@ -463,6 +512,25 @@ mod tests {
         assert!(!COMPAT_MOUNTS.is_empty());
         assert!(COMPAT_MOUNTS.iter().any(|m| m.prefix == "/api/v1"));
         assert!(COMPAT_MOUNTS.iter().any(|m| m.prefix == "/apis/z8s.io/v1"));
+    }
+
+    #[test]
+    fn catalog_list_versions_have_compat_mount_or_special() {
+        for entry in CATALOG {
+            let generic = COMPAT_MOUNTS
+                .iter()
+                .any(|m| compat_mount_serves_version(m, entry.list_api_version));
+            let special = matches!(
+                entry.list_api_version,
+                "storage.k8s.io/v1" | "rbac.authorization.k8s.io/v1"
+            );
+            assert!(
+                generic || special,
+                "no compat route for {} ({})",
+                entry.kind,
+                entry.list_api_version
+            );
+        }
     }
 
     #[test]
