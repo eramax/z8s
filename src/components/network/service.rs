@@ -239,6 +239,16 @@ impl NetworkManager {
         name.parse::<u16>().ok()
     }
 
+    /// Reconcile every Service once (called at end of a reconcile sweep, not per-pod).
+    pub async fn sync_all_services(&self) {
+        let trackers = self.store.get_by_kind("Service").await;
+        for t in &trackers {
+            if let AnyResource::Service(svc) = &t.resource {
+                self.sync_service(svc).await;
+            }
+        }
+    }
+
     /// Re-bind service proxies when a pod becomes ready (pods often start after their Service).
     pub async fn sync_services_for_labels(
         &self,
@@ -360,10 +370,8 @@ impl Component for ServiceResource {
         ResourceCategory::Network
     }
 
-    async fn reconcile(&self, ctx: &ReconcileContext, tracker: &ResourceTracker) -> Result<()> {
-        if let AnyResource::Service(svc) = &tracker.resource {
-            self.network.sync_service(svc).await;
-        }
+    async fn reconcile(&self, _ctx: &ReconcileContext, _tracker: &ResourceTracker) -> Result<()> {
+        // Service proxies are synced once per sweep in Reconciler (sync_all_services).
         Ok(())
     }
 

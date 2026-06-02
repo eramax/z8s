@@ -285,6 +285,7 @@ pub async fn run_node(
     let reconciler = Arc::new(Reconciler::new(
         registry.clone(),
         ctx.clone(),
+        network.clone(),
         process_tracker.clone(),
     ));
     let reconciler_notify = reconciler.notify.clone();
@@ -364,13 +365,18 @@ pub async fn run_node(
             crate::store::leases::run_heartbeat(hb_db, hb_name, hb_ip).await;
         });
 
-        let sched_store = store.clone();
-        let sched_name = cfg.node_name.clone();
-        let sched_db = db.clone();
-        let sched_gs = gossip_state.clone();
-        tokio::spawn(async move {
-            crate::scheduler::scheduler::run_scheduler(sched_store, sched_name, sched_db, sched_gs).await;
-        });
+        // Assignment runs on the main node only; workers use a local redb lease otherwise
+        // both nodes would schedule independently and duplicate reconcile work.
+        if cfg.peers.is_empty() {
+            let sched_store = store.clone();
+            let sched_name = cfg.node_name.clone();
+            let sched_db = db.clone();
+            let sched_gs = gossip_state.clone();
+            tokio::spawn(async move {
+                crate::scheduler::scheduler::run_scheduler(sched_store, sched_name, sched_db, sched_gs)
+                    .await;
+            });
+        }
     }
 
     {

@@ -52,14 +52,6 @@ impl Component for PodResource {
             }
         }
 
-        // Sync services for pod labels regardless of state
-        if let AnyResource::Pod(pod) = &tracker.resource {
-            let labels = pod.metadata.labels.clone().unwrap_or_default();
-            let ns = pod.metadata.namespace.as_deref().unwrap_or("default");
-            if let Err(e) = ctx.net.sync_services_for_labels(ns, &labels).await {
-                tracing::warn!("sync_services_for_labels failed: {}", e);
-            }
-        }
         Ok(())
     }
 
@@ -82,10 +74,6 @@ impl Component for PodResource {
                     });
                 }
             }
-
-            let labels = pod.metadata.labels.clone().unwrap_or_default();
-            let ns = pod.metadata.namespace.as_deref().unwrap_or("default");
-            let _ = ctx.net.sync_services_for_labels(ns, &labels).await;
         }
         Ok(())
     }
