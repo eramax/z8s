@@ -1,5 +1,6 @@
 pub mod dns;
 pub mod ingress;
+pub mod ipv6;
 pub mod netlink;
 pub mod network;
 pub mod nftables;

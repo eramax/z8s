@@ -269,7 +269,61 @@ impl ImageManager {
         meta_path: &str,
         image_ref: &str,
     ) -> Result<String> {
+        // Try OverlayFS first (requires root + kernel support)
+        if nix::unistd::Uid::effective().is_root() {
+            match Self::try_overlay_mount(cache_path, container_rootfs) {
+                Ok(merged) => {
+                    Self::copy_oci_config(cache_path, &merged);
+                    Self::backfill_oci_config(cache_path, &merged);
+                    std::fs::write(meta_path, image_ref)?;
+                    return Ok(merged);
+                }
+                Err(e) => {
+                    tracing::warn!("OverlayFS mount failed, falling back to copy: {:#}", e);
+                }
+            }
+        }
+        // Fallback: full copy
         Self::copy_cache_to_container(cache_path, container_rootfs, meta_path, image_ref)
+    }
+
+    /// Attempt to mount an overlayfs for the container.
+    /// lower = image cache (shared, read-only)
+    /// upper = container-specific writes (per-container)
+    /// work  = overlayfs workdir (kernel requirement)
+    /// merged = final rootfs view
+    fn try_overlay_mount(cache_path: &str, container_rootfs: &str) -> Result<String> {
+        use nix::mount::{MsFlags, mount};
+
+        let base = container_rootfs;
+        let upper = format!("{}/upper", base);
+        let work = format!("{}/work", base);
+        let merged = format!("{}/merged", base);
+
+        // Create overlay directories
+        std::fs::create_dir_all(&upper).context("create upper dir")?;
+        std::fs::create_dir_all(&work).context("create work dir")?;
+        std::fs::create_dir_all(&merged).context("create merged dir")?;
+
+        let opts = format!(
+            "lowerdir={},upperdir={},workdir={}",
+            cache_path, upper, work
+        );
+
+        mount(
+            Some("overlay"),                 // fs type
+            Path::new(&merged),             // mount point
+            Some("overlay"),                // fs type (again for mount syscall)
+            MsFlags::empty(),               // flags
+            Some(opts.as_str()),            // data
+        )
+        .context("overlay mount failed")?;
+
+        info!(
+            "OverlayFS mounted: {} + {} -> {}",
+            cache_path, upper, merged
+        );
+        Ok(merged)
     }
 
     fn copy_cache_to_container(

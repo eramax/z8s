@@ -18,6 +18,10 @@ pub enum GossipMessage {
         term: u64,
         source: String,
     },
+    BatchGossip {
+        entries: Vec<SyncEntry>,
+        source: String,
+    },
     SyncRequest {
         request_id: u64,
     },
@@ -52,6 +56,14 @@ pub struct GossipState {
     pub seen: HashMap<String, u64>,
     pub db: Arc<dyn StoreBackend>,
     pub peers: Vec<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>,
+    pending: Vec<GossipEntry>,
+}
+
+#[derive(Clone)]
+struct GossipEntry {
+    key: String,
+    value: Vec<u8>,
+    term: u64,
 }
 
 impl GossipState {
@@ -62,6 +74,7 @@ impl GossipState {
             seen: HashMap::new(),
             db,
             peers: Vec::new(),
+            pending: Vec::new(),
         }
     }
 
@@ -70,7 +83,50 @@ impl GossipState {
         self.peers.push(tx);
     }
 
-    /// Called after a local write to broadcast to all peers
+    /// Queue a resource for batched broadcast (reduces per-write allocations)
+    pub fn queue_write(&mut self, resource: &AnyResource) {
+        if self.peers.is_empty() {
+            return;
+        }
+        if let Ok(value) = serde_json::to_vec(resource) {
+            let term = self.next_term();
+            self.pending.push(GossipEntry {
+                key: resource.uid(),
+                value,
+                term,
+            });
+        }
+    }
+
+    /// Flush all pending entries as a single batched message per peer.
+    /// This serializes once and sends once per peer instead of N times.
+    pub async fn flush_batch(&mut self) {
+        if self.pending.is_empty() || self.peers.is_empty() {
+            return;
+        }
+        let batch: Vec<GossipEntry> = self.pending.drain(..).collect();
+        let msg = GossipMessage::BatchGossip {
+            entries: batch
+                .iter()
+                .map(|e| SyncEntry {
+                    key: e.key.clone(),
+                    value: e.value.clone(),
+                    term: e.term,
+                })
+                .collect(),
+            source: self.node_name.clone(),
+        };
+        if let Ok(frame) = serde_json::to_vec(&msg) {
+            for (i, tx) in self.peers.iter().enumerate() {
+                match tx.send(frame.clone()) {
+                    Ok(()) => debug!("Flushed batch ({} entries) to peer {}", batch.len(), i),
+                    Err(e) => warn!("Flush to peer {} failed: {}", i, e),
+                }
+            }
+        }
+    }
+
+    /// Called after a local write to broadcast to all peers (immediate, unbatched)
     pub async fn broadcast_write(&self, resource: &AnyResource) {
         if self.peers.is_empty() {
             tracing::warn!("broadcast_write: no peers");

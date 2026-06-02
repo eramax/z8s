@@ -157,6 +157,25 @@ async fn handle_message(
                     .into(),
             ));
         }
+        GossipMessage::BatchGossip { entries, source: _ } => {
+            let db = state.lock().await.db.clone();
+            let mut st = state.lock().await;
+            for entry in entries {
+                if st.dedup(&entry.key, entry.term) {
+                    if let Ok(resource) =
+                        serde_json::from_slice::<crate::store::AnyResource>(&entry.value)
+                    {
+                        if let crate::store::AnyResource::Pod(ref p) = resource {
+                            let local = crate::config::get().node_name.clone();
+                            if p.assigned_node.as_deref() == Some(local.as_str()) {
+                                notify.notify_one();
+                            }
+                        }
+                        db.apply(resource).await.ok();
+                    }
+                }
+            }
+        }
         _ => {}
     }
 }
@@ -236,6 +255,23 @@ pub async fn run_gossip_client(
                                                 let response = GossipMessage::SyncFull { request_id, entries };
                                                 if let Ok(json) = serde_json::to_string(&response) {
                                                     let _ = write.send(tokio_tungstenite::tungstenite::Message::Text(json.into())).await;
+                                                }
+                                            }
+                                            GossipMessage::BatchGossip { entries, source: _ } => {
+                                                let db = { state.lock().await.db.clone() };
+                                                let mut st = state.lock().await;
+                                                for entry in entries {
+                                                    if st.dedup(&entry.key, entry.term) {
+                                                        if let Ok(resource) = serde_json::from_slice::<crate::store::AnyResource>(&entry.value) {
+                                                            if let crate::store::AnyResource::Pod(ref p) = resource {
+                                                                let local = crate::config::get().node_name.clone();
+                                                                if p.assigned_node.as_deref() == Some(local.as_str()) {
+                                                                    notify.notify_one();
+                                                                }
+                                                            }
+                                                            db.apply(resource).await.ok();
+                                                        }
+                                                    }
                                                 }
                                             }
                                             _ => {}
