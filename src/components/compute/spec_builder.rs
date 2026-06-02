@@ -24,10 +24,10 @@ pub async fn build_spec(
         _ => None,
     };
 
-    let (cms, secrets) = fetch_cms_and_secrets(store).await;
+    let (cms, secrets, services) = fetch_pod_dependencies(store).await;
     let pvc_hostpaths = fetch_pvc_hostpaths(store).await;
     let service_env = if let Some(pod) = pod {
-        resolve_service_env(pod, store).await
+        resolve_service_env_from_list(pod, &services)
     } else {
         vec![]
     };
@@ -82,15 +82,18 @@ pub async fn build_spec(
         let cap_profile = pod
             .and_then(|p| p.metadata.annotations.as_ref())
             .and_then(|a| a.get(crate::cri::capability::ANNOTATION_CAP_PROFILE))
-            .map(|s| s.as_str())
+            .map(|s| s.to_string())
             .or(if is_native {
-                Some("host-native")
+                Some("host-native".to_string())
             } else {
                 None
             });
-        if let Some(profile) = cap_profile {
-            (privileged, extra_capabilities) =
-                crate::cri::capability::apply_cap_profile(profile, privileged, extra_capabilities);
+        if let Some(ref profile) = cap_profile {
+            (privileged, extra_capabilities) = crate::cri::capability::apply_cap_profile(
+                profile,
+                privileged,
+                extra_capabilities,
+            );
         }
 
         let mut volumes = if let Some(pod) = pod {
@@ -176,6 +179,7 @@ pub async fn build_spec(
             run_as_user,
             run_as_group,
             privileged,
+            cap_profile,
             extra_capabilities,
             isolated_net,
             published_ports: declared_ports.iter().map(|&p| (p, p)).collect(),
@@ -205,15 +209,20 @@ pub async fn build_spec(
     }
 }
 
-async fn fetch_cms_and_secrets(
+async fn fetch_pod_dependencies(
     store: &dyn StoreBackend,
 ) -> (
     HashMap<(String, String), ConfigMap>,
     HashMap<(String, String), Secret>,
+    Vec<crate::types::Service>,
 ) {
-    let cms = store
-        .get_by_kind("ConfigMap")
-        .await
+    let (cm_trackers, sec_trackers, svc_trackers) = tokio::join!(
+        store.get_by_kind("ConfigMap"),
+        store.get_by_kind("Secret"),
+        store.get_by_kind("Service"),
+    );
+
+    let cms = cm_trackers
         .into_iter()
         .filter_map(|t| {
             if let AnyResource::ConfigMap(cm) = t.resource {
@@ -226,9 +235,7 @@ async fn fetch_cms_and_secrets(
         })
         .collect();
 
-    let secrets = store
-        .get_by_kind("Secret")
-        .await
+    let secrets = sec_trackers
         .into_iter()
         .filter_map(|t| {
             if let AnyResource::Secret(sec) = t.resource {
@@ -241,7 +248,18 @@ async fn fetch_cms_and_secrets(
         })
         .collect();
 
-    (cms, secrets)
+    let services = svc_trackers
+        .into_iter()
+        .filter_map(|t| {
+            if let AnyResource::Service(svc) = t.resource {
+                Some(svc)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    (cms, secrets, services)
 }
 
 fn resolve_env_from(
@@ -280,36 +298,33 @@ fn resolve_env_from(
     vars
 }
 
-async fn resolve_service_env(pod: &Pod, store: &dyn StoreBackend) -> Vec<(String, String)> {
+fn resolve_service_env_from_list(pod: &Pod, services: &[crate::types::Service]) -> Vec<(String, String)> {
     let pod_ns = pod.metadata.namespace.as_deref().unwrap_or("default");
-    let trackers = store.get_by_kind("Service").await;
     let mut vars = Vec::new();
-    for t in trackers {
-        if let AnyResource::Service(svc) = &t.resource {
-            if svc.metadata.namespace.as_deref().unwrap_or("default") != pod_ns {
-                continue;
-            }
-            let cluster_ip = svc
-                .spec
-                .as_ref()
-                .and_then(|s| s.cluster_ip.as_deref())
-                .unwrap_or("None");
-            if cluster_ip == "None" || cluster_ip.is_empty() {
-                continue;
-            }
-            let svc_name = svc.metadata.name.as_deref().unwrap_or_default();
-            let prefix = svc_name.to_uppercase().replace('-', "_");
-            vars.push((format!("{}_SERVICE_HOST", prefix), cluster_ip.to_string()));
-            if let Some(ports) = svc.spec.as_ref().and_then(|s| s.ports.as_ref()) {
-                for port in ports {
-                    vars.push((format!("{}_SERVICE_PORT", prefix), port.port.to_string()));
-                    if let Some(pname) = &port.name {
-                        let pname_up = pname.to_uppercase().replace('-', "_");
-                        vars.push((
-                            format!("{}_SERVICE_PORT_{}", prefix, pname_up),
-                            port.port.to_string(),
-                        ));
-                    }
+    for svc in services {
+        if svc.metadata.namespace.as_deref().unwrap_or("default") != pod_ns {
+            continue;
+        }
+        let cluster_ip = svc
+            .spec
+            .as_ref()
+            .and_then(|s| s.cluster_ip.as_deref())
+            .unwrap_or("None");
+        if cluster_ip == "None" || cluster_ip.is_empty() {
+            continue;
+        }
+        let svc_name = svc.metadata.name.as_deref().unwrap_or_default();
+        let prefix = svc_name.to_uppercase().replace('-', "_");
+        vars.push((format!("{}_SERVICE_HOST", prefix), cluster_ip.to_string()));
+        if let Some(ports) = svc.spec.as_ref().and_then(|s| s.ports.as_ref()) {
+            for port in ports {
+                vars.push((format!("{}_SERVICE_PORT", prefix), port.port.to_string()));
+                if let Some(pname) = &port.name {
+                    let pname_up = pname.to_uppercase().replace('-', "_");
+                    vars.push((
+                        format!("{}_SERVICE_PORT_{}", prefix, pname_up),
+                        port.port.to_string(),
+                    ));
                 }
             }
         }

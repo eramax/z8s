@@ -34,6 +34,17 @@ pub fn apply_cap_profile(
     (privileged, extra)
 }
 
+/// Host-oriented profiles need host filesystem access; skip Landlock.
+pub fn skip_landlock(privileged: bool, cap_profile: Option<&str>, is_native: bool) -> bool {
+    if privileged || is_native {
+        return true;
+    }
+    matches!(
+        cap_profile,
+        Some("host-native") | Some("host-dhcp") | Some("host-sshd") | Some("privileged")
+    )
+}
+
 fn merge_caps(extra: &mut Vec<String>, add: &[&str]) {
     for cap in add {
         let upper = cap.to_uppercase();
@@ -57,5 +68,11 @@ mod tests {
     fn host_dhcp_adds_net_caps() {
         let (_, caps) = apply_cap_profile("host-dhcp", false, vec![]);
         assert!(caps.iter().any(|c| c.eq_ignore_ascii_case("NET_ADMIN")));
+    }
+
+    #[test]
+    fn host_profiles_skip_landlock() {
+        assert!(skip_landlock(false, Some("host-dhcp"), false));
+        assert!(!skip_landlock(false, Some("container-minimal"), false));
     }
 }

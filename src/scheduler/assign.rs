@@ -72,12 +72,10 @@ pub async fn provision_wait_for_first_consumer(
         return Ok(());
     }
 
-    let store = store.clone();
     let vol = vol.clone();
     let node = node.to_string();
     let mut handles = Vec::with_capacity(jobs.len());
     for (claim_name, pvc, class) in jobs {
-        let store = store.clone();
         let vol = vol.clone();
         let node = node.clone();
         handles.push(tokio::spawn(async move {

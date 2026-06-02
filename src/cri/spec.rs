@@ -33,6 +33,7 @@ pub struct ContainerConfig {
     pub run_as_user: Option<u32>,
     pub run_as_group: Option<u32>,
     pub privileged: bool,
+    pub cap_profile: Option<String>,
     pub extra_capabilities: Vec<String>,
     pub isolated_net: bool,
     pub published_ports: HashMap<u16, u16>,

@@ -70,6 +70,7 @@ mod tests {
             run_as_user: None,
             run_as_group: None,
             privileged: false,
+            cap_profile: None,
             extra_capabilities: vec![],
             isolated_net: true,
             published_ports: Default::default(),

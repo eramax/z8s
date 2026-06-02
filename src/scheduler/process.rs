@@ -220,24 +220,26 @@ impl ProcessTracker {
                 .collect()
         };
         for (container_id, pid, exit_code) in dead {
-            let trackers = store.get_all().await;
-            let pod_tracker = trackers.iter().find(|t| {
-                if !matches!(&t.resource, AnyResource::Pod(_)) {
-                    return false;
-                }
-                let pod_name = t.resource.name();
-                container_id.starts_with(&format!("{}-", pod_name))
-            });
-            let restart_policy = pod_tracker
-                .and_then(|t| {
-                    if let AnyResource::Pod(pod) = &t.resource {
-                        pod.spec.as_ref()?.restart_policy.clone()
-                    } else {
-                        None
-                    }
+            let (restart_policy, pod_uid) = store
+                .get_by_kind("Pod")
+                .await
+                .into_iter()
+                .find(|t| {
+                    let pod_name = t.resource.name();
+                    container_id.starts_with(&format!("{}-", pod_name))
                 })
-                .unwrap_or_else(|| "Always".to_string());
-            let pod_uid = pod_tracker.map(|t| t.resource.uid()).unwrap_or_default();
+                .map(|t| {
+                    let policy = if let AnyResource::Pod(pod) = &t.resource {
+                        pod.spec
+                            .as_ref()
+                            .and_then(|s| s.restart_policy.clone())
+                            .unwrap_or_else(|| "Always".to_string())
+                    } else {
+                        "Always".to_string()
+                    };
+                    (policy, t.resource.uid())
+                })
+                .unwrap_or_else(|| ("Always".to_string(), String::new()));
             // Kill any orphaned child processes from the container's process group
             // These survive the parent exit and can hold ports (e.g., postgres pg_ctl spawn)
             let _ = nix::sys::signal::kill(
