@@ -13,6 +13,7 @@ pub mod nsg;
 pub mod pod;
 pub mod pv;
 pub mod pvc;
+pub mod rbac;
 pub mod routetable;
 pub mod secret;
 pub mod service;

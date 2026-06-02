@@ -179,6 +179,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(crate::api::handlers::subnet::routes())
         .merge(crate::api::handlers::nsg::routes())
         .merge(crate::api::handlers::routetable::routes())
+        .merge(crate::api::handlers::rbac::routes())
         .route("/ws/gossip", axum::routing::any(gossip_ws_handler))
         .fallback(fallback_handler)
         .with_state(state)
