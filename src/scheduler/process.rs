@@ -179,26 +179,7 @@ impl ProcessTracker {
     }
 
     pub fn reap_zombies(&self) -> Vec<(u32, i32)> {
-        let mut reaped = Vec::new();
-        loop {
-            match nix::sys::wait::waitpid(
-                nix::unistd::Pid::from_raw(-1),
-                Some(nix::sys::wait::WaitPidFlag::WNOHANG),
-            ) {
-                Ok(nix::sys::wait::WaitStatus::Exited(pid, status)) => {
-                    info!("Reaped zombie child {} (exit code {})", pid, status);
-                    reaped.push((pid.as_raw() as u32, status));
-                }
-                Ok(nix::sys::wait::WaitStatus::Signaled(pid, sig, _)) => {
-                    info!("Reaped zombie child {} (signal {:?})", pid, sig);
-                    reaped.push((pid.as_raw() as u32, -(sig as i32)));
-                }
-                Ok(nix::sys::wait::WaitStatus::StillAlive) => break,
-                Err(nix::errno::Errno::ECHILD) => break,
-                _ => break,
-            }
-        }
-        reaped
+        crate::init::InitHandler::reap_all()
     }
 
     pub async fn handle_exited_containers(
