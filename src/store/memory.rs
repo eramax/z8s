@@ -2,6 +2,8 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use tokio::sync::RwLock;
 
+use crate::store::ops::StoreOp;
+use crate::store::snapshot::StoreSnapshot;
 use crate::store::{AnyResource, ResourceState, ResourceTracker};
 
 use super::backend::StoreBackend;
@@ -62,5 +64,31 @@ impl StoreBackend for MemoryBackend {
             tracker.state = state;
             tracker.last_updated = crate::config::now_rfc3339();
         }
+    }
+
+    async fn apply_batch(&self, ops: Vec<StoreOp>) -> anyhow::Result<()> {
+        let mut store = self.resources.write().await;
+        for op in ops {
+            match op {
+                StoreOp::Upsert(resource) => {
+                    let uid = resource.uid();
+                    let existing_state = store.get(&uid).map(|t| t.state.clone());
+                    let mut tracker = ResourceTracker::new(resource);
+                    if let Some(state) = existing_state {
+                        tracker.state = state;
+                    }
+                    store.insert(uid, tracker);
+                }
+                StoreOp::Delete(resource) => {
+                    store.remove(&resource.uid());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn snapshot(&self) -> StoreSnapshot {
+        let store = self.resources.read().await;
+        StoreSnapshot::from_trackers(store.values().cloned().collect())
     }
 }

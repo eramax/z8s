@@ -109,8 +109,12 @@ impl ComponentRegistry {
     }
 
     pub async fn reconcile_all(&self, ctx: &ReconcileContext) {
-        let trackers = ctx.store.get_all().await;
-        for tracker in &trackers {
+        let snap = ctx.store.snapshot().await;
+        self.reconcile_trackers(ctx, snap.all()).await;
+    }
+
+    pub async fn reconcile_trackers(&self, ctx: &ReconcileContext, trackers: &[ResourceTracker]) {
+        for tracker in trackers {
             if let Some(component) = self.get(tracker.resource.kind()) {
                 if let Err(e) = component.reconcile(ctx, tracker).await {
                     tracing::error!("Reconcile failed for {}: {}", tracker.resource.uid(), e);

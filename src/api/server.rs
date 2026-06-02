@@ -41,7 +41,8 @@ pub struct AppState {
     pub registry: Arc<ComponentRegistry>,
     pub ctx: Arc<ReconcileContext>,
     pub gossip_state: Option<Arc<tokio::sync::Mutex<crate::store::gossip::GossipState>>>,
-    /// Wakes the reconciler immediately when a Pod assignment arrives via gossip.
+    pub store_events: crate::store::StoreEventHub,
+    /// Wakes the orchestrator immediately on store writes and gossip assignments.
     pub reconciler_notify: Arc<tokio::sync::Notify>,
 }
 
@@ -66,9 +67,17 @@ impl AppState {
         self.process_tracker.backend_connect_port(pod, port).await
     }
 
-    /// Apply a resource and broadcast to gossip peers
+    /// Apply a resource, emit a store event, wake the orchestrator, and gossip to peers.
     pub async fn apply_and_broadcast(&self, resource: AnyResource) -> anyhow::Result<()> {
+        let change = if self.store.get(&resource.uid()).await.is_some() {
+            crate::store::StoreChange::Updated
+        } else {
+            crate::store::StoreChange::Created
+        };
         self.store.apply(resource.clone()).await?;
+        self.store_events
+            .emit_applied(resource.clone(), change);
+        self.reconciler_notify.notify_one();
         if let Some(ref gs) = self.gossip_state {
             gs.lock().await.broadcast_write(&resource).await;
         }
@@ -82,6 +91,7 @@ pub async fn build_app_state(
     registry: Arc<ComponentRegistry>,
     ctx: Arc<ReconcileContext>,
     gossip_state: Option<Arc<tokio::sync::Mutex<crate::store::gossip::GossipState>>>,
+    store_events: crate::store::StoreEventHub,
     reconciler_notify: Arc<tokio::sync::Notify>,
 ) -> AppState {
     // Log store state on startup
@@ -152,6 +162,7 @@ pub async fn build_app_state(
         registry,
         ctx,
         gossip_state,
+        store_events,
         reconciler_notify,
     }
 }
@@ -215,9 +226,19 @@ pub async fn run_server(
     registry: Arc<ComponentRegistry>,
     ctx: Arc<ReconcileContext>,
     gossip_state: Option<Arc<tokio::sync::Mutex<crate::store::gossip::GossipState>>>,
+    store_events: crate::store::StoreEventHub,
     reconciler_notify: Arc<tokio::sync::Notify>,
 ) {
-    let state = build_app_state(store, process_tracker, registry, ctx, gossip_state, reconciler_notify).await;
+    let state = build_app_state(
+        store,
+        process_tracker,
+        registry,
+        ctx,
+        gossip_state,
+        store_events,
+        reconciler_notify,
+    )
+    .await;
     let app = build_router(state);
 
     let addr: std::net::SocketAddr = format!("0.0.0.0:{}", z8s_port())
@@ -657,7 +678,16 @@ mod tests {
         });
         let registry = Arc::new(crate::components::ComponentRegistry::new());
         let gossip_state = None;
-        let state = build_app_state(store, process_tracker, registry, ctx, gossip_state, Arc::new(tokio::sync::Notify::new())).await;
+        let state = build_app_state(
+            store,
+            process_tracker,
+            registry,
+            ctx,
+            gossip_state,
+            crate::store::StoreEventHub::new(),
+            Arc::new(tokio::sync::Notify::new()),
+        )
+        .await;
         build_router(state)
     }
 
@@ -707,8 +737,16 @@ mod tests {
         });
         let registry = Arc::new(crate::components::ComponentRegistry::new());
         let gossip_state = None;
-        let state =
-            build_app_state(store.clone(), process_tracker, registry, ctx, gossip_state, Arc::new(tokio::sync::Notify::new())).await;
+        let state = build_app_state(
+            store.clone(),
+            process_tracker,
+            registry,
+            ctx,
+            gossip_state,
+            crate::store::StoreEventHub::new(),
+            Arc::new(tokio::sync::Notify::new()),
+        )
+        .await;
         (build_router(state), store)
     }
 

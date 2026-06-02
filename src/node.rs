@@ -282,11 +282,13 @@ pub async fn run_node(
         }
     });
 
+    let store_events = crate::store::StoreEventHub::new();
     let reconciler = Arc::new(Reconciler::new(
         registry.clone(),
         ctx.clone(),
         network.clone(),
         process_tracker.clone(),
+        store_events.clone(),
     ));
     let reconciler_notify = reconciler.notify.clone();
     let rec = reconciler.clone();
@@ -354,7 +356,8 @@ pub async fn run_node(
     let gs = gossip_state.clone();
     let srv_notify = reconciler_notify.clone();
     tokio::spawn(async move {
-        crate::api::server::run_server(store_clone, pt2, reg2, ctx2, gs, srv_notify).await;
+        let ev = store_events.clone();
+        crate::api::server::run_server(store_clone, pt2, reg2, ctx2, gs, ev, srv_notify).await;
     });
 
     if let Some(ref db) = redb {

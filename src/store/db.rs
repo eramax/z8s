@@ -5,6 +5,8 @@ use async_trait::async_trait;
 use redb::{Database, ReadableTable, TableDefinition};
 use tracing::info;
 
+use crate::store::ops::StoreOp;
+use crate::store::snapshot::StoreSnapshot;
 use crate::store::{AnyResource, ResourceState, ResourceTracker};
 
 use super::backend::StoreBackend;
@@ -181,6 +183,39 @@ impl StoreBackend for RedbBackend {
 
     async fn update_state(&self, _uid: &str, _state: ResourceState) {
         // State is ephemeral — rebuilt from process tracker on restart.
+    }
+
+    async fn apply_batch(&self, ops: Vec<StoreOp>) -> anyhow::Result<()> {
+        if ops.is_empty() {
+            return Ok(());
+        }
+        let db = self.db.clone();
+        tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
+            let write_txn = db.begin_write()?;
+            {
+                let mut table = write_txn.open_table(RESOURCES)?;
+                for op in ops {
+                    match op {
+                        StoreOp::Upsert(resource) => {
+                            let key = resource.uid();
+                            let bytes = serde_json::to_vec(&resource)?;
+                            table.insert(key.as_str(), bytes.as_slice())?;
+                        }
+                        StoreOp::Delete(resource) => {
+                            let key = resource.uid();
+                            table.remove(key.as_str()).ok();
+                        }
+                    }
+                }
+            }
+            write_txn.commit()?;
+            Ok(())
+        })
+        .await?
+    }
+
+    async fn snapshot(&self) -> StoreSnapshot {
+        StoreSnapshot::from_trackers(self.get_all().await)
     }
 }
 
