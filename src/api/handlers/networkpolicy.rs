@@ -1,174 +1,53 @@
 use crate::api::server::*;
 use axum::Router;
-use axum::routing::{delete, get};
-use uuid::Uuid;
+use axum::routing::get;
 
-pub async fn list_networkpolicies_all(State(state): State<AppState>) -> Json<List<NetworkPolicy>> {
-    let items: Vec<NetworkPolicy> = state
-        .store
-        .get_by_kind("NetworkPolicy")
+pub async fn list_networkpolicies_all(State(s): State<AppState>) -> axum::response::Response {
+    crate::api::handlers::crd::generic_list_namespaced(&s, "NetworkPolicy", "NetworkPolicyList", None)
         .await
-        .into_iter()
-        .filter_map(|t| {
-            if let AnyResource::NetworkPolicy(np) = t.resource {
-                Some(np)
-            } else {
-                None
-            }
-        })
-        .collect();
-    Json(List {
-        kind: Some("NetworkPolicyList".into()),
-        api_version: None,
-        items,
-        metadata: make_list_meta(),
-    })
+        .into_response()
 }
 
 pub async fn list_networkpolicies(
-    State(state): State<AppState>,
-    Path(namespace): Path<String>,
-) -> Json<List<NetworkPolicy>> {
-    let items: Vec<NetworkPolicy> = state
-        .store
-        .get_by_kind("NetworkPolicy")
+    State(s): State<AppState>,
+    Path(ns): Path<String>,
+) -> axum::response::Response {
+    crate::api::handlers::crd::generic_list_namespaced(&s, "NetworkPolicy", "NetworkPolicyList", Some(&ns))
         .await
-        .into_iter()
-        .filter(|t| t.resource.namespace() == namespace)
-        .filter_map(|t| {
-            if let AnyResource::NetworkPolicy(np) = t.resource {
-                Some(np)
-            } else {
-                None
-            }
-        })
-        .collect();
-    Json(List {
-        kind: Some("NetworkPolicyList".into()),
-        api_version: None,
-        items,
-        metadata: make_list_meta(),
-    })
-}
-
-pub async fn create_networkpolicy(
-    State(state): State<AppState>,
-    Path(namespace): Path<String>,
-    raw: axum::body::Bytes,
-) -> Result<axum::response::Response, ApiError> {
-    let body = parse_body(&raw)?;
-    let mut np: NetworkPolicy = serde_json::from_value(body)
-        .map_err(|e| ApiError::bad_request(format!("invalid NetworkPolicy: {}", e)))?;
-    if np.metadata.namespace.is_none() {
-        np.metadata.namespace = Some(namespace.clone());
-    }
-    if np.metadata.uid.is_none() {
-        np.metadata.uid = Some(Uuid::new_v4().to_string());
-    }
-    if np.metadata.creation_timestamp.is_none() {
-        np.metadata.creation_timestamp = Some(now_time());
-    }
-
-    let already_exists = state
-        .store
-        .get_by_kind("NetworkPolicy")
-        .await
-        .iter()
-        .any(|t| {
-            t.resource.name() == np.metadata.name.as_deref().unwrap_or("")
-                && t.resource.namespace() == namespace
-        });
-
-    let resource = AnyResource::NetworkPolicy(np);
-    state
-        .apply_and_broadcast(resource.clone())
-        .await
-        .map_err(|e| ApiError::bad_request(e.to_string()))?;
-
-    state.registry.on_apply(&state.ctx, &resource).await;
-
-    let status = if already_exists {
-        StatusCode::OK
-    } else {
-        StatusCode::CREATED
-    };
-    Ok((
-        status,
-        Json(serde_json::to_value(&resource).unwrap_or_default()),
-    )
-        .into_response())
+        .into_response()
 }
 
 pub async fn get_networkpolicy(
-    State(state): State<AppState>,
-    Path((namespace, name)): Path<(String, String)>,
+    State(s): State<AppState>,
+    Path((ns, name)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let trackers = state.store.get_by_kind("NetworkPolicy").await;
-    for t in &trackers {
-        if t.resource.namespace() == namespace && t.resource.name() == name {
-            return Ok(Json(serde_json::to_value(&t.resource).unwrap_or_default()));
-        }
-    }
-    Err(ApiError::not_found(format!(
-        "networkpolicy \"{}/{}\" not found",
-        namespace, name
-    )))
+    crate::api::handlers::crd::generic_get_namespaced(&s, "NetworkPolicy", &ns, &name).await
+}
+
+pub async fn create_networkpolicy(
+    State(s): State<AppState>,
+    Path(ns): Path<String>,
+    raw: axum::body::Bytes,
+) -> Result<axum::response::Response, ApiError> {
+    let body = parse_body(&raw)?;
+    let np: NetworkPolicy = serde_json::from_value(body)
+        .map_err(|e| ApiError::bad_request(format!("invalid NetworkPolicy: {}", e)))?;
+    crate::api::handlers::crd::generic_create_namespaced(&s, AnyResource::NetworkPolicy(np), &ns, "NetworkPolicy").await
 }
 
 pub async fn update_networkpolicy(
-    State(state): State<AppState>,
-    Path((namespace, name)): Path<(String, String)>,
+    State(s): State<AppState>,
+    Path((ns, name)): Path<(String, String)>,
     raw: axum::body::Bytes,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let patch = parse_body(&raw)?;
-    let existing = state
-        .store
-        .get_by_kind("NetworkPolicy")
-        .await
-        .into_iter()
-        .find(|t| t.resource.namespace() == namespace && t.resource.name() == name)
-        .and_then(|t| {
-            if let AnyResource::NetworkPolicy(np) = t.resource {
-                serde_json::to_value(np).ok()
-            } else {
-                None
-            }
-        });
-    let mut merged = existing.unwrap_or(serde_json::Value::Object(Default::default()));
-    json_merge_patch(&mut merged, &patch);
-    let mut np: NetworkPolicy = serde_json::from_value(merged)
-        .map_err(|e| ApiError::bad_request(format!("invalid NetworkPolicy: {}", e)))?;
-    if np.metadata.namespace.is_none() {
-        np.metadata.namespace = Some(namespace);
-    }
-    if np.metadata.name.is_none() {
-        np.metadata.name = Some(name);
-    }
-    let resource = AnyResource::NetworkPolicy(np);
-    state
-        .apply_and_broadcast(resource.clone())
-        .await
-        .map_err(|e| ApiError::bad_request(e.to_string()))?;
-    state.registry.on_apply(&state.ctx, &resource).await;
-    Ok(Json(serde_json::to_value(&resource).unwrap_or_default()))
+    crate::api::handlers::crd::generic_update_namespaced(&s, "NetworkPolicy", &ns, &name, &raw).await
 }
 
 pub async fn delete_networkpolicy(
-    State(state): State<AppState>,
-    Path((namespace, name)): Path<(String, String)>,
+    State(s): State<AppState>,
+    Path((ns, name)): Path<(String, String)>,
 ) -> Result<Json<Status>, ApiError> {
-    let trackers = state.store.get_by_kind("NetworkPolicy").await;
-    for t in &trackers {
-        if t.resource.namespace() == namespace && t.resource.name() == name {
-            state.registry.on_delete(&state.ctx, &t.resource).await;
-            state.store.delete(&t.resource).await.ok();
-            return Ok(Json(ok_status()));
-        }
-    }
-    Err(ApiError::not_found(format!(
-        "networkpolicy \"{}/{}\" not found",
-        namespace, name
-    )))
+    crate::api::handlers::crd::generic_delete_namespaced(&s, "NetworkPolicy", &ns, &name).await
 }
 
 pub fn routes() -> Router<AppState> {

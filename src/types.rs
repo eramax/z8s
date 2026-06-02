@@ -1,6 +1,41 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+// ── Macro for default apiVersion/kind functions ─────────────────────
+
+macro_rules! define_kube_defaults {
+    ($( $Type:ident as $kind:expr, $api_ver:expr => ($api_fn:ident, $kind_fn:ident); )+ ) => {
+        $(
+            fn $api_fn() -> String { $api_ver.to_string() }
+            fn $kind_fn() -> String { $kind.to_string() }
+        )+
+    };
+}
+
+define_kube_defaults! {
+    Pod as "Pod", "v1" => (default_pod_api_version, default_pod_kind);
+    Deployment as "Deployment", "apps/v1" => (default_deployment_api_version, default_deployment_kind);
+    Service as "Service", "v1" => (default_service_api_version, default_service_kind);
+    ConfigMap as "ConfigMap", "v1" => (default_configmap_api_version, default_configmap_kind);
+    Secret as "Secret", "v1" => (default_secret_api_version, default_secret_kind);
+    PersistentVolume as "PersistentVolume", "v1" => (default_persistentvolume_api_version, default_persistentvolume_kind);
+    PersistentVolumeClaim as "PersistentVolumeClaim", "v1" => (default_persistentvolumeclaim_api_version, default_persistentvolumeclaim_kind);
+    Ingress as "Ingress", "networking.k8s.io/v1" => (default_ingress_api_version, default_ingress_kind);
+    NetworkPolicy as "NetworkPolicy", "networking.k8s.io/v1" => (default_networkpolicy_api_version, default_networkpolicy_kind);
+    Namespace as "Namespace", "v1" => (default_namespace_api_version, default_namespace_kind);
+    Node as "Node", "v1" => (default_node_api_version, default_node_kind);
+    Endpoints as "Endpoints", "v1" => (default_endpoints_api_version, default_endpoints_kind);
+    EndpointSlice as "EndpointSlice", "discovery.k8s.io/v1" => (default_endpointslice_api_version, default_endpointslice_kind);
+    Event as "Event", "v1" => (default_event_api_version, default_event_kind);
+    StorageClass as "StorageClass", "storage.k8s.io/v1" => (default_storageclass_api_version, default_storageclass_kind);
+}
+
+fn default_api_version() -> String { "z8s.io/v1".to_string() }
+fn default_vnet_kind() -> String { "VNet".to_string() }
+fn default_subnet_kind() -> String { "Subnet".to_string() }
+fn default_nsg_kind() -> String { "NSG".to_string() }
+fn default_routetable_kind() -> String { "RouteTable".to_string() }
+
 // ── Time ─────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -1988,9 +2023,6 @@ pub struct List<T> {
 // CRD types — custom resource definitions using our ObjectMeta
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn default_api_version() -> String {
-    "z8s.io/v1".to_string()
-}
 fn default_true() -> bool {
     true
 }
@@ -2004,99 +2036,6 @@ fn default_header_operator() -> String {
     "eq".to_string()
 }
 
-// ── Standard k8s default functions ─────────────────────────────────────────
-
-fn default_pod_api_version() -> String {
-    "v1".to_string()
-}
-fn default_pod_kind() -> String {
-    "Pod".to_string()
-}
-fn default_service_api_version() -> String {
-    "v1".to_string()
-}
-fn default_service_kind() -> String {
-    "Service".to_string()
-}
-fn default_configmap_api_version() -> String {
-    "v1".to_string()
-}
-fn default_configmap_kind() -> String {
-    "ConfigMap".to_string()
-}
-fn default_secret_api_version() -> String {
-    "v1".to_string()
-}
-fn default_secret_kind() -> String {
-    "Secret".to_string()
-}
-fn default_persistentvolume_api_version() -> String {
-    "v1".to_string()
-}
-fn default_persistentvolume_kind() -> String {
-    "PersistentVolume".to_string()
-}
-fn default_persistentvolumeclaim_api_version() -> String {
-    "v1".to_string()
-}
-fn default_persistentvolumeclaim_kind() -> String {
-    "PersistentVolumeClaim".to_string()
-}
-fn default_deployment_api_version() -> String {
-    "apps/v1".to_string()
-}
-fn default_deployment_kind() -> String {
-    "Deployment".to_string()
-}
-fn default_ingress_api_version() -> String {
-    "networking.k8s.io/v1".to_string()
-}
-fn default_ingress_kind() -> String {
-    "Ingress".to_string()
-}
-fn default_networkpolicy_api_version() -> String {
-    "networking.k8s.io/v1".to_string()
-}
-fn default_networkpolicy_kind() -> String {
-    "NetworkPolicy".to_string()
-}
-fn default_namespace_api_version() -> String {
-    "v1".to_string()
-}
-fn default_namespace_kind() -> String {
-    "Namespace".to_string()
-}
-fn default_node_api_version() -> String {
-    "v1".to_string()
-}
-fn default_node_kind() -> String {
-    "Node".to_string()
-}
-fn default_endpoints_api_version() -> String {
-    "v1".to_string()
-}
-fn default_endpoints_kind() -> String {
-    "Endpoints".to_string()
-}
-fn default_endpointslice_api_version() -> String {
-    "discovery.k8s.io/v1".to_string()
-}
-fn default_endpointslice_kind() -> String {
-    "EndpointSlice".to_string()
-}
-fn default_event_api_version() -> String {
-    "v1".to_string()
-}
-fn default_event_kind() -> String {
-    "Event".to_string()
-}
-fn default_storageclass_api_version() -> String {
-    "storage.k8s.io/v1".to_string()
-}
-fn default_storageclass_kind() -> String {
-    "StorageClass".to_string()
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct VNet {
     #[serde(rename = "apiVersion", default = "default_api_version")]
@@ -2107,10 +2046,6 @@ pub struct VNet {
     pub spec: VNetSpec,
     #[serde(default)]
     pub status: Option<VNetStatus>,
-}
-
-fn default_vnet_kind() -> String {
-    "VNet".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -2140,10 +2075,6 @@ pub struct Subnet {
     pub spec: SubnetSpec,
 }
 
-fn default_subnet_kind() -> String {
-    "Subnet".to_string()
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SubnetSpec {
     pub vnet: String,
@@ -2158,10 +2089,6 @@ pub struct Nsg {
     pub kind: String,
     pub metadata: ObjectMeta,
     pub spec: NsgSpec,
-}
-
-fn default_nsg_kind() -> String {
-    "NSG".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -2197,10 +2124,6 @@ pub struct RouteTable {
     pub spec: RouteTableSpec,
 }
 
-fn default_routetable_kind() -> String {
-    "RouteTable".to_string()
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct RouteTableSpec {
     #[serde(default)]
@@ -2232,117 +2155,118 @@ pub struct HeaderMatch {
 // AnyResource — the primary enum used in the store backend and throughout z8s.
 // ═══════════════════════════════════════════════════════════════════════════════
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "resourceType")]
-pub enum AnyResource {
-    Pod(Pod),
-    Deployment(Deployment),
-    Service(Service),
-    ConfigMap(ConfigMap),
-    Secret(Secret),
-    PersistentVolume(PersistentVolume),
-    PersistentVolumeClaim(PersistentVolumeClaim),
-    VNet(VNet),
-    Subnet(Subnet),
-    Nsg(Nsg),
-    RouteTable(RouteTable),
-    Ingress(Ingress),
-    NetworkPolicy(NetworkPolicy),
-    Namespace(Namespace),
-    Node(Node),
-    Endpoints(Endpoints),
-    EndpointSlice(EndpointSlice),
-    Event(Event),
-    StorageClass(StorageClass),
+macro_rules! define_any_resource {
+    (
+        namespaced: [ $( $variant:ident($inner:ident) as $kind:expr ),+ $(,)? ];
+        cluster_scoped: [ $( $cvariant:ident($cinner:ident) as $ckind:expr ),+ $(,)? ];
+    ) => {
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        #[serde(tag = "resourceType")]
+        pub enum AnyResource {
+            $( $variant($inner), )+
+            $( $cvariant($cinner), )+
+        }
+
+        impl AnyResource {
+            pub fn metadata(&self) -> &ObjectMeta {
+                match self {
+                    $( Self::$variant(r) => &r.metadata, )+
+                    $( Self::$cvariant(r) => &r.metadata, )+
+                }
+            }
+
+            pub fn metadata_mut(&mut self) -> &mut ObjectMeta {
+                match self {
+                    $( Self::$variant(r) => &mut r.metadata, )+
+                    $( Self::$cvariant(r) => &mut r.metadata, )+
+                }
+            }
+
+            pub fn kind(&self) -> &'static str {
+                match self {
+                    $( Self::$variant(_) => $kind, )+
+                    $( Self::$cvariant(_) => $ckind, )+
+                }
+            }
+
+            pub fn name(&self) -> &str {
+                self.metadata().name.as_deref().unwrap_or("<unnamed>")
+            }
+
+            pub fn namespace(&self) -> &str {
+                match self {
+                    $( Self::$variant(_) => {
+                        self.metadata().namespace.as_deref().unwrap_or("default")
+                    }, )+
+                    $( Self::$cvariant(_) => "", )+
+                }
+            }
+
+            pub fn uid(&self) -> String {
+                format!("{}/{}/{}", self.kind(), self.namespace(), self.name())
+            }
+
+            pub fn from_yaml_value(
+                value: serde_yaml::Value, kind: &str,
+            ) -> anyhow::Result<Self> {
+                match kind {
+                    $(
+                        $kind => Ok(Self::$variant(
+                            serde_yaml::from_value(value)
+                                .map_err(|e| anyhow::anyhow!("Failed to parse {}: {}", $kind, e))?
+                        )),
+                    )+
+                    $(
+                        $ckind => Ok(Self::$cvariant(
+                            serde_yaml::from_value(value)
+                                .map_err(|e| anyhow::anyhow!("Failed to parse {}: {}", $ckind, e))?
+                        )),
+                    )+
+                    _ => anyhow::bail!("Unsupported resource kind: {}", kind),
+                }
+            }
+
+            pub fn from_json_value(
+                value: serde_json::Value, kind: &str,
+            ) -> anyhow::Result<Self> {
+                match kind {
+                    $(
+                        $kind => Ok(Self::$variant(serde_json::from_value(value)?)),
+                    )+
+                    $(
+                        $ckind => Ok(Self::$cvariant(serde_json::from_value(value)?)),
+                    )+
+                    _ => anyhow::bail!("Unsupported kind: {}", kind),
+                }
+            }
+        }
+    };
 }
 
-impl AnyResource {
-    pub fn metadata(&self) -> &ObjectMeta {
-        match self {
-            AnyResource::Pod(r) => &r.metadata,
-            AnyResource::Deployment(r) => &r.metadata,
-            AnyResource::Service(r) => &r.metadata,
-            AnyResource::ConfigMap(r) => &r.metadata,
-            AnyResource::Secret(r) => &r.metadata,
-            AnyResource::PersistentVolume(r) => &r.metadata,
-            AnyResource::PersistentVolumeClaim(r) => &r.metadata,
-            AnyResource::VNet(r) => &r.metadata,
-            AnyResource::Subnet(r) => &r.metadata,
-            AnyResource::Nsg(r) => &r.metadata,
-            AnyResource::RouteTable(r) => &r.metadata,
-            AnyResource::Ingress(r) => &r.metadata,
-            AnyResource::NetworkPolicy(r) => &r.metadata,
-            AnyResource::Namespace(r) => &r.metadata,
-            AnyResource::Node(r) => &r.metadata,
-            AnyResource::Endpoints(r) => &r.metadata,
-            AnyResource::EndpointSlice(r) => &r.metadata,
-            AnyResource::Event(r) => &r.metadata,
-            AnyResource::StorageClass(r) => &r.metadata,
-        }
-    }
-
-    pub fn metadata_mut(&mut self) -> &mut ObjectMeta {
-        match self {
-            AnyResource::Pod(r) => &mut r.metadata,
-            AnyResource::Deployment(r) => &mut r.metadata,
-            AnyResource::Service(r) => &mut r.metadata,
-            AnyResource::ConfigMap(r) => &mut r.metadata,
-            AnyResource::Secret(r) => &mut r.metadata,
-            AnyResource::PersistentVolume(r) => &mut r.metadata,
-            AnyResource::PersistentVolumeClaim(r) => &mut r.metadata,
-            AnyResource::VNet(r) => &mut r.metadata,
-            AnyResource::Subnet(r) => &mut r.metadata,
-            AnyResource::Nsg(r) => &mut r.metadata,
-            AnyResource::RouteTable(r) => &mut r.metadata,
-            AnyResource::Ingress(r) => &mut r.metadata,
-            AnyResource::NetworkPolicy(r) => &mut r.metadata,
-            AnyResource::Namespace(r) => &mut r.metadata,
-            AnyResource::Node(r) => &mut r.metadata,
-            AnyResource::Endpoints(r) => &mut r.metadata,
-            AnyResource::EndpointSlice(r) => &mut r.metadata,
-            AnyResource::Event(r) => &mut r.metadata,
-            AnyResource::StorageClass(r) => &mut r.metadata,
-        }
-    }
-
-    pub fn kind(&self) -> &'static str {
-        match self {
-            AnyResource::Pod(_) => "Pod",
-            AnyResource::Deployment(_) => "Deployment",
-            AnyResource::Service(_) => "Service",
-            AnyResource::ConfigMap(_) => "ConfigMap",
-            AnyResource::Secret(_) => "Secret",
-            AnyResource::PersistentVolume(_) => "PersistentVolume",
-            AnyResource::PersistentVolumeClaim(_) => "PersistentVolumeClaim",
-            AnyResource::VNet(_) => "VNet",
-            AnyResource::Subnet(_) => "Subnet",
-            AnyResource::Nsg(_) => "NSG",
-            AnyResource::RouteTable(_) => "RouteTable",
-            AnyResource::Ingress(_) => "Ingress",
-            AnyResource::NetworkPolicy(_) => "NetworkPolicy",
-            AnyResource::Namespace(_) => "Namespace",
-            AnyResource::Node(_) => "Node",
-            AnyResource::Endpoints(_) => "Endpoints",
-            AnyResource::EndpointSlice(_) => "EndpointSlice",
-            AnyResource::Event(_) => "Event",
-            AnyResource::StorageClass(_) => "StorageClass",
-        }
-    }
-
-    pub fn name(&self) -> &str {
-        self.metadata().name.as_deref().unwrap_or("<unnamed>")
-    }
-
-    pub fn namespace(&self) -> &str {
-        match self {
-            AnyResource::PersistentVolume(_) => "",
-            _ => self.metadata().namespace.as_deref().unwrap_or("default"),
-        }
-    }
-
-    pub fn uid(&self) -> String {
-        format!("{}/{}/{}", self.kind(), self.namespace(), self.name())
-    }
+define_any_resource! {
+    namespaced: [
+        Pod(Pod) as "Pod",
+        Deployment(Deployment) as "Deployment",
+        Service(Service) as "Service",
+        ConfigMap(ConfigMap) as "ConfigMap",
+        Secret(Secret) as "Secret",
+        PersistentVolumeClaim(PersistentVolumeClaim) as "PersistentVolumeClaim",
+        VNet(VNet) as "VNet",
+        Subnet(Subnet) as "Subnet",
+        Nsg(Nsg) as "NSG",
+        RouteTable(RouteTable) as "RouteTable",
+        Ingress(Ingress) as "Ingress",
+        NetworkPolicy(NetworkPolicy) as "NetworkPolicy",
+        Namespace(Namespace) as "Namespace",
+        Node(Node) as "Node",
+        Endpoints(Endpoints) as "Endpoints",
+        EndpointSlice(EndpointSlice) as "EndpointSlice",
+        Event(Event) as "Event",
+        StorageClass(StorageClass) as "StorageClass",
+    ];
+    cluster_scoped: [
+        PersistentVolume(PersistentVolume) as "PersistentVolume",
+    ];
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -2414,170 +2338,22 @@ pub struct LeaseRecord {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// StoredResource — lightweight custom types for persistence.  Does NOT include
-// CRD variants (VNet, Subnet, Nsg, RouteTable).
-// ═══════════════════════════════════════════════════════════════════════════════
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum StoredResource {
-    Pod(Pod),
-    Service(Service),
-    ConfigMap(ConfigMap),
-    Secret(Secret),
-    PersistentVolume(PersistentVolume),
-    PersistentVolumeClaim(PersistentVolumeClaim),
-    Deployment(Deployment),
-    Ingress(Ingress),
-    NetworkPolicy(NetworkPolicy),
-    Namespace(Namespace),
-    Node(Node),
-    Endpoints(Endpoints),
-    EndpointSlice(EndpointSlice),
-    Event(Event),
-    StorageClass(StorageClass),
-}
-
-impl StoredResource {
-    pub fn metadata(&self) -> &ObjectMeta {
-        match self {
-            StoredResource::Pod(r) => &r.metadata,
-            StoredResource::Service(r) => &r.metadata,
-            StoredResource::ConfigMap(r) => &r.metadata,
-            StoredResource::Secret(r) => &r.metadata,
-            StoredResource::PersistentVolume(r) => &r.metadata,
-            StoredResource::PersistentVolumeClaim(r) => &r.metadata,
-            StoredResource::Deployment(r) => &r.metadata,
-            StoredResource::Ingress(r) => &r.metadata,
-            StoredResource::NetworkPolicy(r) => &r.metadata,
-            StoredResource::Namespace(r) => &r.metadata,
-            StoredResource::Node(r) => &r.metadata,
-            StoredResource::Endpoints(r) => &r.metadata,
-            StoredResource::EndpointSlice(r) => &r.metadata,
-            StoredResource::Event(r) => &r.metadata,
-            StoredResource::StorageClass(r) => &r.metadata,
-        }
-    }
-
-    pub fn metadata_mut(&mut self) -> &mut ObjectMeta {
-        match self {
-            StoredResource::Pod(r) => &mut r.metadata,
-            StoredResource::Service(r) => &mut r.metadata,
-            StoredResource::ConfigMap(r) => &mut r.metadata,
-            StoredResource::Secret(r) => &mut r.metadata,
-            StoredResource::PersistentVolume(r) => &mut r.metadata,
-            StoredResource::PersistentVolumeClaim(r) => &mut r.metadata,
-            StoredResource::Deployment(r) => &mut r.metadata,
-            StoredResource::Ingress(r) => &mut r.metadata,
-            StoredResource::NetworkPolicy(r) => &mut r.metadata,
-            StoredResource::Namespace(r) => &mut r.metadata,
-            StoredResource::Node(r) => &mut r.metadata,
-            StoredResource::Endpoints(r) => &mut r.metadata,
-            StoredResource::EndpointSlice(r) => &mut r.metadata,
-            StoredResource::Event(r) => &mut r.metadata,
-            StoredResource::StorageClass(r) => &mut r.metadata,
-        }
-    }
-
-    pub fn kind(&self) -> &'static str {
-        match self {
-            StoredResource::Pod(_) => "Pod",
-            StoredResource::Service(_) => "Service",
-            StoredResource::ConfigMap(_) => "ConfigMap",
-            StoredResource::Secret(_) => "Secret",
-            StoredResource::PersistentVolume(_) => "PersistentVolume",
-            StoredResource::PersistentVolumeClaim(_) => "PersistentVolumeClaim",
-            StoredResource::Deployment(_) => "Deployment",
-            StoredResource::Ingress(_) => "Ingress",
-            StoredResource::NetworkPolicy(_) => "NetworkPolicy",
-            StoredResource::Namespace(_) => "Namespace",
-            StoredResource::Node(_) => "Node",
-            StoredResource::Endpoints(_) => "Endpoints",
-            StoredResource::EndpointSlice(_) => "EndpointSlice",
-            StoredResource::Event(_) => "Event",
-            StoredResource::StorageClass(_) => "StorageClass",
-        }
-    }
-
-    pub fn name(&self) -> &str {
-        self.metadata().name.as_deref().unwrap_or("<unnamed>")
-    }
-
-    pub fn namespace(&self) -> &str {
-        match self {
-            StoredResource::PersistentVolume(_) => "",
-            _ => self.metadata().namespace.as_deref().unwrap_or("default"),
-        }
-    }
-
-    pub fn uid(&self) -> String {
-        format!("{}/{}/{}", self.kind(), self.namespace(), self.name())
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
 // YAML parsing
 // ═══════════════════════════════════════════════════════════════════════════════
 
 pub fn parse_manifest_yaml(yaml: &str) -> anyhow::Result<Vec<AnyResource>> {
     use anyhow::Context;
     let mut resources = Vec::new();
-
     for doc in serde_yaml::Deserializer::from_str(yaml) {
         let value: serde_yaml::Value =
             serde_yaml::Value::deserialize(doc).context("Failed to parse YAML document")?;
-
         let kind = value
             .get("kind")
             .and_then(|k| k.as_str())
+            .map(|s| s.to_string())
             .context("Missing 'kind' field in YAML")?;
-
-        let resource = match kind {
-            "Pod" => {
-                AnyResource::Pod(serde_yaml::from_value(value).context("Failed to parse Pod")?)
-            }
-            "Deployment" => AnyResource::Deployment(
-                serde_yaml::from_value(value).context("Failed to parse Deployment")?,
-            ),
-            "Service" => AnyResource::Service(
-                serde_yaml::from_value(value).context("Failed to parse Service")?,
-            ),
-            "ConfigMap" => AnyResource::ConfigMap(
-                serde_yaml::from_value(value).context("Failed to parse ConfigMap")?,
-            ),
-            "Secret" => AnyResource::Secret(
-                serde_yaml::from_value(value).context("Failed to parse Secret")?,
-            ),
-            "PersistentVolume" => AnyResource::PersistentVolume(
-                serde_yaml::from_value(value).context("Failed to parse PersistentVolume")?,
-            ),
-            "PersistentVolumeClaim" => AnyResource::PersistentVolumeClaim(
-                serde_yaml::from_value(value).context("Failed to parse PersistentVolumeClaim")?,
-            ),
-            "VNet" => {
-                AnyResource::VNet(serde_yaml::from_value(value).context("Failed to parse VNet")?)
-            }
-            "Subnet" => AnyResource::Subnet(
-                serde_yaml::from_value(value).context("Failed to parse Subnet")?,
-            ),
-            "NSG" => {
-                AnyResource::Nsg(serde_yaml::from_value(value).context("Failed to parse NSG")?)
-            }
-            "RouteTable" => AnyResource::RouteTable(
-                serde_yaml::from_value(value).context("Failed to parse RouteTable")?,
-            ),
-            "Ingress" => AnyResource::Ingress(
-                serde_yaml::from_value(value).context("Failed to parse Ingress")?,
-            ),
-            "NetworkPolicy" => AnyResource::NetworkPolicy(
-                serde_yaml::from_value(value).context("Failed to parse NetworkPolicy")?,
-            ),
-            _ => anyhow::bail!("Unsupported resource kind: {}", kind),
-        };
-
-        resources.push(resource);
+        resources.push(AnyResource::from_yaml_value(value, &kind)?);
     }
-
     Ok(resources)
 }
 
