@@ -180,16 +180,16 @@ pub async fn run_node(
         warn!("Failed to bring up loopback: {}", e);
     }
     crate::netmux::netlink::harden_sysctl().ok();
-    if let Err(e) = netmux.nft.init(&cfg.pod_cidr).await {
+    if let Err(e) = netmux.init_nft(&cfg.pod_cidr).await {
         panic!(
             "nftables init failed: {} — nftables is required, refusing to start",
             e
         );
     }
-    if let Err(e) = netmux.nft.add_forward_catchall(&cfg.pod_cidr).await {
+    if let Err(e) = netmux.add_forward_catchall(&cfg.pod_cidr).await {
         warn!("Failed to add forward catch-all: {}", e);
     }
-    if let Err(e) = netmux.nft.add_snat("default", &cfg.pod_cidr).await {
+    if let Err(e) = netmux.apply_vnet_rules("default", &cfg.pod_cidr, true).await {
         warn!("Failed to add SNAT: {} — pods may not reach internet", e);
     }
     if let Err(e) = netmux.clean_orphan_veths(&[]) {
@@ -257,7 +257,7 @@ pub async fn run_node(
     registry.register(Box::new(VNetResource::new(netmux.clone())));
     registry.register(Box::new(SubnetResource::new(netmux.clone())));
     registry.register(Box::new(NsgResource::new(netmux.clone())));
-    registry.register(Box::new(RouteTableResource::new()));
+    registry.register(Box::new(RouteTableResource::new(netmux.clone())));
     registry.register(Box::new(ConfigMapResource::new(store.clone())));
     registry.register(Box::new(SecretResource::new(store.clone())));
     registry.register(Box::new(PvResource::new(store.clone())));
@@ -448,7 +448,7 @@ pub async fn run_node(
     }
 
     // ── Cleanup: remove nftables rules ────────────────────────────────
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(3), netmux.nft.cleanup()).await;
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(3), netmux.cleanup_nft()).await;
 
     // ── Cleanup: remove orphan veths created by this instance ─────────
     let netmux_for_veths = netmux.clone();

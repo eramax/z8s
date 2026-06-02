@@ -291,7 +291,7 @@ impl NetworkManager {
                                         if let Some(port_str) = key.rsplit(':').next() {
                                             if let Ok(port) = port_str.parse::<u16>() {
                                                 if let Err(e) =
-                                                    self.netmux.nft.remove_dnat(ip, port).await
+                                                    self.netmux.remove_service_dnat(ip, port).await
                                                 {
                                                     tracing::warn!(
                                                         "remove_dnat failed for {}: {}",

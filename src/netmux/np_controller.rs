@@ -70,14 +70,10 @@ impl NetworkPolicyController {
                     }
 
                     if let Some(ns_sel) = &peer.namespace_selector {
-                        // namespaceSelector: allow from pods in matching namespaces
-                        // For now, create a set with a placeholder name
                         let ns_set_name = format!("np:ns:{}:{}:{}", ns, name, idx);
-                        self.netmux.nft.create_set(&ns_set_name, &[]).await?;
-                        self.netmux
-                            .nft
-                            .add_forward_allow_set_src(&ns_set_name, "0.0.0.0/0")
-                            .await?;
+                        self.netmux.create_nft_set(&ns_set_name, &[]).await?;
+                        // Note: add_forward_allow_set_src needs the set name — keep direct nft access for this low-level op
+                        self.netmux.nft.add_forward_allow_set_src(&ns_set_name, "0.0.0.0/0").await?;
 
                         let mut sets = self.sets.lock().unwrap_or_else(|e| {
                             tracing::warn!("mutex poisoned");
@@ -113,7 +109,7 @@ impl NetworkPolicyController {
 
     /// Create an nftables set for a podSelector.
     async fn create_policy_set(&self, name: &str, _ps: &LabelSelector) -> Result<()> {
-        self.netmux.nft.create_set(name, &[]).await?;
+        self.netmux.create_nft_set(name, &[]).await?;
         Ok(())
     }
 
@@ -154,7 +150,7 @@ impl NetworkPolicyController {
                     .map(|ps| ps.ip_addrs.clone())
                     .unwrap_or_default()
             };
-            if let Err(e) = self.netmux.nft.replace_set(name, &ips).await {
+            if let Err(e) = self.netmux.replace_nft_set(name, &ips).await {
                 warn!("Failed to update set '{}': {}", name, e);
             }
         }
@@ -186,7 +182,7 @@ impl NetworkPolicyController {
                     .map(|ps| ps.ip_addrs.clone())
                     .unwrap_or_default()
             };
-            if let Err(e) = self.netmux.nft.replace_set(name, &ips).await {
+            if let Err(e) = self.netmux.replace_nft_set(name, &ips).await {
                 warn!("Failed to update set '{}': {}", name, e);
             }
         }

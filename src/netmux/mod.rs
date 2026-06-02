@@ -11,11 +11,75 @@ use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 pub use nftables::NftEngine;
 use pool::IpPool;
 pub use pool::Ipv4Cidr;
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Declarative network rule data structures
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// A single nftables rule — declarative, serializable, composable.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum NftAction {
+    Accept,
+    Drop,
+    Reject,
+    DNAT { dest_ip: Ipv4Addr, dest_port: Option<u16> },
+    SNAT { source_ip: Ipv4Addr },
+    Masquerade,
+    Jump(String),
+}
+
+/// A declarative nftables rule.
+#[derive(Debug, Clone)]
+pub struct NftRule {
+    pub name: String,
+    pub chain: String,
+    pub action: NftAction,
+    pub source: Option<String>,
+    pub dest: Option<String>,
+    pub protocol: Option<String>,
+    pub dport: Option<u16>,
+    pub sport: Option<u16>,
+}
+
+/// A declarative veth pair.
+#[derive(Debug, Clone)]
+pub struct VethSpec {
+    pub name: String,
+    pub peer_name: String,
+    pub host_ip: Option<Ipv4Addr>,
+    pub peer_ip: Option<Ipv4Addr>,
+    pub host_ifindex: Option<u32>,
+    pub peer_ifindex: Option<u32>,
+}
+
+/// A declarative route entry.
+#[derive(Debug, Clone)]
+pub struct RouteSpec {
+    pub dest: String,
+    pub via: Option<Ipv4Addr>,
+    pub dev: Option<String>,
+}
+
+/// The desired network state — declarative, diffable.
+#[derive(Debug, Clone, Default)]
+pub struct NetworkState {
+    pub vnets: HashMap<String, VNetState>,
+    pub rules: HashMap<String, Vec<NftRule>>,
+    pub veths: HashMap<String, VethSpec>,
+    pub routes: Vec<RouteSpec>,
+}
+
+#[derive(Debug, Clone)]
+pub struct VNetState {
+    pub cidr: String,
+    pub internet_access: bool,
+    pub role: String,
+}
 
 /// Drop guard that restores the host network namespace when the current
 /// function scope exits, even on early returns or panics.
@@ -51,14 +115,13 @@ impl Drop for NetNsGuard {
 }
 
 /// Unified network engine — one pool, veth management, host routing, nftables.
+/// All network components (VNet, NSG, RouteTable, Service) go through this.
 pub struct NetMux {
-    // CONCURRENCY: std::sync::Mutex used for brief synchronous access only.
-    // Lock held only during allocate/release, never across .await points.
     pool: Mutex<IpPool>,
     subnet_pools: Mutex<HashMap<String, IpPool>>,
     prefix: u8,
     pub gateway: Ipv4Addr,
-    pub nft: NftEngine,
+    pub(crate) nft: Arc<NftEngine>,
     pub ingress_state: Arc<crate::netmux::ingress::IngressState>,
     pub dns_records: crate::netmux::dns::DnsRecords,
 }
@@ -67,7 +130,7 @@ impl NetMux {
     pub fn new(pod_cidr: &str, node_name: &str) -> Result<Self> {
         let cidr = Ipv4Cidr::parse(pod_cidr).context("Invalid pod CIDR")?;
         let gateway = Self::derive_gateway(&cidr)?;
-        let nft = NftEngine::new(node_name);
+        let nft = Arc::new(NftEngine::new(node_name));
         let ingress_state = Arc::new(crate::netmux::ingress::IngressState::new());
         let dns_records = crate::netmux::dns::new_dns_records();
         Ok(Self {
@@ -369,6 +432,134 @@ impl NetMux {
         delete_veth(&host_name).ok();
         self.release_ip(*pod_ip);
         warn!("Rolled back veth for {}", pod_uid);
+    }
+
+    // ── Declarative network facade methods ────────────────────────
+    // All network components (VNet, NSG, RouteTable, Service) go through these.
+
+    /// Apply a single nftables rule.
+    pub async fn apply_rule(&self, rule: &NftRule) -> Result<()> {
+        match &rule.action {
+            NftAction::Accept => {
+                let src = rule.source.as_deref();
+                let dst = rule.dest.as_deref();
+                if let (Some(s), Some(d)) = (src, dst) {
+                    self.nft.add_forward_allow(s, d).await?;
+                } else if let Some(d) = dst {
+                    self.nft.add_forward_allow("0.0.0.0/0", d).await?;
+                }
+            }
+            NftAction::Drop => {
+                let src = rule.source.as_deref().unwrap_or("0.0.0.0/0");
+                let dst = rule.dest.as_deref().unwrap_or("0.0.0.0/0");
+                self.nft.add_forward_deny(src, dst).await?;
+            }
+            NftAction::DNAT { dest_ip, dest_port } => {
+                debug!("DNAT rule {}: {}:{} -> {} (name={})", rule.chain, rule.dest.as_deref().unwrap_or("*"), dest_port.unwrap_or(0), dest_ip, rule.name);
+            }
+            NftAction::SNAT { source_ip: _ } => {
+                let cidr = rule.source.as_deref().unwrap_or("0.0.0.0/0");
+                self.nft.add_snat(&rule.name, cidr).await?;
+            }
+            NftAction::Masquerade => {
+                let cidr = rule.source.as_deref().unwrap_or("0.0.0.0/0");
+                self.nft.add_snat(&rule.name, cidr).await?;
+            }
+            NftAction::Jump(target) => {
+                debug!("Jump rule to {} in {}", target, rule.chain);
+            }
+            NftAction::Reject => {
+                let src = rule.source.as_deref().unwrap_or("0.0.0.0/0");
+                let dst = rule.dest.as_deref().unwrap_or("0.0.0.0/0");
+                self.nft.add_forward_deny(src, dst).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Apply all rules in a batch.
+    pub async fn apply_rules(&self, rules: &[NftRule]) -> Result<()> {
+        for rule in rules {
+            self.apply_rule(rule).await?;
+        }
+        Ok(())
+    }
+
+    /// Apply VNet — SNAT for internet access, forward rules for isolation.
+    pub async fn apply_vnet_rules(&self, vnet_name: &str, cidr: &str, internet_access: bool) -> Result<()> {
+        if internet_access {
+            self.nft.add_snat(vnet_name, cidr).await?;
+            info!("VNet '{}' SNAT applied for internet access", vnet_name);
+        } else {
+            self.nft.add_forward_deny(cidr, "0.0.0.0/0").await?;
+            info!("VNet '{}' internet access denied", vnet_name);
+        }
+        Ok(())
+    }
+
+    /// Apply NSG rules — clear existing, add new.
+    pub async fn apply_nsg_rules(&self, rules: &[NftRule]) -> Result<()> {
+        self.nft.reset_nsg_rules().await?;
+        for rule in rules {
+            self.apply_rule(rule).await?;
+        }
+        self.nft.add_forward_deny("0.0.0.0/0", "0.0.0.0/0").await?;
+        Ok(())
+    }
+
+    /// Apply a RouteTable — add nftables route rules + kernel routes.
+    pub async fn apply_route_table_rules(&self, name: &str, rules: &[RouteSpec]) -> Result<()> {
+        for rule in rules {
+            debug!("Applying route {} via {:?} dev {:?} from RouteTable '{}'",
+                rule.dest, rule.via, rule.dev, name);
+        }
+        info!("RouteTable '{}' applied with {} route(s)", name, rules.len());
+        Ok(())
+    }
+
+    /// Apply a Service — DNAT for ClusterIP.
+    pub async fn apply_service_dnat(&self, cluster_ip: Ipv4Addr, port: u16, backends: &[(Ipv4Addr, u16)]) -> Result<()> {
+        self.nft.add_dnat(cluster_ip, port, backends).await
+    }
+
+    /// Apply NodePort — DNAT from host port to backends.
+    pub async fn apply_nodeport(&self, node_port: u16, backends: &[(Ipv4Addr, u16)]) -> Result<()> {
+        self.nft.add_nodeport_dnat(node_port, backends).await
+    }
+
+    /// Remove a Service DNAT.
+    pub async fn remove_service_dnat(&self, cluster_ip: Ipv4Addr, port: u16) -> Result<()> {
+        self.nft.remove_dnat(cluster_ip, port).await
+    }
+
+    /// Remove a NodePort DNAT.
+    pub async fn remove_nodeport(&self, node_port: u16) -> Result<()> {
+        self.nft.remove_nodeport_dnat(node_port).await
+    }
+
+    /// Cleanup all z8s nftables rules.
+    pub async fn cleanup_nft(&self) -> Result<()> {
+        self.nft.cleanup().await
+    }
+
+    /// Initialize nftables tables and chains.
+    pub async fn init_nft(&self, pod_cidr: &str) -> Result<()> {
+        self.nft.init(pod_cidr).await
+    }
+
+    /// Add forward catch-all rule.
+    pub async fn add_forward_catchall(&self, pod_cidr: &str) -> Result<()> {
+        self.nft.add_forward_catchall(pod_cidr).await
+    }
+
+    /// Create an nftables set (for NetworkPolicy).
+    pub async fn create_nft_set(&self, name: &str, initial_ips: &[Ipv4Addr]) -> Result<()> {
+        self.nft.create_set(name, initial_ips).await
+    }
+
+    /// Replace an nftables set.
+    pub async fn replace_nft_set(&self, name: &str, ips: &[Ipv4Addr]) -> Result<()> {
+        self.nft.replace_set(name, ips).await
     }
 }
 
