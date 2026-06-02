@@ -155,6 +155,7 @@ pub async fn scheduler_tick(
     gs: &Option<Arc<tokio::sync::Mutex<crate::store::gossip::GossipState>>>,
     store_events: &crate::store::StoreEventHub,
     notify: &Arc<tokio::sync::Notify>,
+    vol: Option<Arc<dyn crate::storage::StorageProvisioner>>,
 ) -> u32 {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -180,8 +181,22 @@ pub async fn scheduler_tick(
             if p.assigned_node.is_some() {
                 continue;
             }
-            // Pick the least-loaded node (first after sort)
             let node = node_loads[0].0.clone();
+            if let Some(vol) = vol.as_ref() {
+                if let Err(e) =
+                    crate::scheduler::assign::provision_wait_for_first_consumer(
+                        store, vol, p, &node,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        "Skipping assign {}: WaitForFirstConsumer volumes: {}",
+                        t.resource.name(),
+                        e
+                    );
+                    continue;
+                }
+            }
             let mut pod = p.clone();
             pod.assigned_node = Some(node.clone());
             pod.scheduler_epoch = lease.epoch;
@@ -253,6 +268,7 @@ pub async fn run_scheduler(
     gs: Option<Arc<tokio::sync::Mutex<crate::store::gossip::GossipState>>>,
     store_events: crate::store::StoreEventHub,
     notify: Arc<tokio::sync::Notify>,
+    vol: Arc<dyn crate::storage::StorageProvisioner>,
 ) {
     let mut lease = run_lease_loop(db.clone(), node_name.clone()).await;
     crate::config::set_scheduler_leader(true);
@@ -291,7 +307,16 @@ pub async fn run_scheduler(
             }
         }
 
-        let n = scheduler_tick(&store, &db, &lease, &gs, &store_events, &notify).await;
+        let n = scheduler_tick(
+            &store,
+            &db,
+            &lease,
+            &gs,
+            &store_events,
+            &notify,
+            Some(vol.clone()),
+        )
+        .await;
         if n > 0 {
             // Rebuild index after scheduling to reflect new assignments
             index.rebuild(&store, &db).await;

@@ -3,8 +3,6 @@ use anyhow::{Context, Result};
 use std::path::Path;
 use tracing::{info, warn};
 
-use super::StorageClass;
-
 pub struct LoopProvisioner;
 
 impl LoopProvisioner {
@@ -12,7 +10,7 @@ impl LoopProvisioner {
         &self,
         pv: &mut PersistentVolume,
         _pvc: &PersistentVolumeClaim,
-        _class: &StorageClass,
+        _class: &crate::types::StorageClass,
     ) -> Result<()> {
         let host_path = match pv
             .spec

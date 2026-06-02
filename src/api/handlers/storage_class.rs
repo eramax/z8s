@@ -1,37 +1,24 @@
 use crate::api::server::*;
-use crate::types::{ObjectMeta, StorageClass as K8sStorageClass};
+use crate::store::AnyResource;
+use crate::types::StorageClass as K8sStorageClass;
 use axum::Router;
 use axum::routing::get;
 
-fn sc_meta(name: &str) -> ObjectMeta {
-    ObjectMeta {
-        name: Some(name.into()),
-        creation_timestamp: Some(now_time()),
-        ..Default::default()
+async fn list_from_store(s: &AppState) -> Vec<K8sStorageClass> {
+    let mut items = Vec::new();
+    for t in s.store.get_by_kind("StorageClass").await {
+        if let AnyResource::StorageClass(sc) = t.resource {
+            items.push(sc);
+        }
     }
+    if items.is_empty() {
+        return crate::storage::class::default_storage_classes();
+    }
+    items
 }
 
-fn builtin_classes() -> Vec<K8sStorageClass> {
-    vec![
-        K8sStorageClass {
-            metadata: sc_meta("standard"),
-            provisioner: "z8s.io/loop".into(),
-            reclaim_policy: Some("Delete".into()),
-            volume_binding_mode: Some("Immediate".into()),
-            ..Default::default()
-        },
-        K8sStorageClass {
-            metadata: sc_meta("hostpath"),
-            provisioner: "z8s.io/hostpath".into(),
-            reclaim_policy: Some("Delete".into()),
-            volume_binding_mode: Some("Immediate".into()),
-            ..Default::default()
-        },
-    ]
-}
-
-pub async fn list_storage_classes() -> Json<List<K8sStorageClass>> {
-    let items = builtin_classes();
+pub async fn list_storage_classes(State(s): State<AppState>) -> Json<List<K8sStorageClass>> {
+    let items = list_from_store(&s).await;
     Json(List {
         kind: Some("StorageClassList".into()),
         api_version: None,
@@ -41,9 +28,17 @@ pub async fn list_storage_classes() -> Json<List<K8sStorageClass>> {
 }
 
 pub async fn get_storage_class(
+    State(s): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Json<K8sStorageClass>, ApiError> {
-    builtin_classes()
+    let uid = format!("StorageClass/{name}");
+    if let Some(t) = s.store.get(&uid).await {
+        if let AnyResource::StorageClass(sc) = t.resource {
+            return Ok(Json(sc));
+        }
+    }
+    list_from_store(&s)
+        .await
         .into_iter()
         .find(|c| c.metadata.name.as_deref() == Some(&name))
         .ok_or_else(|| ApiError::not_found(format!("storageclass \"{}\" not found", name)))

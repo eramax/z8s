@@ -1,3 +1,4 @@
+pub mod class;
 pub mod hostpath;
 pub mod loop_prov;
 
@@ -15,34 +16,20 @@ use tracing::info;
 use crate::store::AnyResource;
 use crate::store::StoreBackend;
 
-#[derive(Clone, Debug)]
-pub struct StorageClass {
-    pub name: String,
-    pub provisioner: &'static str,
-}
-
-impl StorageClass {
-    pub fn builtin() -> Vec<Self> {
-        vec![
-            Self {
-                name: "standard".into(),
-                provisioner: "z8s.io/loop",
-            },
-            Self {
-                name: "hostpath".into(),
-                provisioner: "z8s.io/hostpath",
-            },
-        ]
-    }
-
-    pub fn by_name(name: &str) -> Option<Self> {
-        Self::builtin().into_iter().find(|c| c.name == name)
-    }
-}
+pub use class::{
+    default_storage_class_name, resolve_storage_class, seed_default_storage_classes,
+    volume_binding_immediate, volume_binding_wait_for_consumer,
+};
 
 #[async_trait]
 pub trait StorageProvisioner: Send + Sync {
     async fn provision_for_pvc(&self, pvc: &PersistentVolumeClaim) -> Result<()>;
+    async fn provision_for_pvc_on_node(
+        &self,
+        pvc: &PersistentVolumeClaim,
+        class: &crate::types::StorageClass,
+        node: &str,
+    ) -> Result<()>;
     async fn deprovision_pv(&self, pv: &PersistentVolume) -> Result<()>;
 }
 
@@ -63,18 +50,22 @@ impl ProvisionerDispatcher {
         }
     }
 
-    fn select(&self, class: &StorageClass) -> Result<&dyn StorageProvisionerBackend> {
-        match class.provisioner {
+    fn select_provisioner(&self, provisioner: &str) -> Result<&dyn StorageProvisionerBackend> {
+        match provisioner {
             "z8s.io/loop" => Ok(&self.loop_prov),
             "z8s.io/hostpath" => Ok(&self.hostpath_prov),
             p => anyhow::bail!("unknown provisioner '{}'", p),
         }
     }
 
-    async fn do_provision(&self, pvc: &PersistentVolumeClaim, class_name: &str) -> Result<()> {
+    async fn do_provision(
+        &self,
+        pvc: &PersistentVolumeClaim,
+        class: &crate::types::StorageClass,
+        bind_node: Option<&str>,
+    ) -> Result<()> {
         let spec = pvc.spec.as_ref().context("PVC has no spec")?;
-        let class = StorageClass::by_name(class_name)
-            .context(format!("unknown storage class '{}'", class_name))?;
+        let class_name = class.metadata.name.as_deref().unwrap_or("unknown");
         let pvc_ns = pvc.metadata.namespace.as_deref().unwrap_or("default");
         let pvc_name = pvc.metadata.name.as_deref().unwrap_or("unknown");
         let pv_name = format!("pvc-{}--{}", pvc_ns, pvc_name);
@@ -87,30 +78,39 @@ impl ProvisionerDispatcher {
                 uid: Some(crate::config::random_id()),
                 annotations: Some({
                     let mut m = std::collections::BTreeMap::new();
-                    m.insert("z8s.io/provisioner".into(), class.provisioner.into());
+                    m.insert("z8s.io/provisioner".into(), class.provisioner.clone());
+                    if let Some(node) = bind_node {
+                        m.insert("z8s.io/bind-node".into(), node.into());
+                    }
                     m
                 }),
                 ..Default::default()
             },
-            spec: Some(PersistentVolumeSpec {
-                capacity: spec
-                    .resources
-                    .as_ref()
-                    .and_then(|r| r.requests.as_ref())
-                    .cloned(),
-                access_modes: spec.access_modes.clone(),
-                claim_ref: Some(ObjectReference {
-                    kind: Some("PersistentVolumeClaim".into()),
-                    name: pvc.metadata.name.clone(),
-                    namespace: pvc.metadata.namespace.clone(),
+            spec: Some({
+                let mut pv_spec = PersistentVolumeSpec {
+                    capacity: spec
+                        .resources
+                        .as_ref()
+                        .and_then(|r| r.requests.as_ref())
+                        .cloned(),
+                    access_modes: spec.access_modes.clone(),
+                    claim_ref: Some(ObjectReference {
+                        kind: Some("PersistentVolumeClaim".into()),
+                        name: pvc.metadata.name.clone(),
+                        namespace: pvc.metadata.namespace.clone(),
+                        ..Default::default()
+                    }),
+                    persistent_volume_reclaim_policy: class
+                        .reclaim_policy
+                        .clone()
+                        .or(Some("Delete".into())),
+                    host_path: Some(HostPathVolumeSource {
+                        path: host_path,
+                        type_: None,
+                    }),
                     ..Default::default()
-                }),
-                persistent_volume_reclaim_policy: Some("Delete".into()),
-                host_path: Some(HostPathVolumeSource {
-                    path: host_path,
-                    type_: None,
-                }),
-                ..Default::default()
+                };
+                pv_spec
             }),
             status: Some(PersistentVolumeStatus {
                 phase: Some("Available".into()),
@@ -122,8 +122,8 @@ impl ProvisionerDispatcher {
             "Provisioning PV {} from storage class '{}'",
             pv_name, class_name
         );
-        self.select(&class)?
-            .do_provision(&mut pv, pvc, &class)
+        self.select_provisioner(&class.provisioner)?
+            .do_provision(&mut pv, pvc, class)
             .await?;
         if let Some(s) = pv.status.as_mut() {
             s.phase = Some("Bound".into());
@@ -155,10 +155,64 @@ impl ProvisionerDispatcher {
 impl StorageProvisioner for ProvisionerDispatcher {
     async fn provision_for_pvc(&self, pvc: &PersistentVolumeClaim) -> Result<()> {
         let spec = pvc.spec.as_ref().context("PVC has no spec")?;
+        if spec.volume_name.is_some() {
+            return Ok(());
+        }
         let class_name = match &spec.storage_class_name {
-            Some(n) => n,
-            None => return Ok(()),
+            Some(n) => n.clone(),
+            None => match default_storage_class_name(self.store.as_ref()).await {
+                Some(n) => n,
+                None => return Ok(()),
+            },
         };
+        let Some(class) = resolve_storage_class(self.store.as_ref(), &class_name).await? else {
+            anyhow::bail!("StorageClass '{}' not found", class_name);
+        };
+        if !volume_binding_immediate(&class) {
+            return Ok(());
+        }
+        self.provision_with_class(pvc, &class, None).await
+    }
+
+    async fn provision_for_pvc_on_node(
+        &self,
+        pvc: &PersistentVolumeClaim,
+        class: &crate::types::StorageClass,
+        node: &str,
+    ) -> Result<()> {
+        self.provision_with_class(pvc, class, Some(node)).await
+    }
+
+    async fn deprovision_pv(&self, pv: &PersistentVolume) -> Result<()> {
+        let prov: &'static str = match pv
+            .metadata
+            .annotations
+            .as_ref()
+            .and_then(|a| a.get("z8s.io/provisioner"))
+            .map(|s| s.as_str())
+            .unwrap_or("")
+        {
+            "z8s.io/loop" => "z8s.io/loop",
+            "z8s.io/hostpath" => "z8s.io/hostpath",
+            _ => return Ok(()),
+        };
+        let backend: &dyn StorageProvisionerBackend = match prov {
+            "z8s.io/loop" => &self.loop_prov,
+            "z8s.io/hostpath" => &self.hostpath_prov,
+            _ => return Ok(()),
+        };
+        backend.do_deprovision(pv).await
+    }
+}
+
+impl ProvisionerDispatcher {
+    async fn provision_with_class(
+        &self,
+        pvc: &PersistentVolumeClaim,
+        class: &crate::types::StorageClass,
+        bind_node: Option<&str>,
+    ) -> Result<()> {
+        let spec = pvc.spec.as_ref().context("PVC has no spec")?;
         if spec.volume_name.is_some() {
             return Ok(());
         }
@@ -194,31 +248,10 @@ impl StorageProvisioner for ProvisionerDispatcher {
             }
         }
 
-        let result = self.do_provision(pvc, class_name).await;
+        let result = self.do_provision(pvc, class, bind_node).await;
 
         self.inflight.lock().await.remove(&uid);
         result
-    }
-
-    async fn deprovision_pv(&self, pv: &PersistentVolume) -> Result<()> {
-        let prov: &'static str = match pv
-            .metadata
-            .annotations
-            .as_ref()
-            .and_then(|a| a.get("z8s.io/provisioner"))
-            .map(|s| s.as_str())
-            .unwrap_or("")
-        {
-            "z8s.io/loop" => "z8s.io/loop",
-            "z8s.io/hostpath" => "z8s.io/hostpath",
-            _ => return Ok(()),
-        };
-        let backend: &dyn StorageProvisionerBackend = match prov {
-            "z8s.io/loop" => &self.loop_prov,
-            "z8s.io/hostpath" => &self.hostpath_prov,
-            _ => return Ok(()),
-        };
-        backend.do_deprovision(pv).await
     }
 }
 
@@ -228,7 +261,7 @@ trait StorageProvisionerBackend: Send + Sync {
         &self,
         pv: &mut PersistentVolume,
         pvc: &PersistentVolumeClaim,
-        class: &StorageClass,
+        class: &crate::types::StorageClass,
     ) -> Result<()>;
     async fn do_deprovision(&self, pv: &PersistentVolume) -> Result<()>;
 }
@@ -239,7 +272,7 @@ impl StorageProvisionerBackend for loop_prov::LoopProvisioner {
         &self,
         pv: &mut PersistentVolume,
         pvc: &PersistentVolumeClaim,
-        class: &StorageClass,
+        class: &crate::types::StorageClass,
     ) -> Result<()> {
         self.provision(pv, pvc, class).await
     }
@@ -255,7 +288,7 @@ impl StorageProvisionerBackend for hostpath::HostPathProvisioner {
         &self,
         pv: &mut PersistentVolume,
         pvc: &PersistentVolumeClaim,
-        class: &StorageClass,
+        class: &crate::types::StorageClass,
     ) -> Result<()> {
         self.provision(pv, pvc, class).await
     }

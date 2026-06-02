@@ -3,7 +3,6 @@ use anyhow::{Context, Result};
 use std::path::Path;
 use tracing::info;
 
-use super::StorageClass;
 
 pub struct HostPathProvisioner;
 
@@ -12,7 +11,7 @@ impl HostPathProvisioner {
         &self,
         pv: &mut PersistentVolume,
         _pvc: &PersistentVolumeClaim,
-        _class: &StorageClass,
+        _class: &crate::types::StorageClass,
     ) -> Result<()> {
         let host_path = pv
             .spec

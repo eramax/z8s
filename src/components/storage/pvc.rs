@@ -30,7 +30,7 @@ impl Component for PvcResource {
         ResourceCategory::Storage
     }
 
-    async fn reconcile(&self, ctx: &ReconcileContext, tracker: &ResourceTracker) -> Result<()> {
+    async fn reconcile(&self, _ctx: &ReconcileContext, tracker: &ResourceTracker) -> Result<()> {
         let pvc = match &tracker.resource {
             AnyResource::PersistentVolumeClaim(p) => p.clone(),
             _ => return Ok(()),
@@ -44,14 +44,13 @@ impl Component for PvcResource {
             return Ok(());
         }
 
-        let has_class = pvc
+        if pvc
             .spec
             .as_ref()
             .and_then(|s| s.storage_class_name.as_ref())
-            .is_some();
-
-        if has_class {
-            ctx.vol.provision_for_pvc(&pvc).await?;
+            .is_some()
+        {
+            // Dynamic provision runs in orchestrator storage sweep (SC2).
             return Ok(());
         }
 

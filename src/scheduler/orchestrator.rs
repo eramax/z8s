@@ -157,6 +157,9 @@ impl Orchestrator {
             let local_pods = snap.filter_uids(local_uids.iter().map(String::as_str));
             sync_pods(&local_pods, self.process_tracker.clone()).await;
             self.sync_network(&snap).await;
+            if crate::config::is_scheduler_leader() {
+                self.sync_storage_volumes(&snap).await;
+            }
             return;
         }
 
@@ -190,6 +193,7 @@ impl Orchestrator {
                     trackers.push((*t).clone());
                 }
             }
+            self.sync_storage_volumes(&snap).await;
         }
 
         if !trackers.is_empty() {
@@ -245,6 +249,85 @@ impl Orchestrator {
 
     async fn dispatch(&self, task: Task) {
         tracing::trace!(?task, "orchestrator task");
+        match task {
+            Task::AssignPod { uid } => {
+                if crate::config::is_scheduler_leader() {
+                    tracing::debug!("AssignPod {}", uid);
+                }
+            }
+            Task::ReconcileDeployment { uid } => {
+                if crate::config::is_scheduler_leader() {
+                    tracing::debug!("ReconcileDeployment {}", uid);
+                }
+            }
+            Task::ProvisionVolume { pvc_uid } => {
+                self.provision_pvc_by_uid(&pvc_uid).await;
+            }
+            Task::DeprovisionVolume { pv_uid } => {
+                self.deprovision_pv_by_uid(&pv_uid).await;
+            }
+            _ => {}
+        }
+    }
+
+    async fn sync_storage_volumes(&self, snap: &StoreSnapshot) {
+        use crate::storage::{resolve_storage_class, volume_binding_immediate};
+        for t in snap.by_kind("PersistentVolumeClaim") {
+            let AnyResource::PersistentVolumeClaim(pvc) = &t.resource else {
+                continue;
+            };
+            if pvc
+                .spec
+                .as_ref()
+                .and_then(|s| s.volume_name.as_ref())
+                .is_some()
+            {
+                continue;
+            }
+            let class_name = match pvc
+                .spec
+                .as_ref()
+                .and_then(|s| s.storage_class_name.as_ref())
+            {
+                Some(n) => n.clone(),
+                None => continue,
+            };
+            let Ok(Some(class)) =
+                resolve_storage_class(self.ctx.store.as_ref(), &class_name).await
+            else {
+                continue;
+            };
+            if !volume_binding_immediate(&class) {
+                continue;
+            }
+            self.dispatch(Task::ProvisionVolume {
+                pvc_uid: t.resource.uid(),
+            })
+            .await;
+            if let Err(e) = self.ctx.vol.provision_for_pvc(pvc).await {
+                tracing::warn!("ProvisionVolume {}: {}", t.resource.name(), e);
+            }
+        }
+    }
+
+    async fn provision_pvc_by_uid(&self, uid: &str) {
+        let snap = self.ctx.store.snapshot().await;
+        let Some(tracker) = snap.get(uid) else {
+            return;
+        };
+        if let AnyResource::PersistentVolumeClaim(pvc) = &tracker.resource {
+            let _ = self.ctx.vol.provision_for_pvc(pvc).await;
+        }
+    }
+
+    async fn deprovision_pv_by_uid(&self, uid: &str) {
+        let snap = self.ctx.store.snapshot().await;
+        let Some(tracker) = snap.get(uid) else {
+            return;
+        };
+        if let AnyResource::PersistentVolume(pv) = &tracker.resource {
+            let _ = self.ctx.vol.deprovision_pv(pv).await;
+        }
     }
 
     async fn sync_network(&self, snap: &StoreSnapshot) {

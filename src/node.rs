@@ -135,6 +135,10 @@ pub async fn run_node(
         redb = None;
     };
 
+    if let Err(e) = crate::storage::seed_default_storage_classes(store.as_ref()).await {
+        warn!("Failed to seed StorageClasses: {}", e);
+    }
+
     let require_join_auth = cfg.peers.is_empty() && redb.is_some();
     if require_join_auth {
         if let Some(ref db) = redb {
@@ -421,6 +425,7 @@ pub async fn run_node(
             let sched_name = cfg.node_name.clone();
             let sched_db = db.clone();
             let sched_gs = gossip_state.clone();
+            let sched_vol = provisioner.clone() as Arc<dyn crate::storage::StorageProvisioner>;
             tokio::spawn(async move {
                 crate::scheduler::scheduler::run_scheduler(
                     sched_store,
@@ -429,6 +434,7 @@ pub async fn run_node(
                     sched_gs,
                     store_events.clone(),
                     reconciler_notify.clone(),
+                    sched_vol,
                 )
                 .await;
             });

@@ -1,3 +1,4 @@
+pub mod assign;
 pub mod engines;
 pub mod index;
 pub mod orchestrator;
