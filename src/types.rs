@@ -36,6 +36,14 @@ fn default_subnet_kind() -> String { "Subnet".to_string() }
 fn default_nsg_kind() -> String { "NSG".to_string() }
 fn default_routetable_kind() -> String { "RouteTable".to_string() }
 
+#[path = "types/discovery.rs"]
+mod discovery;
+#[path = "types/rbac.rs"]
+mod rbac;
+
+pub use discovery::*;
+pub use rbac::*;
+
 // ── Time ─────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -1939,90 +1947,6 @@ impl Default for Status {
     }
 }
 
-// ── API discovery types ──────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct APIVersions {
-    pub versions: Vec<String>,
-    pub server_address_by_client_cidrs: Vec<ServerAddressByClientCIDR>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct ServerAddressByClientCIDR {
-    pub client_cidr: String,
-    pub server_address: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct APIGroupList {
-    pub groups: Vec<APIGroup>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct APIGroup {
-    pub name: String,
-    pub versions: Vec<GroupVersionForDiscovery>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub preferred_version: Option<GroupVersionForDiscovery>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub server_address_by_client_cidrs: Option<Vec<ServerAddressByClientCIDR>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct GroupVersionForDiscovery {
-    pub group_version: String,
-    pub version: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct APIResourceList {
-    pub group_version: String,
-    pub resources: Vec<APIResource>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct APIResource {
-    pub name: String,
-    pub singular_name: String,
-    pub namespaced: bool,
-    pub kind: String,
-    pub verbs: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub short_names: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub categories: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub group: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub version: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub storage_version_hash: Option<String>,
-}
-
-// ── Generic API typed list wrapper ───────────────────────────────────────────
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct List<T> {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub kind: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub api_version: Option<String>,
-    pub metadata: ListMeta,
-    pub items: Vec<T>,
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// CRD types — custom resource definitions using our ObjectMeta
-// ═══════════════════════════════════════════════════════════════════════════════
-
 fn default_true() -> bool {
     true
 }
@@ -2034,127 +1958,6 @@ fn default_priority() -> u32 {
 }
 fn default_header_operator() -> String {
     "eq".to_string()
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// RBAC types — namespace-scoped roles
-// ═══════════════════════════════════════════════════════════════════════════════
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
-pub struct PolicyRule {
-    #[serde(default)]
-    pub api_groups: Vec<String>,
-    #[serde(default)]
-    pub resources: Vec<String>,
-    #[serde(default)]
-    pub resource_names: Vec<String>,
-    #[serde(default)]
-    pub verbs: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Role {
-    #[serde(rename = "apiVersion", default = "default_role_api_version")]
-    pub api_version: String,
-    #[serde(default = "default_role_kind")]
-    pub kind: String,
-    pub metadata: ObjectMeta,
-    #[serde(default)]
-    pub rules: Vec<PolicyRule>,
-}
-
-fn default_role_api_version() -> String { "rbac.authorization.k8s.io/v1".to_string() }
-fn default_role_kind() -> String { "Role".to_string() }
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct RoleRef {
-    pub api_group: String,
-    pub kind: String,
-    pub name: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
-pub struct Subject {
-    #[serde(default = "default_subject_kind")]
-    pub kind: String,
-    #[serde(default)]
-    pub namespace: String,
-    pub name: String,
-}
-
-fn default_subject_kind() -> String { "ServiceAccount".to_string() }
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct RoleBinding {
-    #[serde(rename = "apiVersion", default = "default_role_api_version")]
-    pub api_version: String,
-    #[serde(default = "default_rolebinding_kind")]
-    pub kind: String,
-    pub metadata: ObjectMeta,
-    #[serde(default)]
-    pub subjects: Vec<Subject>,
-    pub role_ref: RoleRef,
-}
-
-fn default_rolebinding_kind() -> String { "RoleBinding".to_string() }
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
-pub struct RoleList {
-    pub items: Vec<Role>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
-pub struct RoleBindingList {
-    pub items: Vec<RoleBinding>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ClusterRole {
-    #[serde(rename = "apiVersion", default = "default_role_api_version")]
-    pub api_version: String,
-    #[serde(default = "default_clusterrole_kind")]
-    pub kind: String,
-    pub metadata: ObjectMeta,
-    #[serde(default)]
-    pub rules: Vec<PolicyRule>,
-}
-
-fn default_clusterrole_kind() -> String {
-    "ClusterRole".to_string()
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ClusterRoleBinding {
-    #[serde(rename = "apiVersion", default = "default_role_api_version")]
-    pub api_version: String,
-    #[serde(default = "default_clusterrolebinding_kind")]
-    pub kind: String,
-    pub metadata: ObjectMeta,
-    #[serde(default)]
-    pub subjects: Vec<Subject>,
-    pub role_ref: RoleRef,
-}
-
-fn default_clusterrolebinding_kind() -> String {
-    "ClusterRoleBinding".to_string()
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ServiceAccount {
-    #[serde(rename = "apiVersion", default = "default_sa_api_version")]
-    pub api_version: String,
-    #[serde(default = "default_sa_kind")]
-    pub kind: String,
-    pub metadata: ObjectMeta,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub secrets: Option<Vec<ObjectReference>>,
-}
-
-fn default_sa_api_version() -> String {
-    "v1".to_string()
-}
-fn default_sa_kind() -> String {
-    "ServiceAccount".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
