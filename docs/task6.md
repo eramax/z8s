@@ -10,5 +10,5 @@ true isolation is very important, form the network, storage (disks), and resourc
 all pods should be living in a default vent if they didnt set a vnet to use so we have a unified design.
 support running as PID 1 with multi-core systems. never crashes or get down. and can run normal processes in the host like bash commands, dhcp, sshd, etc. all, we need to know what capabilities each app will need and support that capabilities. 
 we are lacking roles. do we need it ?
-checout this plan as well maybe it can give u some ideas.
+checout this plan /home/abb/dev/z8s/docs/z8s-v2-plan.md and /home/abb/dev/z8s/docs/z8s-comprehensive-modernization-plan.md as well maybe it can give u some ideas.
 write your plan in a md file in chunks to avoid output tokens limits.
