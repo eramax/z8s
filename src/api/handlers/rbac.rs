@@ -2,6 +2,159 @@ use crate::api::server::*;
 use crate::types::{Role, RoleBinding, PolicyRule, Subject};
 use axum::Router;
 use axum::routing::get;
+use axum::http::{HeaderMap, StatusCode};
+use axum::extract::Request;
+use axum::middleware::Next;
+use axum::response::Response;
+
+// ── Authorization middleware ───────────────────────────────────────
+
+/// Map HTTP method to RBAC verb
+fn method_to_verb(method: &str) -> &str {
+    match method {
+        "GET" => "get",
+        "POST" => "create",
+        "PUT" | "PATCH" => "update",
+        "DELETE" => "delete",
+        _ => "get",
+    }
+}
+
+/// Map URI path to resource kind
+fn uri_to_resource(uri: &str) -> Option<(&str, &str)> {
+    // Returns (resource, namespace) — namespace is "" for cluster-scoped
+    let parts: Vec<&str> = uri.trim_start_matches('/').split('/').collect();
+
+    // Cluster-scoped: /apis/rbac.authorization.k8s.io/v1/roles
+    if parts.len() >= 4 && parts[0] == "apis" {
+        return match parts[3] {
+            "roles" => Some(("roles", "")),
+            "rolebindings" => Some(("rolebindings", "")),
+            _ => None,
+        };
+    }
+
+    // Namespace-scoped: /apis/rbac.authorization.k8s.io/v1/namespaces/{ns}/roles
+    if parts.len() >= 6 && parts[0] == "apis" && parts[3] == "namespaces" {
+        let ns = parts[4];
+        return match parts[5] {
+            "roles" => Some(("roles", ns)),
+            "rolebindings" => Some(("rolebindings", ns)),
+            _ => None,
+        };
+    }
+
+    // Standard k8s resources: /api/v1/namespaces/{ns}/pods
+    if parts.len() >= 4 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "namespaces" {
+        let ns = parts[3];
+        return match parts[4] {
+            "pods" => Some(("pods", ns)),
+            "services" => Some(("services", ns)),
+            "configmaps" => Some(("configmaps", ns)),
+            "secrets" => Some(("secrets", ns)),
+            "persistentvolumeclaims" => Some(("persistentvolumeclaims", ns)),
+            "endpoints" => Some(("endpoints", ns)),
+            "endpointslices" => Some(("endpointslices", ns)),
+            "events" => Some(("events", ns)),
+            "namespaces" => Some(("namespaces", "")),
+            "persistentvolumes" => Some(("persistentvolumes", "")),
+            "nodes" => Some(("nodes", "")),
+            "services" => Some(("services", ns)),
+            _ => None,
+        };
+    }
+
+    // /apis/apps/v1/namespaces/{ns}/deployments
+    if parts.len() >= 6 && parts[0] == "apis" && parts[2] == "v1" && parts[3] == "namespaces" {
+        let ns = parts[4];
+        return match parts[5] {
+            "deployments" => Some(("deployments", ns)),
+            _ => None,
+        };
+    }
+
+    // /apis/networking.k8s.io/v1/namespaces/{ns}/ingresses
+    if parts.len() >= 6 && parts[0] == "apis" && parts[3] == "namespaces" {
+        let ns = parts[4];
+        return match parts[5] {
+            "ingresses" => Some(("ingresses", ns)),
+            "networkpolicies" => Some(("networkpolicies", ns)),
+            _ => None,
+        };
+    }
+
+    // CRDs: /apis/z8s.io/v1/vnets
+    if parts.len() >= 4 && parts[0] == "apis" && parts[1] == "z8s.io" {
+        return match parts[3] {
+            "vnets" => Some(("vnets", "")),
+            "subnets" => Some(("subnets", "")),
+            "nsgs" => Some(("nsgs", "")),
+            "routetables" => Some(("routetables", "")),
+            _ => None,
+        };
+    }
+
+    None
+}
+
+/// Extract user identity from request headers.
+/// Checks: Authorization: Bearer <token>, X-Remote-User, or falls back to "anonymous".
+fn extract_user(headers: &HeaderMap) -> String {
+    // X-Remote-User header (set by API gateway/proxy)
+    if let Some(user) = headers.get("X-Remote-User") {
+        if let Ok(s) = user.to_str() {
+            return s.to_string();
+        }
+    }
+    // Authorization: Bearer <token> — for now treat as user identity
+    if let Some(auth) = headers.get("Authorization") {
+        if let Ok(s) = auth.to_str() {
+            if let Some(token) = s.strip_prefix("Bearer ") {
+                return token.to_string();
+            }
+        }
+    }
+    "anonymous".to_string()
+}
+
+/// Authorization middleware — checks RBAC on mutating requests.
+/// Skips enforcement when no RoleBindings exist (RBAC not configured).
+pub async fn authorize_middleware_with_store(
+    headers: HeaderMap,
+    request: Request,
+    next: Next,
+    store: Arc<dyn StoreBackend>,
+) -> Result<Response, StatusCode> {
+    let method = request.method().clone();
+    let uri = request.uri().path().to_string();
+
+    // Read-only requests are always allowed
+    if method == "GET" || method == "HEAD" || method == "OPTIONS" {
+        return Ok(next.run(request).await);
+    }
+
+    // If no RoleBindings exist, RBAC is not configured — allow everything
+    let bindings = store.get_by_kind("RoleBinding").await;
+    if bindings.is_empty() {
+        return Ok(next.run(request).await);
+    }
+
+    // Determine resource and namespace from URI
+    let (resource, namespace) = match uri_to_resource(&uri) {
+        Some(r) => r,
+        None => return Ok(next.run(request).await),
+    };
+
+    let verb = method_to_verb(method.as_str());
+    let user = extract_user(&headers);
+
+    if !crate::api::handlers::rbac::authorize(store.as_ref(), &user, namespace, resource, verb).await {
+        tracing::warn!("RBAC denied: user='{}' verb='{}' resource='{}' ns='{}'", user, verb, resource, namespace);
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    Ok(next.run(request).await)
+}
 
 // ── Role CRUD ──────────────────────────────────────────────────────
 

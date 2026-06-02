@@ -10,6 +10,7 @@
 # Architecture
 - Prefer standard Kubernetes YAML and annotations over custom `x-z8s-*` extension fields. User explicitly stated custom extensions are not their preference. Confidence: 0.85
 - Use standard K8s annotations (e.g., `z8s.io/*`) for z8s-specific features rather than inventing new spec fields or extension patterns. Confidence: 0.80
+- RBAC should control what pods (via service accounts) can do to cluster APIs — enabling pods to run commands like "get pods", "get services", "apply", etc. Not just human user access. Confidence: 0.75
 
 # Testing
 - Use kubectl commands instead of curl for test scripts. User explicitly corrected curl-based test to use kubectl. Confidence: 0.80

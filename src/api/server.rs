@@ -157,6 +157,7 @@ pub async fn build_app_state(
 }
 
 pub fn build_router(state: AppState) -> Router {
+    let store_for_mw = state.store.clone();
     Router::new()
         .merge(crate::api::handlers::system::routes())
         .merge(crate::api::handlers::pod::routes())
@@ -182,6 +183,10 @@ pub fn build_router(state: AppState) -> Router {
         .merge(crate::api::handlers::rbac::routes())
         .route("/ws/gossip", axum::routing::any(gossip_ws_handler))
         .fallback(fallback_handler)
+        .layer(axum::middleware::from_fn(move |headers, req, next| {
+            let store = store_for_mw.clone();
+            async move { crate::api::handlers::rbac::authorize_middleware_with_store(headers, req, next, store).await }
+        }))
         .with_state(state)
 }
 

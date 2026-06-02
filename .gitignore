@@ -16,3 +16,5 @@ build-server.yaml
 stt.md
 logs/
 tasks/
+/.commandcode/
+.commandcode/taste/taste.md
