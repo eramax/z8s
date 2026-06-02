@@ -57,6 +57,14 @@ fn create_std_pipes() -> anyhow::Result<StdPipes> {
     })
 }
 
+/// Isolation strategy for container spawn.
+enum IsolationStrategy {
+    /// Root mode: double-fork with PID namespace, pivot_root
+    RootNs,
+    /// Non-root: user namespace + chroot
+    UserNs,
+}
+
 struct ContainerSpawnCtx<'a> {
     entrypoint: &'a str,
     cmd_args: &'a [String],
@@ -511,6 +519,34 @@ impl ProcessSupervisor {
         env_owned
     }
 
+    /// Common parent-side logic after fork: cgroup, log tasks, build RunningContainer.
+    fn parent_post_fork(
+        &self,
+        child_pid: u32,
+        container_id: &str,
+        container_name: &str,
+        image: &str,
+        rootfs_path: &str,
+        env_owned: Vec<(String, String)>,
+        pod_uid: &str,
+        isolate_net: bool,
+        pod_ip: Option<std::net::Ipv4Addr>,
+        host_veth_ifindex: Option<u32>,
+        stdout_r: std::os::fd::OwnedFd,
+        stderr_r: std::os::fd::OwnedFd,
+        probes: &[ProbeConfig],
+    ) -> Result<RunningContainer> {
+        info!("Container {} started with PID {}", container_id, child_pid);
+        self.cgroup_manager.add_pid_to_cgroup(pod_uid, child_pid)?;
+
+        let log_buffer = Self::spawn_log_tasks(stdout_r, stderr_r);
+        let instance = Self::build_container_instance(
+            container_id, container_name, image, child_pid, rootfs_path,
+            env_owned, isolate_net, pod_ip, host_veth_ifindex,
+        );
+        Ok(Self::build_running_from_instance(instance, log_buffer, probes))
+    }
+
     fn handle_veth_netns(
         &self,
         pod_uid: &str,
@@ -735,43 +771,17 @@ impl ProcessSupervisor {
                 let pid = u32::from_ne_bytes(buf);
                 drop(gc_pid_r);
 
-                info!(
-                    "Container {} started with PID {} (root ns, pid ns)",
-                    container_id, pid
-                );
-                self.cgroup_manager.add_pid_to_cgroup(pod_uid, pid)?;
-
-                // handle_veth_netns reads the sync byte from grandchild via sync_r
-                // and configures veth using grandchild's PID (for setns)
                 let (pod_ip, host_veth_ifindex) = self.handle_veth_netns(
-                    pod_uid,
-                    pid,
-                    isolate_net,
-                    &sync_r,
-                    &ack_w,
-                    subnet.as_deref(),
+                    pod_uid, pid, isolate_net, &sync_r, &ack_w, subnet.as_deref(),
                 );
-
                 drop(sync_r);
                 drop(ack_w);
 
-                let log_buffer = Self::spawn_log_tasks(stdout_r, stderr_r);
-
-                let instance = Self::build_container_instance(
-                    container_id,
-                    container_name,
-                    image,
-                    pid,
-                    rootfs_path,
-                    env_owned,
-                    isolate_net,
-                    pod_ip,
-                    host_veth_ifindex,
+                return self.parent_post_fork(
+                    pid, &container_id, &container_name, image, rootfs_path,
+                    env_owned, pod_uid, isolate_net, pod_ip, host_veth_ifindex,
+                    stdout_r, stderr_r, &probes,
                 );
-
-                Ok(Self::build_running_from_instance(
-                    instance, log_buffer, &probes,
-                ))
             }
             Ok(nix::unistd::ForkResult::Child) => {
                 // ── Intermediate child ──────────────────────────────────────────
@@ -1015,51 +1025,23 @@ impl ProcessSupervisor {
 
                 if isolate_net {
                     let pid = child_pid as u32;
-                    match self
-                        .netmux
-                        .attach_pod(pod_uid, Some(pid), subnet.as_deref())
-                    {
-                        Ok((ip, host_idx, peer_idx)) => {
-                            if let Err(e) =
-                                self.netmux.configure_pod_netns(pod_uid, &ip, pid, peer_idx)
-                            {
-                                warn!("NetMux configure_pod_netns failed: {:#}", e);
-                            }
-                            pod_ip = Some(ip);
-                            host_veth_ifindex = Some(host_idx);
-                            info!("NetMux: pod {} -> IP {}", pod_uid, ip);
+                    if let Ok((ip, host_idx, peer_idx)) = self.netmux.attach_pod(pod_uid, Some(pid), subnet.as_deref()) {
+                        if let Err(e) = self.netmux.configure_pod_netns(pod_uid, &ip, pid, peer_idx) {
+                            warn!("NetMux configure_pod_netns failed: {:#}", e);
                         }
-                        Err(e) => warn!("NetMux: failed to attach pod {}: {}", pod_uid, e),
+                        pod_ip = Some(ip);
+                        host_veth_ifindex = Some(host_idx);
                     }
                 }
 
                 nix::unistd::write(&ack_w, b"A").ok();
                 drop(ack_w);
 
-                info!("User namespace configured for child PID {}", child_pid);
-
-                let pid = child_pid as u32;
-                info!("Container {} started with PID {}", container_id, pid);
-
-                self.cgroup_manager.add_pid_to_cgroup(pod_uid, pid)?;
-
-                let log_buffer = Self::spawn_log_tasks(stdout_r, stderr_r);
-
-                let instance = Self::build_container_instance(
-                    container_id,
-                    container_name,
-                    image,
-                    pid,
-                    rootfs_path,
-                    env_owned,
-                    isolate_net,
-                    pod_ip,
-                    host_veth_ifindex,
+                return self.parent_post_fork(
+                    child_pid as u32, &container_id, &container_name, image, rootfs_path,
+                    env_owned, pod_uid, isolate_net, pod_ip, host_veth_ifindex,
+                    stdout_r, stderr_r, &probes,
                 );
-
-                Ok(Self::build_running_from_instance(
-                    instance, log_buffer, &probes,
-                ))
             }
             Ok(nix::unistd::ForkResult::Child) => {
                 drop(stdout_r);
