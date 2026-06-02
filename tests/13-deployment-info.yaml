@@ -172,6 +172,50 @@ spec:
     targetPort: 8080
     protocol: TCP
 ---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cluster-dashboard
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: cluster-dashboard-operator
+  namespace: default
+rules:
+  - apiGroups: ["", "apps", "z8s.io"]
+    resources:
+      - pods
+      - deployments
+      - services
+      - replicasets
+      - events
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["pods", "services", "nodes"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cluster-dashboard-operator
+  namespace: default
+subjects:
+  - kind: ServiceAccount
+    name: cluster-dashboard
+    namespace: default
+roleRef:
+  kind: Role
+  name: cluster-dashboard-operator
+  apiGroup: rbac.authorization.k8s.io
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -190,11 +234,15 @@ spec:
       labels:
         app: cluster-dashboard
     spec:
+      serviceAccountName: cluster-dashboard
       containers:
       - name: dashboard
         image: eramax/cluster-dashboard:latest
         ports:
         - containerPort: 80
+        env:
+        - name: KUBECONFIG
+          value: /var/run/secrets/kubernetes.io/serviceaccount/kubeconfig
 ---
 apiVersion: v1
 kind: Service

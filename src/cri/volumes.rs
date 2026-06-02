@@ -147,12 +147,34 @@ pub fn bind_mount_volumes_degraded(volumes: &[ResolvedVolume]) {
     }
 }
 
-/// Stage volumes into rootfs tree (symlink/copy) from parent before fork — works without chroot.
+/// Resolve intermediate symlinks in a rootfs destination path.
+///
+/// Images commonly ship `var/run -> ../run`.  Without canonicalization,
+/// `std::fs::copy()` and `symlink()` silently follow the symlink and write to
+/// the *resolved* `run/` path, while the caller's `var/run/secrets/...` view
+/// remains an empty placeholder.  Canonicalizing the parent directory first
+/// gives every caller the real on-disk path.
+fn canonicalize_under_rootfs(rootfs_path: &str, rel: &str) -> std::path::PathBuf {
+    let dst = Path::new(rootfs_path).join(rel);
+    if let Some(parent) = dst.parent() {
+        if let Ok(cp) = std::fs::canonicalize(parent) {
+            return cp.join(dst.file_name().unwrap_or_default());
+        }
+    }
+    dst
+}
+
+/// Stage volumes into rootfs tree (copy) from parent before fork — works without chroot.
+///
+/// All paths are canonicalized first so images with `var/run -> ../run` (or
+/// any other intermediate symlink) don't cause writes to land at the wrong
+/// on-disk location.
 pub fn stage_volumes_in_rootfs(rootfs_path: &str, volumes: &[ResolvedVolume]) {
     for vol in volumes {
         let rel = vol.container_path.trim_start_matches('/');
-        let dst = Path::new(rootfs_path).join(rel);
+        let dst = canonicalize_under_rootfs(rootfs_path, rel);
         let src = Path::new(&vol.host_path);
+
         if dst.exists() || dst.is_symlink() {
             if dst.is_dir() && !dst.is_symlink() {
                 std::fs::remove_dir_all(&dst).ok();
@@ -169,13 +191,7 @@ pub fn stage_volumes_in_rootfs(rootfs_path: &str, volumes: &[ResolvedVolume]) {
             continue;
         }
         if src.is_dir() {
-            if std::os::unix::fs::symlink(src, &dst).is_ok() {
-                info!(
-                    "Staged volume in rootfs {} → {}",
-                    vol.host_path,
-                    dst.display()
-                );
-            } else if copy_tree(src, &dst).is_ok() {
+            if copy_tree(src, &dst).is_ok() {
                 info!(
                     "Copied volume into rootfs {} → {}",
                     vol.host_path,
@@ -183,13 +199,7 @@ pub fn stage_volumes_in_rootfs(rootfs_path: &str, volumes: &[ResolvedVolume]) {
                 );
             }
         } else if src.is_file() {
-            if std::os::unix::fs::symlink(src, &dst).is_ok() {
-                info!(
-                    "Staged volume file in rootfs {} → {}",
-                    vol.host_path,
-                    dst.display()
-                );
-            } else if std::fs::copy(src, &dst).is_ok() {
+            if std::fs::copy(src, &dst).is_ok() {
                 info!(
                     "Copied volume file into rootfs {} → {}",
                     vol.host_path,

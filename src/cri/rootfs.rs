@@ -830,7 +830,9 @@ fn enter_rootfs(
     let _ = umount("/.z8s_old_root");
     let _ = std::fs::remove_dir("/.z8s_old_root");
 
-    mount_filesystems(is_root)
+    mount_filesystems(is_root)?;
+
+    Ok(())
 }
 
 fn mount_filesystems(is_root: bool) -> Result<()> {
@@ -865,14 +867,10 @@ fn mount_filesystems(is_root: bool) -> Result<()> {
     )
     .context("Failed to mount /tmp")?;
 
-    mount(
-        Some("tmpfs"),
-        "/run",
-        Some("tmpfs"),
-        MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
-        None::<&str>,
-    )
-    .context("Failed to mount /run")?;
+    // NOTE: /run is NOT mounted as tmpfs here.  SA token files are staged
+    // into rootfs/run/secrets/ by stage_volumes_in_rootfs (pre-fork) and
+    // bind-mounted by mount_rootfs_components.  A tmpfs at /run would hide
+    // those files after pivot_root.
 
     mount(
         Some("devpts"),
