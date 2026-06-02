@@ -18,16 +18,6 @@ use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
-fn raise_nproc_limit() {
-    use nix::sys::resource::{Resource, getrlimit, setrlimit};
-    if let Ok((soft, hard)) = getrlimit(Resource::RLIMIT_NPROC) {
-        let target: u64 = 65535;
-        if soft < target {
-            let new_hard = hard.max(target);
-            let _ = setrlimit(Resource::RLIMIT_NPROC, target, new_hard);
-        }
-    }
-}
 
 use crate::cri::spawn::{ContainerSpawnCtx, SpawnPipeline, SpawnState, StdPipes, create_std_pipes};
 
@@ -149,12 +139,6 @@ impl ProcessSupervisor {
             c.args(&cmd_args);
             c
         } else {
-            if !volumes.is_empty() {
-                crate::cri::volumes::scrub_rootfs_volume_mounts(rootfs_path, volumes);
-                crate::cri::volumes::stage_volumes_in_rootfs(rootfs_path, volumes);
-            }
-            rootfs::prepare_rootfs(rootfs_path)?;
-
             let rootfs_owned = rootfs_path.to_string();
 
             let ctx = ContainerSpawnCtx {
@@ -176,8 +160,7 @@ impl ProcessSupervisor {
                 probes: cfg.probes.clone(),
                 subnet,
             };
-            let pipeline = SpawnPipeline::legacy_isolated().with_legacy_fork();
-            return pipeline
+            return SpawnPipeline::isolated_default()
                 .finish_isolated(self, SpawnState::new(ctx))
                 .await;
         };
@@ -390,7 +373,7 @@ impl ProcessSupervisor {
         }
     }
 
-    fn spawn_probes(
+    pub(crate) fn spawn_probes(
         probes: &[ProbeConfig],
         container_id: &str,
         container_port_map: &std::collections::HashMap<u16, u16>,
@@ -445,231 +428,6 @@ impl ProcessSupervisor {
         (ready, healthy)
     }
 
-    fn merge_env(env_vars: &[(String, String)], rootfs: &str) -> Vec<(String, String)> {
-        let oci_env = crate::cri::oci::read_image_config(rootfs)
-            .env
-            .unwrap_or_default();
-        let mut env_owned: Vec<(String, String)> = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        for (k, v) in env_vars {
-            if seen.insert(k.clone()) {
-                env_owned.push((k.clone(), v.clone()));
-            }
-        }
-        for entry in &oci_env {
-            if let Some(eq) = entry.find('=') {
-                let key = entry[..eq].to_string();
-                let val = entry[eq + 1..].to_string();
-                if seen.insert(key.clone()) {
-                    env_owned.push((key, val));
-                }
-            }
-        }
-        env_owned
-    }
-
-    /// Common parent-side logic after fork: cgroup, log tasks, build RunningContainer.
-    fn parent_post_fork(
-        &self,
-        child_pid: u32,
-        container_id: &str,
-        container_name: &str,
-        image: &str,
-        rootfs_path: &str,
-        env_owned: Vec<(String, String)>,
-        pod_uid: &str,
-        isolate_net: bool,
-        pod_ip: Option<std::net::Ipv4Addr>,
-        host_veth_ifindex: Option<u32>,
-        run_as_user: Option<u32>,
-        run_as_group: Option<u32>,
-        stdout_r: std::os::fd::OwnedFd,
-        stderr_r: std::os::fd::OwnedFd,
-        probes: &[ProbeConfig],
-    ) -> Result<RunningContainer> {
-        info!("Container {} started with PID {}", container_id, child_pid);
-        self.cgroup_manager.add_pid_to_cgroup(pod_uid, child_pid)?;
-
-        let log_buffer = Self::spawn_log_tasks(stdout_r, stderr_r);
-        let instance = Self::build_container_instance(
-            container_id,
-            container_name,
-            image,
-            child_pid,
-            rootfs_path,
-            env_owned,
-            isolate_net,
-            pod_ip,
-            host_veth_ifindex,
-            run_as_user,
-            run_as_group,
-        );
-        Ok(Self::build_running_from_instance(instance, log_buffer, probes))
-    }
-
-    fn handle_veth_netns(
-        &self,
-        pod_uid: &str,
-        pid: u32,
-        isolate_net: bool,
-        sync_r: &std::os::fd::OwnedFd,
-        ack_w: &std::os::fd::OwnedFd,
-        subnet: Option<&str>,
-    ) -> (Option<std::net::Ipv4Addr>, Option<u32>) {
-        if !isolate_net {
-            return (None, None);
-        }
-        let mut sync_buf = [0u8; 1];
-        let n = nix::unistd::read(sync_r, &mut sync_buf).unwrap_or(0);
-        if n > 0 && sync_buf[0] == b'S' {
-            match self.netmux.attach_pod(pod_uid, Some(pid), subnet) {
-                Ok((ip, host_idx, peer_idx)) => {
-                    if let Err(e) = self.netmux.configure_pod_netns(pod_uid, &ip, pid, peer_idx) {
-                        warn!("NetMux configure_pod_netns failed: {:#}", e);
-                    }
-                    nix::unistd::write(ack_w, b"A").ok();
-                    return (Some(ip), Some(host_idx));
-                }
-                Err(e) => warn!("NetMux: failed to attach pod {}: {:?}", pod_uid, e),
-            }
-        }
-        nix::unistd::write(ack_w, b"A").ok();
-        (None, None)
-    }
-
-    fn spawn_log_tasks(
-        stdout_r: std::os::fd::OwnedFd,
-        stderr_r: std::os::fd::OwnedFd,
-    ) -> Arc<Mutex<Vec<String>>> {
-        let log_buffer = Arc::new(Mutex::new(Vec::<String>::new()));
-        {
-            let buf = log_buffer.clone();
-            let file = tokio::fs::File::from_std(std::fs::File::from(stdout_r));
-            tokio::spawn(async move {
-                let mut lines = tokio::io::BufReader::new(file).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    let mut log = buf.lock().await;
-                    log.push(format!("[stdout] {}", line));
-                    if log.len() > 1000 {
-                        log.remove(0);
-                    }
-                }
-            });
-        }
-        {
-            let buf = log_buffer.clone();
-            let file = tokio::fs::File::from_std(std::fs::File::from(stderr_r));
-            tokio::spawn(async move {
-                let mut lines = tokio::io::BufReader::new(file).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    let mut log = buf.lock().await;
-                    log.push(format!("[stderr] {}", line));
-                    if log.len() > 1000 {
-                        log.remove(0);
-                    }
-                }
-            });
-        }
-        log_buffer
-    }
-
-    fn setup_child_pipes(
-        stdout_r: std::os::fd::OwnedFd,
-        stderr_r: std::os::fd::OwnedFd,
-        stdout_w: std::os::fd::OwnedFd,
-        stderr_w: std::os::fd::OwnedFd,
-    ) {
-        drop(stdout_r);
-        drop(stderr_r);
-        nix::unistd::dup2_stdout(&stdout_w).ok();
-        nix::unistd::dup2_stderr(&stderr_w).ok();
-        drop(stdout_w);
-        drop(stderr_w);
-        if let Ok(fd) = nix::fcntl::open(
-            "/dev/null",
-            nix::fcntl::OFlag::O_RDONLY,
-            nix::sys::stat::Mode::empty(),
-        ) {
-            let _ = nix::unistd::dup2_stdin(fd);
-        }
-    }
-
-    fn child_setup_privileges(
-        run_as_group: Option<u32>,
-        run_as_user: Option<u32>,
-        working_dir: &Option<String>,
-        privileged: bool,
-        extra_caps: &[String],
-        isolation: rootfs::RootfsIsolation,
-    ) {
-        if let Some(gid) = run_as_group {
-            if let Err(e) = nix::unistd::setgid(nix::unistd::Gid::from_raw(gid)) {
-                warn!("setgid({}) failed: {}", gid, e);
-            }
-        }
-        if let Some(uid) = run_as_user {
-            if let Err(e) = nix::unistd::setuid(nix::unistd::Uid::from_raw(uid)) {
-                warn!("setuid({}) failed: {}", uid, e);
-            }
-        }
-        if let Some(wd) = working_dir {
-            if let Err(e) = nix::unistd::chdir(std::path::Path::new(wd)) {
-                warn!("chdir({}) failed: {}", wd, e);
-            }
-        }
-        raise_nproc_limit();
-        rootfs::drop_capabilities(privileged, extra_caps);
-        if isolation != rootfs::RootfsIsolation::Degraded {
-            rootfs::apply_landlock();
-        }
-    }
-
-    fn build_container_instance(
-        container_id: &str,
-        container_name: &str,
-        image: &str,
-        pid: u32,
-        rootfs_path: &str,
-        env_vars: Vec<(String, String)>,
-        isolate_net: bool,
-        pod_ip: Option<std::net::Ipv4Addr>,
-        host_veth_ifindex: Option<u32>,
-        run_as_user: Option<u32>,
-        run_as_group: Option<u32>,
-    ) -> ContainerInstance {
-        ContainerInstance {
-            container_id: container_id.to_string(),
-            container_name: container_name.to_string(),
-            image: image.to_string(),
-            pid: Some(pid),
-            rootfs: rootfs_path.to_string(),
-            started_at: Some(crate::config::now_rfc3339()),
-            env_vars,
-            published_ports: std::collections::HashMap::new(),
-            isolated_net: isolate_net,
-            pod_ip,
-            host_veth_ifindex,
-            run_as_user,
-            run_as_group,
-        }
-    }
-
-    fn build_running_from_instance(
-        instance: ContainerInstance,
-        log_buffer: Arc<Mutex<Vec<String>>>,
-        probes: &[ProbeConfig],
-    ) -> RunningContainer {
-        let (ready, healthy) =
-            Self::spawn_probes(probes, &instance.container_id, &instance.published_ports);
-        RunningContainer {
-            child: None,
-            instance,
-            restart_count: 0,
-            log_buffer,
-            ready,
-            healthy,
-        }
-    }
 
     pub(crate) async fn spawn_root_ns_container(
         &self,
@@ -809,7 +567,7 @@ impl ProcessSupervisor {
                         drop(ack_w);
 
                         // Redirect container stdout/stderr to pipe
-                        Self::setup_child_pipes(stdout_r, stderr_r, stdout_w, stderr_w);
+                        crate::cri::spawn::child::setup_child_pipes(stdout_r, stderr_r, stdout_w, stderr_w);
 
                         // Phase 2: set up rootfs isolation (pivot_root/chroot + mount)
                         let isolation =
@@ -832,7 +590,7 @@ impl ProcessSupervisor {
                         drop(sync_w);
                         drop(ack_r);
 
-                        Self::child_setup_privileges(
+                        crate::cri::spawn::child::child_setup_privileges(
                             run_as_group,
                             run_as_user,
                             &working_dir,
@@ -841,13 +599,13 @@ impl ProcessSupervisor {
                             isolation,
                         );
 
-                        let (exec_path, prog_args) = Self::argv_for_isolation(
+                        let (exec_path, prog_args) = crate::cri::spawn::child::argv_for_isolation(
                             &entrypoint_owned,
                             &args_owned,
                             &rootfs_owned,
                             isolation,
                         );
-                        Self::execvpe_container(
+                        crate::cri::spawn::child::execvpe_container(
                             &exec_path,
                             &prog_args,
                             &env_owned,
@@ -879,66 +637,6 @@ impl ProcessSupervisor {
         }
     }
 
-    fn argv_for_isolation(
-        entrypoint: &str,
-        args: &[String],
-        rootfs_host_path: &str,
-        isolation: rootfs::RootfsIsolation,
-    ) -> (String, Vec<String>) {
-        if isolation == rootfs::RootfsIsolation::Degraded {
-            rootfs::build_container_argv(entrypoint, args, rootfs_host_path)
-        } else {
-            rootfs::build_container_argv_in_mount_ns(entrypoint, args, rootfs_host_path)
-        }
-    }
-
-    fn execvpe_container(
-        exec_path: &str,
-        prog_args: &[String],
-        env_owned: &[(String, String)],
-        rootfs_host_path: &str,
-        isolation: rootfs::RootfsIsolation,
-    ) -> ! {
-        let envp: Vec<std::ffi::CString> = env_owned
-            .iter()
-            .map(|(k, v)| {
-                std::ffi::CString::new(format!("{}={}", k, v))
-                    .expect("env keys/values cannot contain null bytes")
-            })
-            .collect();
-
-        let mut argv: Vec<std::ffi::CString> =
-            vec![std::ffi::CString::new(exec_path).expect("exec path cannot contain null bytes")];
-        for a in prog_args {
-            argv.push(
-                std::ffi::CString::new(a.as_str()).expect("arg strings cannot contain null bytes"),
-            );
-        }
-
-        if isolation == rootfs::RootfsIsolation::Degraded {
-            let (loader, args) =
-                rootfs::wrap_dynamic_linker(exec_path, prog_args.to_vec(), rootfs_host_path);
-            argv = vec![
-                std::ffi::CString::new(loader).expect("loader path cannot contain null bytes"),
-            ];
-            for a in args {
-                argv.push(
-                    std::ffi::CString::new(a).expect("arg strings cannot contain null bytes"),
-                );
-            }
-        }
-
-        let e = nix::unistd::execvpe(&argv[0], &argv, &envp)
-            .expect_err("execvpe returned unexpectedly");
-        error!(
-            "z8s: execvpe({}) failed: {}",
-            argv[0].to_str().unwrap_or("?"),
-            e
-        );
-        unsafe {
-            nix::libc::_exit(1);
-        }
-    }
 
     pub(crate) async fn spawn_userns_container(
         &self,
@@ -1079,7 +777,7 @@ impl ProcessSupervisor {
                     let _ = nix::unistd::dup2_stdin(fd);
                 }
 
-                Self::child_setup_privileges(
+                crate::cri::spawn::child::child_setup_privileges(
                     run_as_group,
                     run_as_user,
                     &working_dir,
@@ -1088,13 +786,13 @@ impl ProcessSupervisor {
                     isolation,
                 );
 
-                let (exec_path, prog_args) = Self::argv_for_isolation(
+                let (exec_path, prog_args) = crate::cri::spawn::child::argv_for_isolation(
                     &entrypoint_owned,
                     &args_owned,
                     &rootfs_owned,
                     isolation,
                 );
-                Self::execvpe_container(
+                crate::cri::spawn::child::execvpe_container(
                     &exec_path,
                     &prog_args,
                     &env_owned,

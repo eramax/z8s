@@ -58,22 +58,3 @@ impl SpawnPipeline {
     }
 }
 
-/// Final step: fork + net + cgroup (current monolithic implementation).
-struct LegacyForkStep;
-
-#[async_trait]
-impl SpawnStep for LegacyForkStep {
-    async fn apply(
-        &self,
-        _supervisor: &ProcessSupervisor,
-        _state: &mut SpawnState<'_>,
-    ) -> Result<()> {
-        Ok(())
-    }
-}
-
-impl SpawnPipeline {
-    pub fn with_legacy_fork(self) -> Self {
-        self.push_step(Box::new(LegacyForkStep))
-    }
-}
