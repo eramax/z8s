@@ -3,6 +3,7 @@ pub mod cgroup;
 pub mod spawn;
 pub mod exec;
 pub mod exec_query;
+pub mod exec_protocol;
 pub mod health;
 pub mod probe_runner;
 pub mod image;

@@ -4,6 +4,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use super::context::ContainerSpawnCtx;
+use super::pipes::StdPipes;
 use crate::cri::runtime::{ProcessSupervisor, RunningContainer};
 
 /// Mutable state accumulated across spawn steps (extended as steps migrate).
@@ -11,6 +12,8 @@ pub struct SpawnState<'a> {
     pub ctx: ContainerSpawnCtx<'a>,
     /// Filled by [`super::steps::MergeEnvStep`].
     pub merged_env: Option<Vec<(String, String)>>,
+    /// Filled by [`super::steps::CreatePipesStep`].
+    pub pipes: Option<StdPipes>,
 }
 
 impl<'a> SpawnState<'a> {
@@ -18,6 +21,7 @@ impl<'a> SpawnState<'a> {
         Self {
             ctx,
             merged_env: None,
+            pipes: None,
         }
     }
 }

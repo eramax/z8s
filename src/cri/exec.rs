@@ -1,6 +1,6 @@
 use crate::api::server::AppState;
 use crate::cri::rootfs;
-use axum::extract::ws::{CloseFrame, Message, WebSocket};
+use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Path, State, WebSocketUpgrade};
 use axum::http::StatusCode;
 use axum::http::request::Parts;
@@ -114,12 +114,11 @@ pub async fn exec_handler(
     let isolated_net = info.as_ref().map(|i| i.isolated_net).unwrap_or(false);
     let run_as_user = info.as_ref().and_then(|i| i.run_as_user);
     let run_as_group = info.as_ref().and_then(|i| i.run_as_group);
-    ws.protocols([
-        "v5.channel.k8s.io",
-        "v4.channel.k8s.io",
-        "v3.channel.k8s.io",
-        "channel.k8s.io",
-    ])
+    ws.protocols(
+        crate::cri::exec_protocol::K8S_EXEC_PROTOCOLS
+            .iter()
+            .copied(),
+    )
     .on_upgrade(move |socket| {
         exec_ws(
             socket,
@@ -599,25 +598,11 @@ async fn exec_ws(
     }
 }
 
-fn error_frame(msg: &str) -> Message {
-    let status_json = serde_json::json!({
-        "kind": "Status", "apiVersion": "v1", "metadata": {},
-        "status": "Failure", "message": msg, "code": 500
-    });
-    let mut frame = vec![3u8];
-    frame.extend_from_slice(
-        serde_json::to_string(&status_json)
-            .unwrap_or_default()
-            .as_bytes(),
-    );
-    Message::Binary(axum::body::Bytes::from(frame))
-}
-
 async fn send_error_and_close(
     ws_tx: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     msg: &str,
 ) {
-    send_exit_status_msg(ws_tx, 1, Some(msg)).await;
+    crate::cri::exec_protocol::send_exit_status_msg(ws_tx, 1, Some(msg)).await;
 }
 
 async fn exec_ws_tty(
@@ -672,8 +657,10 @@ async fn exec_ws_tty(
                 }) {
                     Ok(Ok(0)) => break,
                     Ok(Ok(n)) => {
-                        let mut frame = vec![1u8];
-                        frame.extend_from_slice(&read_buf[..n]);
+                        let frame = crate::cri::exec_protocol::encode_frame(
+                            crate::cri::exec_protocol::CHANNEL_STDOUT,
+                            &read_buf[..n],
+                        );
                         if ws_tx.send(Message::Binary(axum::body::Bytes::from(frame))).await.is_err() {
                             break;
                         }
@@ -731,7 +718,7 @@ async fn exec_ws_tty(
     }
 
     let exit_code = child.wait().await.ok().and_then(|s| s.code()).unwrap_or(0);
-    send_exit_status(&mut ws_tx, exit_code).await;
+    crate::cri::exec_protocol::send_exit_status(&mut ws_tx, exit_code).await;
 }
 
 async fn exec_ws_pipes(
@@ -802,8 +789,10 @@ async fn exec_ws_pipes(
                 match stdout.read(&mut buf).await {
                     Ok(0) => break,
                     Ok(n) => {
-                        let mut frame = vec![1u8];
-                        frame.extend_from_slice(&buf[..n]);
+                        let frame = crate::cri::exec_protocol::encode_frame(
+                            crate::cri::exec_protocol::CHANNEL_STDOUT,
+                            &buf[..n],
+                        );
                         if out_tx
                             .send(Message::Binary(axum::body::Bytes::from(frame)))
                             .await
@@ -827,8 +816,10 @@ async fn exec_ws_pipes(
                 match stderr.read(&mut buf).await {
                     Ok(0) => break,
                     Ok(n) => {
-                        let mut frame = vec![2u8];
-                        frame.extend_from_slice(&buf[..n]);
+                        let frame = crate::cri::exec_protocol::encode_frame(
+                            crate::cri::exec_protocol::CHANNEL_STDERR,
+                            &buf[..n],
+                        );
                         if out_tx
                             .send(Message::Binary(axum::body::Bytes::from(frame)))
                             .await
@@ -923,46 +914,5 @@ async fn exec_ws_pipes(
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), forwarder).await;
 
     let mut tx = ws_tx.lock().await;
-    send_exit_status(&mut tx, exit_code).await;
-}
-
-async fn send_exit_status(
-    ws_tx: &mut futures_util::stream::SplitSink<WebSocket, Message>,
-    exit_code: i32,
-) {
-    send_exit_status_msg(ws_tx, exit_code, None).await;
-}
-
-async fn send_exit_status_msg(
-    ws_tx: &mut futures_util::stream::SplitSink<WebSocket, Message>,
-    exit_code: i32,
-    message: Option<&str>,
-) {
-    let (status_str, message) = if let Some(msg) = message {
-        ("Failure", msg.to_string())
-    } else if exit_code == 0 {
-        ("Success", "command exited with code 0".to_string())
-    } else {
-        ("Failure", format!("command exited with code {}", exit_code))
-    };
-    let status_json = serde_json::json!({
-        "kind": "Status", "apiVersion": "v1", "metadata": {},
-        "status": status_str, "message": message,
-        "details": { "exitCode": exit_code }
-    });
-    let mut frame = vec![3u8];
-    frame.extend_from_slice(
-        serde_json::to_string(&status_json)
-            .unwrap_or_default()
-            .as_bytes(),
-    );
-    let _ = ws_tx
-        .send(Message::Binary(axum::body::Bytes::from(frame)))
-        .await;
-    let _ = ws_tx
-        .send(Message::Close(Some(CloseFrame {
-            code: 1000,
-            reason: Default::default(),
-        })))
-        .await;
+    crate::cri::exec_protocol::send_exit_status(&mut tx, exit_code).await;
 }

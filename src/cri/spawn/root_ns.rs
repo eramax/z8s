@@ -5,7 +5,7 @@ use tracing::{error, warn};
 
 use super::context::ContainerSpawnCtx;
 use super::pipeline::SpawnState;
-use super::{StdPipes, create_std_pipes};
+use super::StdPipes;
 use crate::cri::rootfs;
 use crate::cri::runtime::{ProcessSupervisor, RunningContainer};
 
@@ -35,7 +35,6 @@ impl ProcessSupervisor {
             subnet,
         } = state.ctx;
         let env_owned = state.merged_env.unwrap_or_else(|| Self::merge_env(env_vars, rootfs_path));
-        let pipes = create_std_pipes()?;
         let StdPipes {
             stdout_r,
             stdout_w,
@@ -45,7 +44,9 @@ impl ProcessSupervisor {
             sync_w,
             ack_r,
             ack_w,
-        } = pipes;
+        } = state
+            .pipes
+            .expect("CreatePipesStep must run before fork");
         let (gc_pid_r, gc_pid_w) =
             nix::unistd::pipe().context("Failed to create grandchild PID pipe")?;
         let rootfs_owned = rootfs_path.to_string();

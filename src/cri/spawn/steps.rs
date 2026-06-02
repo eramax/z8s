@@ -5,6 +5,7 @@ use async_trait::async_trait;
 
 use super::context::ContainerSpawnCtx;
 use super::pipeline::{SpawnState, SpawnStep};
+use super::pipes::create_std_pipes;
 use crate::cri::rootfs;
 use crate::cri::runtime::ProcessSupervisor;
 
@@ -45,6 +46,20 @@ impl SpawnStep for MergeEnvStep {
     }
 }
 
+struct CreatePipesStep;
+
+#[async_trait]
+impl SpawnStep for CreatePipesStep {
+    async fn apply(
+        &self,
+        _supervisor: &ProcessSupervisor,
+        state: &mut SpawnState<'_>,
+    ) -> Result<()> {
+        state.pipes = Some(create_std_pipes()?);
+        Ok(())
+    }
+}
+
 struct PrepareRootfsStep;
 
 #[async_trait]
@@ -65,5 +80,6 @@ impl super::pipeline::SpawnPipeline {
             .push_step(Box::new(PrepareVolumesStep))
             .push_step(Box::new(PrepareRootfsStep))
             .push_step(Box::new(MergeEnvStep))
+            .push_step(Box::new(CreatePipesStep))
     }
 }
