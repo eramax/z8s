@@ -29,61 +29,7 @@ fn raise_nproc_limit() {
     }
 }
 
-struct StdPipes {
-    stdout_r: std::os::fd::OwnedFd,
-    stdout_w: std::os::fd::OwnedFd,
-    stderr_r: std::os::fd::OwnedFd,
-    stderr_w: std::os::fd::OwnedFd,
-    sync_r: std::os::fd::OwnedFd,
-    sync_w: std::os::fd::OwnedFd,
-    ack_r: std::os::fd::OwnedFd,
-    ack_w: std::os::fd::OwnedFd,
-}
-
-fn create_std_pipes() -> anyhow::Result<StdPipes> {
-    let p1 = nix::unistd::pipe().context("stdout pipe")?;
-    let p2 = nix::unistd::pipe().context("stderr pipe")?;
-    let p3 = nix::unistd::pipe().context("sync pipe")?;
-    let p4 = nix::unistd::pipe().context("ack pipe")?;
-    Ok(StdPipes {
-        stdout_r: p1.0,
-        stdout_w: p1.1,
-        stderr_r: p2.0,
-        stderr_w: p2.1,
-        sync_r: p3.0,
-        sync_w: p3.1,
-        ack_r: p4.0,
-        ack_w: p4.1,
-    })
-}
-
-/// Isolation strategy for container spawn.
-enum IsolationStrategy {
-    /// Root mode: double-fork with PID namespace, pivot_root
-    RootNs,
-    /// Non-root: user namespace + chroot
-    UserNs,
-}
-
-struct ContainerSpawnCtx<'a> {
-    entrypoint: &'a str,
-    cmd_args: &'a [String],
-    env_vars: &'a [(String, String)],
-    rootfs_path: &'a str,
-    container_id: &'a str,
-    pod_uid: &'a str,
-    image: &'a str,
-    container_name: &'a str,
-    volumes: Vec<crate::cri::volumes::ResolvedVolume>,
-    run_as_user: Option<u32>,
-    run_as_group: Option<u32>,
-    isolate_net: bool,
-    privileged: bool,
-    extra_caps: Vec<String>,
-    working_dir: Option<String>,
-    probes: Vec<ProbeConfig>,
-    subnet: Option<String>,
-}
+use crate::cri::spawn::{ContainerSpawnCtx, SpawnPipeline, SpawnState, StdPipes, create_std_pipes};
 
 #[derive(Debug, Clone)]
 pub struct ContainerInstance {
@@ -230,11 +176,10 @@ impl ProcessSupervisor {
                 probes: cfg.probes.clone(),
                 subnet,
             };
-            if rootfs::is_root() {
-                return self.spawn_root_ns_container(ctx).await;
-            } else {
-                return self.spawn_userns_container(ctx).await;
-            }
+            let pipeline = SpawnPipeline::legacy_isolated().with_legacy_fork();
+            return pipeline
+                .finish_isolated(self, SpawnState::new(ctx))
+                .await;
         };
 
         child_cmd
@@ -726,7 +671,7 @@ impl ProcessSupervisor {
         }
     }
 
-    async fn spawn_root_ns_container(
+    pub(crate) async fn spawn_root_ns_container(
         &self,
         ctx: ContainerSpawnCtx<'_>,
     ) -> Result<RunningContainer> {
@@ -995,7 +940,10 @@ impl ProcessSupervisor {
         }
     }
 
-    async fn spawn_userns_container(&self, ctx: ContainerSpawnCtx<'_>) -> Result<RunningContainer> {
+    pub(crate) async fn spawn_userns_container(
+        &self,
+        ctx: ContainerSpawnCtx<'_>,
+    ) -> Result<RunningContainer> {
         let ContainerSpawnCtx {
             entrypoint,
             cmd_args,

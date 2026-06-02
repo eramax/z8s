@@ -148,6 +148,19 @@ async fn node_load_snapshot(
     result
 }
 
+fn pick_least_loaded(node_loads: &[(String, u32)]) -> Option<&str> {
+    node_loads
+        .iter()
+        .min_by_key(|(_, count)| *count)
+        .map(|(name, _)| name.as_str())
+}
+
+fn increment_node_load(node_loads: &mut [(String, u32)], node: &str) {
+    if let Some((_, count)) = node_loads.iter_mut().find(|(n, _)| n == node) {
+        *count += 1;
+    }
+}
+
 pub async fn scheduler_tick(
     store: &Arc<dyn StoreBackend>,
     db: &Arc<crate::store::RedbBackend>,
@@ -181,7 +194,10 @@ pub async fn scheduler_tick(
             if p.assigned_node.is_some() {
                 continue;
             }
-            let node = node_loads[0].0.clone();
+            let node = match pick_least_loaded(&node_loads) {
+                Some(n) => n.to_string(),
+                None => continue,
+            };
             if let Some(vol) = vol.as_ref() {
                 if let Err(e) =
                     crate::scheduler::assign::provision_wait_for_first_consumer(
@@ -203,9 +219,7 @@ pub async fn scheduler_tick(
             match store.apply(AnyResource::Pod(pod.clone())).await {
                 Ok(()) => {
                     tracing::info!("Assigned {} -> {}", t.resource.name(), node);
-                    // Update local load counter so next pod sees the correct balance
-                    node_loads[0].1 += 1;
-                    node_loads.sort_by_key(|(_, c)| *c);
+                    increment_node_load(&mut node_loads, &node);
                     to_broadcast.push(AnyResource::Pod(pod));
                     total += 1;
                 }
@@ -228,13 +242,15 @@ pub async fn scheduler_tick(
                 if node_loads.is_empty() {
                     continue;
                 }
-                let node = node_loads[0].0.clone();
+                let node = match pick_least_loaded(&node_loads) {
+                    Some(n) => n.to_string(),
+                    None => continue,
+                };
                 let mut pod = p.clone();
                 pod.assigned_node = Some(node.clone());
                 pod.scheduler_epoch = lease.epoch;
                 if store.apply(AnyResource::Pod(pod.clone())).await.is_ok() {
-                    node_loads[0].1 += 1;
-                    node_loads.sort_by_key(|(_, c)| *c);
+                    increment_node_load(&mut node_loads, &node);
                     info!("Re-assigned {} from dead {} -> {}", t.resource.name(), assigned, node);
                     to_broadcast.push(AnyResource::Pod(pod));
                     total += 1;
@@ -259,6 +275,24 @@ pub async fn scheduler_tick(
     }
 
     total
+}
+
+#[cfg(test)]
+mod load_tests {
+    use super::{increment_node_load, pick_least_loaded};
+
+    #[test]
+    fn pick_least_loaded_without_full_sort() {
+        let loads = vec![
+            ("b".to_string(), 3),
+            ("a".to_string(), 1),
+            ("c".to_string(), 2),
+        ];
+        assert_eq!(pick_least_loaded(&loads), Some("a"));
+        let mut mut_loads = loads;
+        increment_node_load(&mut mut_loads, "a");
+        assert_eq!(pick_least_loaded(&mut_loads), Some("a"));
+    }
 }
 
 pub async fn run_scheduler(

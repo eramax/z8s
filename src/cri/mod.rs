@@ -1,4 +1,5 @@
 pub mod cgroup;
+pub mod spawn;
 pub mod exec;
 pub mod health;
 pub mod image;
