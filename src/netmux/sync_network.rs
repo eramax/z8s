@@ -1,12 +1,13 @@
-//! Scheduler-only network reconcile (O3) — single entry for service DNAT + policy objects.
+//! Scheduler-only network reconcile (O3) — single entry; applies `NetworkPlanner` output.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
-use crate::netmux::planner::{NetworkPlanner, PlannedDnat};
+use crate::netmux::planner::{NetworkPlanner, PlannedDnat, PlannedNetwork};
+use crate::netmux::reconciler::ReconcileReport;
 use crate::netmux::NetMux;
 use crate::scheduler::process::ProcessTracker;
 use crate::store::{AnyResource, StoreBackend, StoreSnapshot};
@@ -19,28 +20,63 @@ pub async fn reconcile_network(
     store: &Arc<dyn StoreBackend>,
     process_tracker: &Arc<ProcessTracker>,
 ) {
-    let plan = NetworkPlanner::new(crate::config::get().node_name.clone()).plan(snap);
+    let plan = NetworkPlanner::new(crate::config::get().node_name.clone())
+        .with_gateway(netmux.gateway())
+        .plan(snap);
+
+    let mut report = ReconcileReport {
+        dnat_rules: plan.dnat_rules.len(),
+        dns_records: plan.dns_records.len(),
+        nsg_rules: plan.nsg_rules.len(),
+        network_policies: plan.network_policies.len(),
+        remote_routes: plan.remote_routes.len(),
+    };
+
     debug!(
-        "SyncNetwork: {} local pods, {} services, {} planned DNAT rules",
+        "SyncNetwork: {} local pods, {} services, dnat={} dns={} nsg={} np={} routes={}",
         plan.local_pod_count,
         plan.service_count,
-        plan.dnat_rules.len()
+        report.dnat_rules,
+        report.dns_records,
+        report.nsg_rules,
+        report.network_policies,
+        report.remote_routes,
     );
 
+    apply_subnets(snap, netmux);
+    apply_vnets(snap, netmux).await;
+    apply_planned_nsg(netmux, &plan).await;
+    apply_route_tables(snap, netmux).await;
+    apply_ingress(snap, netmux);
+    apply_planned_network_policies(snap, netmux, &plan).await;
+
+    for dnat in &plan.dnat_rules {
+        apply_planned_dnat(dnat, snap, netmux, store, process_tracker).await;
+    }
+
+    apply_planned_dns(netmux, &plan);
+    apply_planned_remote_routes(&plan);
+
+    debug!("SyncNetwork done: {:?}", report);
+}
+
+fn apply_subnets(snap: &StoreSnapshot, netmux: &Arc<NetMux>) {
     for t in snap.by_kind("Subnet") {
         if let AnyResource::Subnet(subnet) = &t.resource {
             let name = subnet.metadata.name.as_deref().unwrap_or("unknown");
             if let Err(e) = netmux.register_subnet_cidr(name, &subnet.spec.cidr) {
-                tracing::warn!("SyncNetwork: subnet {}: {}", name, e);
+                warn!("SyncNetwork: subnet {}: {}", name, e);
             }
         }
     }
+}
 
+async fn apply_vnets(snap: &StoreSnapshot, netmux: &Arc<NetMux>) {
     for t in snap.by_kind("VNet") {
         if let AnyResource::VNet(vnet) = &t.resource {
             let cidr = vnet.spec.cidr.as_deref().unwrap_or("10.42.0.0/20");
             if let Err(e) = netmux.apply_vnet(vnet, cidr).await {
-                tracing::warn!("SyncNetwork: vnet: {}", e);
+                warn!("SyncNetwork: vnet: {}", e);
             }
             if vnet.spec.internet_access {
                 if let Err(e) = netmux
@@ -48,61 +84,88 @@ pub async fn reconcile_network(
                     .add_snat(vnet.metadata.name.as_deref().unwrap_or("vnet"), cidr)
                     .await
                 {
-                    tracing::warn!("SyncNetwork: snat: {}", e);
+                    warn!("SyncNetwork: snat: {}", e);
                 }
             }
         }
     }
+}
 
-    for t in snap.by_kind("NSG") {
-        if let AnyResource::Nsg(nsg) = &t.resource {
-            if let Err(e) = netmux.apply_nsg(nsg).await {
-                tracing::warn!("SyncNetwork: nsg: {}", e);
-            }
-        }
+async fn apply_planned_nsg(netmux: &Arc<NetMux>, plan: &PlannedNetwork) {
+    if plan.nsg_rules.is_empty() {
+        return;
     }
+    if let Err(e) = netmux.apply_nsg_rules(&plan.nsg_rules).await {
+        warn!("SyncNetwork: nsg: {}", e);
+    }
+}
 
+async fn apply_route_tables(snap: &StoreSnapshot, netmux: &Arc<NetMux>) {
     for t in snap.by_kind("RouteTable") {
         if let AnyResource::RouteTable(rt) = &t.resource {
             let name = rt.metadata.name.as_deref().unwrap_or("unknown");
             if let Err(e) = netmux.apply_route_table_rules(name, &[]).await {
-                tracing::warn!("SyncNetwork: routetable: {}", e);
+                warn!("SyncNetwork: routetable: {}", e);
             }
         }
     }
+}
 
+fn apply_ingress(snap: &StoreSnapshot, netmux: &Arc<NetMux>) {
     for t in snap.by_kind("Ingress") {
         if let AnyResource::Ingress(ing) = &t.resource {
             if let Err(e) = crate::netmux::ingress::apply_ingress(&netmux.ingress_state, ing) {
-                tracing::warn!("SyncNetwork: ingress: {}", e);
+                warn!("SyncNetwork: ingress: {}", e);
             }
-            let gw = netmux.gateway;
-            if let Some(spec) = &ing.spec {
-                if let Some(rules) = &spec.rules {
-                    let mut records = netmux.dns_records.write().unwrap_or_else(|e| e.into_inner());
-                    for rule in rules {
-                        if let Some(host) = &rule.host {
-                            if !host.is_empty() {
-                                records.insert(host.clone(), gw);
-                            }
-                        }
+        }
+    }
+}
+
+async fn apply_planned_network_policies(
+    snap: &StoreSnapshot,
+    netmux: &Arc<NetMux>,
+    plan: &PlannedNetwork,
+) {
+    let npc = crate::netmux::np_controller::NetworkPolicyController::new(netmux.clone());
+    for np_ref in &plan.network_policies {
+        for t in snap.by_kind("NetworkPolicy") {
+            if let AnyResource::NetworkPolicy(np) = &t.resource {
+                let ns = np.metadata.namespace.as_deref().unwrap_or("default");
+                let name = np.metadata.name.as_deref().unwrap_or("");
+                if ns == np_ref.namespace && name == np_ref.name {
+                    if let Err(e) = npc.apply_network_policy(np).await {
+                        warn!("SyncNetwork: networkpolicy {}/{}: {}", ns, name, e);
                     }
                 }
             }
         }
     }
+}
 
-    for t in snap.by_kind("NetworkPolicy") {
-        if let AnyResource::NetworkPolicy(np) = &t.resource {
-            let npc = crate::netmux::np_controller::NetworkPolicyController::new(netmux.clone());
-            if let Err(e) = npc.apply_network_policy(np).await {
-                tracing::warn!("SyncNetwork: networkpolicy: {}", e);
-            }
-        }
+fn apply_planned_dns(netmux: &Arc<NetMux>, plan: &PlannedNetwork) {
+    let mut records: HashMap<String, Ipv4Addr> = HashMap::new();
+    for r in &plan.dns_records {
+        records.insert(r.hostname.clone(), r.ip);
     }
+    let mut guard = netmux.dns_records.write().unwrap_or_else(|e| e.into_inner());
+    *guard = records;
+}
 
-    for dnat in &plan.dnat_rules {
-        apply_planned_dnat(dnat, snap, netmux, store, process_tracker).await;
+fn apply_planned_remote_routes(plan: &PlannedNetwork) {
+    for route in &plan.remote_routes {
+        if let Err(e) =
+            crate::netmux::netlink::add_route(&route.pod_ip, 32, Some(&route.via), None)
+        {
+            debug!(
+                "SyncNetwork: remote route {} via {} (node {}): {}",
+                route.pod_ip, route.via, route.remote_node, e
+            );
+        } else {
+            debug!(
+                "SyncNetwork: remote route {}/32 via {} for node {}",
+                route.pod_ip, route.via, route.remote_node
+            );
+        }
     }
 }
 
@@ -142,20 +205,12 @@ async fn apply_planned_dnat(
     }
 
     if let Some(cip) = dnat.cluster_ip {
-        if !dnat.is_nodeport {
-            if let Err(e) = netmux
-                .nft
-                .add_dnat(cip, dnat.listen_port, &backends)
-                .await
-            {
-                tracing::error!("SyncNetwork: add_dnat {}: {:?}", key, e);
-            }
-        } else if let Err(e) = netmux
+        if let Err(e) = netmux
             .nft
             .add_dnat(cip, dnat.listen_port, &backends)
             .await
         {
-            tracing::error!("SyncNetwork: add_dnat (nodeport svc) {}: {:?}", key, e);
+            tracing::error!("SyncNetwork: add_dnat {}: {:?}", key, e);
         }
     }
 
@@ -265,9 +320,10 @@ pub async fn remove_service(netmux: &Arc<NetMux>, store: &Arc<dyn StoreBackend>,
                     if let Some(cip) = &spec.cluster_ip {
                         if let Ok(ip) = cip.parse::<Ipv4Addr>() {
                             for svc_port in spec.ports.as_deref().unwrap_or(&[]) {
-                                if let Err(e) = netmux.remove_service_dnat(ip, svc_port.port as u16).await
+                                if let Err(e) =
+                                    netmux.remove_service_dnat(ip, svc_port.port as u16).await
                                 {
-                                    tracing::warn!("remove_service_dnat: {}", e);
+                                    warn!("remove_service_dnat: {}", e);
                                 }
                             }
                         }

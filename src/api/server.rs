@@ -716,7 +716,6 @@ mod tests {
             Arc::new(crate::netmux::NetMux::new(&crate::config::get().pod_cidr, &crate::config::get().node_name).unwrap());
         let network = Arc::new(crate::components::network::service::NetworkManager::new(
             store.clone(),
-            process_tracker.clone(),
             test_netmux.clone(),
         ));
         let pipeline = Arc::new(crate::components::ReconciliationPipeline::builder().build());
@@ -777,7 +776,6 @@ mod tests {
             Arc::new(crate::netmux::NetMux::new(&crate::config::get().pod_cidr, &crate::config::get().node_name).unwrap());
         let network = Arc::new(crate::components::network::service::NetworkManager::new(
             store.clone(),
-            process_tracker.clone(),
             test_netmux.clone(),
         ));
         let pipeline = Arc::new(crate::components::ReconciliationPipeline::builder().build());

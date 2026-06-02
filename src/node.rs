@@ -230,11 +230,7 @@ pub async fn run_node(
         store.clone(),
     ));
 
-    let network = Arc::new(NetworkManager::new(
-        store.clone(),
-        process_tracker.clone(),
-        netmux.clone(),
-    ));
+    let network = Arc::new(NetworkManager::new(store.clone(), netmux.clone()));
 
     if let Some(port) = crate::netmux::dns::run_dns(store.clone(), netmux.dns_records.clone()).await
     {
@@ -261,10 +257,7 @@ pub async fn run_node(
     registry.register(Box::new(PodResource::new()));
     registry.register(Box::new(DeploymentResource::new(store.clone(), redb.clone())));
 
-    registry.register(Box::new(ServiceResource::new(
-        store.clone(),
-        network.clone(),
-    )));
+    registry.register(Box::new(ServiceResource::new(store.clone())));
     registry.register(Box::new(IngressResource::new(
         store.clone(),
         netmux.clone(),

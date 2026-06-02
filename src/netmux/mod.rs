@@ -1,4 +1,5 @@
 pub mod applier;
+pub mod reconciler;
 pub mod dns;
 pub mod ingress;
 pub mod ipv6;
