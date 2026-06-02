@@ -192,7 +192,7 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         .merge(crate::api::handlers::system::routes())
         .merge(crate::api::handlers::metrics::routes())
-        .merge(crate::api::catalog_routes::routes())
+        .merge(crate::api::catalog_routes::from_catalog())
         .merge(crate::api::subresource::routes())
         .merge(crate::api::handlers::apply::routes())
         .route("/ws/gossip", axum::routing::any(gossip_ws_handler))

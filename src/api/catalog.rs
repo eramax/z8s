@@ -15,6 +15,71 @@ pub struct ResourceEntry {
     pub rbac_api_group: &'static str,
 }
 
+/// Flags for generic `{plural}` compat routes under a path prefix.
+#[derive(Debug, Clone, Copy)]
+pub struct CompatMountFlags {
+    pub cluster_list: bool,
+    pub cluster_item: bool,
+    pub cluster_create: bool,
+    pub namespaced: bool,
+}
+
+/// Upstream API path prefix served by `resource_handler` + catalog dispatch.
+#[derive(Debug, Clone, Copy)]
+pub struct CompatMount {
+    pub prefix: &'static str,
+    pub flags: CompatMountFlags,
+}
+
+/// Compat URL mounts (not per-kind — plural is a path parameter).
+pub const COMPAT_MOUNTS: &[CompatMount] = &[
+    CompatMount {
+        prefix: "/api/v1",
+        flags: CompatMountFlags {
+            cluster_list: true,
+            cluster_item: true,
+            cluster_create: true,
+            namespaced: true,
+        },
+    },
+    CompatMount {
+        prefix: "/apis/z8s.io/v1",
+        flags: CompatMountFlags {
+            cluster_list: true,
+            cluster_item: true,
+            cluster_create: true,
+            namespaced: false,
+        },
+    },
+    CompatMount {
+        prefix: "/apis/apps/v1",
+        flags: CompatMountFlags {
+            cluster_list: true,
+            cluster_item: false,
+            cluster_create: false,
+            namespaced: true,
+        },
+    },
+    CompatMount {
+        prefix: "/apis/networking.k8s.io/v1",
+        flags: CompatMountFlags {
+            cluster_list: false,
+            cluster_item: false,
+            cluster_create: false,
+            namespaced: true,
+        },
+    },
+    CompatMount {
+        prefix: "/apis/discovery.k8s.io/v1",
+        flags: CompatMountFlags {
+            cluster_list: false,
+            cluster_item: false,
+            cluster_create: false,
+            namespaced: true,
+        },
+    },
+];
+
 macro_rules! entry {
     ($kind:expr, $plural:expr, $list:expr, $ns:expr, $cat:expr, $wire:expr, $rbac:expr) => {
         ResourceEntry {
@@ -391,6 +456,13 @@ mod tests {
         assert_eq!(r, "vnets");
         assert_eq!(ns, "");
         assert_eq!(name, Some("default"));
+    }
+
+    #[test]
+    fn compat_mounts_non_empty() {
+        assert!(!COMPAT_MOUNTS.is_empty());
+        assert!(COMPAT_MOUNTS.iter().any(|m| m.prefix == "/api/v1"));
+        assert!(COMPAT_MOUNTS.iter().any(|m| m.prefix == "/apis/z8s.io/v1"));
     }
 
     #[test]
