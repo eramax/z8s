@@ -170,7 +170,7 @@ pub async fn build_spec(resource: &AnyResource, store: &dyn StoreBackend) -> Con
             .annotations
             .as_ref()
             .and_then(|a| a.get("z8s.io/subnet").cloned())
-    });
+    }).or_else(|| Some("default".into()));
 
     ContainerSpec {
         pod_name,

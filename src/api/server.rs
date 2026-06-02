@@ -101,6 +101,51 @@ pub async fn build_app_state(
         info!("Creating default namespace");
         store.apply(AnyResource::Namespace(ns)).await.ok();
     }
+
+    // Ensure default VNet exists — all pods without z8s.io/vnet annotation use it
+    let vnets = store.get_by_kind("VNet").await;
+    if !vnets.iter().any(|t| t.resource.name() == "default") {
+        let vnet = crate::types::VNet {
+            api_version: "z8s.io/v1".into(),
+            kind: "VNet".into(),
+            metadata: crate::types::ObjectMeta {
+                name: Some("default".into()),
+                annotations: Some({
+                    let mut m = std::collections::BTreeMap::new();
+                    m.insert("z8s.io/default".into(), "true".into());
+                    m
+                }),
+                ..Default::default()
+            },
+            spec: crate::types::VNetSpec {
+                cidr: Some(crate::config::get().pod_cidr.clone()),
+                internet_access: true,
+                role: "hub".into(),
+            },
+            status: None,
+        };
+        info!("Creating default VNet with CIDR {}", crate::config::get().pod_cidr);
+        store.apply(AnyResource::VNet(vnet)).await.ok();
+    }
+
+    // Ensure default Subnet exists within the default VNet
+    let subnets = store.get_by_kind("Subnet").await;
+    if !subnets.iter().any(|t| t.resource.name() == "default") {
+        let subnet = crate::types::Subnet {
+            api_version: "z8s.io/v1".into(),
+            kind: "Subnet".into(),
+            metadata: crate::types::ObjectMeta {
+                name: Some("default".into()),
+                ..Default::default()
+            },
+            spec: crate::types::SubnetSpec {
+                vnet: "default".into(),
+                cidr: crate::config::get().pod_cidr.clone(),
+            },
+        };
+        info!("Creating default Subnet with CIDR {}", crate::config::get().pod_cidr);
+        store.apply(AnyResource::Subnet(subnet)).await.ok();
+    }
     AppState {
         store,
         process_tracker,
