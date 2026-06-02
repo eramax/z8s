@@ -138,6 +138,9 @@ pub async fn run_node(
     if let Err(e) = crate::storage::seed_default_storage_classes(store.as_ref()).await {
         warn!("Failed to seed StorageClasses: {}", e);
     }
+    if let Err(e) = crate::bootstrap::ensure_kubernetes_service(store.as_ref()).await {
+        warn!("Failed to bootstrap kubernetes Service: {}", e);
+    }
 
     let require_join_auth = cfg.peers.is_empty() && redb.is_some();
     if require_join_auth {

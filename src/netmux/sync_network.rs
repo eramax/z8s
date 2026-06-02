@@ -55,6 +55,7 @@ pub async fn reconcile_network(
     }
 
     apply_planned_dns(netmux, &plan);
+    apply_in_cluster_api_dnat(netmux).await;
     apply_planned_remote_routes(&plan);
 
     debug!("SyncNetwork done: {:?}", report);
@@ -149,6 +150,18 @@ fn apply_planned_dns(netmux: &Arc<NetMux>, plan: &PlannedNetwork) {
     }
     let mut guard = netmux.dns_records.write().unwrap_or_else(|e| e.into_inner());
     *guard = records;
+}
+
+async fn apply_in_cluster_api_dnat(netmux: &Arc<NetMux>) {
+    let cluster_ip = crate::bootstrap::kubernetes_cluster_ip();
+    let (backend_ip, backend_port) = crate::bootstrap::api_backend_endpoint();
+    let backends = vec![(backend_ip, backend_port)];
+    if let Err(e) = netmux.nft.add_dnat(cluster_ip, 443, &backends).await {
+        tracing::warn!(
+            "SyncNetwork: kubernetes API DNAT {}:443 -> {}:{}: {}",
+            cluster_ip, backend_ip, backend_port, e
+        );
+    }
 }
 
 fn apply_planned_remote_routes(plan: &PlannedNetwork) {

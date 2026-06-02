@@ -98,6 +98,7 @@ impl NetworkPlanner {
 
         plan_services(&mut out, &services, &local_pods);
         plan_dns_from_services(&mut out, &services, &self.cluster_domain);
+        plan_dns_in_cluster_api(&mut out, &self.cluster_domain);
         plan_dns_from_ingress(&mut out, snap, self.gateway);
         out.nsg_rules = plan_nsg_rules(snap);
         out.network_policies = plan_network_policies(snap);
@@ -186,6 +187,12 @@ fn plan_dns_from_services(out: &mut PlannedNetwork, services: &[&Service], clust
         push_dns(out, format!("{name}.{ns}.svc.{cluster_domain}"), ip);
         push_dns(out, format!("{name}.{ns}.svc"), ip);
     }
+}
+
+fn plan_dns_in_cluster_api(out: &mut PlannedNetwork, cluster_domain: &str) {
+    let ip = crate::bootstrap::kubernetes_cluster_ip();
+    push_dns(out, format!("kubernetes.default.svc.{cluster_domain}"), ip);
+    push_dns(out, "kubernetes.default.svc".to_string(), ip);
 }
 
 fn plan_dns_from_ingress(out: &mut PlannedNetwork, snap: &StoreSnapshot, gateway: Ipv4Addr) {
@@ -448,6 +455,18 @@ mod tests {
         let plan = planner.plan(&snap);
         assert!(plan.dns_records.iter().any(|r| {
             r.hostname == "web.default.svc.cluster.local" && r.ip.to_string() == "10.96.0.10"
+        }));
+    }
+
+    #[test]
+    fn planner_emits_kubernetes_api_dns() {
+        let snap = StoreSnapshot::from_trackers(vec![]);
+        let mut planner = NetworkPlanner::new("node-a");
+        planner.cluster_domain = "cluster.local".into();
+        let plan = planner.plan(&snap);
+        assert!(plan.dns_records.iter().any(|r| {
+            r.hostname == "kubernetes.default.svc.cluster.local"
+                && r.ip == crate::bootstrap::kubernetes_cluster_ip()
         }));
     }
 

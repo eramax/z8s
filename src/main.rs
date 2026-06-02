@@ -1,4 +1,5 @@
 mod api;
+mod bootstrap;
 mod components;
 mod config;
 mod cri;

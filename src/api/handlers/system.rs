@@ -351,13 +351,54 @@ pub async fn api_storage_v1_resources() -> Json<APIResourceList> {
     })
 }
 
-pub async fn self_subject_access_review(_body: axum::body::Bytes) -> Json<SelfSubjectAccessReview> {
+pub async fn self_subject_access_review(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> Json<SelfSubjectAccessReview> {
+    use crate::api::auth::{api_group_for_resource, AuthzRequest};
+    let review: SelfSubjectAccessReview = serde_json::from_slice(&body).unwrap_or_default();
+    let user = crate::api::auth::extract_user(&headers);
+
+    let mut allowed = !crate::api::auth::has_any_role_binding(state.store.as_ref()).await;
+    let mut reason = Some("no RoleBindings configured".into());
+
+    if let Some(attrs) = review
+        .spec
+        .resource_attributes
+        .as_ref()
+    {
+        let resource = attrs.resource.as_deref().unwrap_or("");
+        let namespace = attrs.namespace.as_deref().unwrap_or("default");
+        let verb = attrs.verb.as_deref().unwrap_or("get");
+        let api_group = attrs
+            .group
+            .as_deref()
+            .unwrap_or_else(|| api_group_for_resource(resource));
+        if !resource.is_empty() {
+            let req = AuthzRequest {
+                user: &user,
+                namespace,
+                resource,
+                verb,
+                api_group,
+                name: attrs.name.as_deref(),
+            };
+            allowed = crate::api::auth::authorize(state.store.as_ref(), &req).await;
+            reason = if allowed {
+                Some("allowed by RBAC policy".into())
+            } else {
+                Some("denied by RBAC policy".into())
+            };
+        }
+    }
+
     Json(SelfSubjectAccessReview {
         metadata: Some(ObjectMeta::default()),
-        spec: SelfSubjectAccessReviewSpec::default(),
+        spec: review.spec,
         status: Some(SubjectAccessReviewStatus {
-            allowed: true,
-            reason: Some("z8s grants all access".into()),
+            allowed,
+            reason,
             ..Default::default()
         }),
     })
