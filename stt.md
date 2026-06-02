@@ -56,3 +56,4 @@ z8s node start --tls-cert /tmp/z8s-cert.pem --tls-key /tmp/z8s-key.pem
 # kubectl kubeconfig (already configured)
 kubectl get pods
 
+ sudo chmod 0644 /var/lib/z8s/admin-token

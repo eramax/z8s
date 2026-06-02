@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-KUBECTL="$(command -v kubectl 2>/dev/null || echo /home/abb/.local/bin/kubectl)"
-SERVER="${Z8S_SERVER:-http://localhost:6443}"
+KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}"
 NS="hub-spokes"
 STATE_FILE="/tmp/z8s-hub-spoke-state.sh"
 DATA_DIR="${DATA_DIR:-/tmp/z8s-test-db}"
 
-k() { "$KUBECTL" --server="$SERVER" "$@" 2>&1 || true; }
-kapply() { "$KUBECTL" --validate=false --server="$SERVER" apply -f - 2>&1; }
+k() { kubectl --kubeconfig="$KUBECONFIG" "$@" 2>&1 || true; }
+kapply() { kubectl --kubeconfig="$KUBECONFIG" --validate=false apply -f - 2>&1; }
 
 wait_deploy_ready() {
     local name="$1" ns="${2:-$NS}" timeout="${3:-90}"
@@ -45,9 +44,9 @@ wait_crd_ready() {
 
 # ── Create namespace ──────────────────────────────────────────────────
 echo "Creating namespace $NS..."
-"$KUBECTL" --server="$SERVER" delete namespace "$NS" --ignore-not-found 2>&1
+kubectl --kubeconfig="$KUBECONFIG" delete namespace "$NS" --ignore-not-found 2>&1
 sleep 1
-"$KUBECTL" --server="$SERVER" create namespace "$NS" 2>&1 || { echo "Failed to create namespace $NS"; exit 1; }
+kubectl --kubeconfig="$KUBECONFIG" create namespace "$NS" 2>&1 || { echo "Failed to create namespace $NS"; exit 1; }
 sleep 1
 
 # ── 1. VNet ──────────────────────────────────────────────────────────
@@ -321,7 +320,7 @@ spec:
         ports:
         - containerPort: 8080
 EOF
-"$KUBECTL" --validate=false --server="$SERVER" apply -f /tmp/hub-deploy.yaml 2>&1
+kubectl --kubeconfig="$KUBECONFIG" --validate=false apply -f /tmp/hub-deploy.yaml 2>&1
 rm -f /tmp/hub-deploy.yaml
 
 # ── 8. Hub service + Ingress ──────────────────────────────────────────
