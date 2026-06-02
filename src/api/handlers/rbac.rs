@@ -89,6 +89,10 @@ pub async fn authorize_middleware_with_store(
         return Ok(next.run(request).await);
     }
 
+    if !crate::config::rbac_enforced() {
+        return Ok(next.run(request).await);
+    }
+
     if !auth::has_any_rbac_policy(store.as_ref()).await {
         return Ok(next.run(request).await);
     }

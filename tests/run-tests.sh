@@ -1732,8 +1732,20 @@ section "22. Version endpoint"
 out=$(curl -sf "$SERVER/version" 2>&1)
 if echo "$out" | grep -q "z8s"; then pass "version endpoint returns z8s"; else fail "version endpoint" "$out"; fi
 
-# ── 23. RBAC cluster-dashboard (R8) ───────────────────────────────────────────
-section "23. RBAC cluster-dashboard E2E"
+# ── 23. RBAC header-based (test_rbac.sh) ───────────────────────────────────────
+section "23. RBAC curl tests"
+if [[ -x "${YAML_DIR}/test_rbac.sh" ]]; then
+    if Z8S_SERVER="$SERVER" API="$SERVER" "${YAML_DIR}/test_rbac.sh"; then
+        pass "test_rbac.sh"
+    else
+        fail "test_rbac.sh" "see script output above"
+    fi
+else
+    fail "test_rbac.sh" "not executable"
+fi
+
+# ── 24. RBAC cluster-dashboard (R8) ───────────────────────────────────────────
+section "24. RBAC cluster-dashboard E2E"
 if [[ -x "${YAML_DIR}/test-rbac-cluster-dashboard.sh" ]]; then
     if Z8S_SERVER="$SERVER" "${YAML_DIR}/test-rbac-cluster-dashboard.sh"; then
         pass "test-rbac-cluster-dashboard.sh"

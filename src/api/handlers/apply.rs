@@ -22,7 +22,7 @@ pub async fn apply_handler(
 
     let user = auth::extract_user(&headers, Some(state.process_tracker.tokens.as_ref())).await;
 
-    if auth::has_any_rbac_policy(state.store.as_ref()).await {
+    if crate::config::rbac_enforced() && auth::has_any_rbac_policy(state.store.as_ref()).await {
         let denied =
             apply_auth::authorize_apply_documents(state.store.as_ref(), &user, &resources).await;
         if !denied.is_empty() {

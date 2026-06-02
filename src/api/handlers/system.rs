@@ -361,8 +361,15 @@ pub async fn self_subject_access_review(
     let user = crate::api::auth::extract_user(&headers, Some(state.process_tracker.tokens.as_ref()))
         .await;
 
-    let mut allowed = !crate::api::auth::has_any_rbac_policy(state.store.as_ref()).await;
-    let mut reason = Some("no RBAC bindings configured".into());
+    let has_policy = crate::api::auth::has_any_rbac_policy(state.store.as_ref()).await;
+    let mut allowed = !crate::config::rbac_enforced() || !has_policy;
+    let mut reason = if !crate::config::rbac_enforced() {
+        Some("rbac-mode=permissive".into())
+    } else if !has_policy {
+        Some("no RBAC bindings configured".into())
+    } else {
+        Some("no resource attributes in request".into())
+    };
 
     if let Some(attrs) = review
         .spec
@@ -377,20 +384,28 @@ pub async fn self_subject_access_review(
             .as_deref()
             .unwrap_or_else(|| api_group_for_resource(resource));
         if !resource.is_empty() {
-            let req = AuthzRequest {
-                user: &user,
-                namespace,
-                resource,
-                verb,
-                api_group,
-                name: attrs.name.as_deref(),
-            };
-            allowed = crate::api::auth::authorize(state.store.as_ref(), &req).await;
-            reason = if allowed {
-                Some("allowed by RBAC policy".into())
+            if !crate::config::rbac_enforced() {
+                allowed = true;
+                reason = Some("rbac-mode=permissive".into());
+            } else if !has_policy {
+                allowed = true;
+                reason = Some("no RBAC bindings configured".into());
             } else {
-                Some("denied by RBAC policy".into())
-            };
+                let req = AuthzRequest {
+                    user: &user,
+                    namespace,
+                    resource,
+                    verb,
+                    api_group,
+                    name: attrs.name.as_deref(),
+                };
+                allowed = crate::api::auth::authorize(state.store.as_ref(), &req).await;
+                reason = if allowed {
+                    Some("allowed by RBAC policy".into())
+                } else {
+                    Some("denied by RBAC policy".into())
+                };
+            }
         }
     }
 

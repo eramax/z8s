@@ -30,6 +30,31 @@ pub fn is_scheduler_leader() -> bool {
     IS_SCHEDULER_LEADER.load(Ordering::Relaxed)
 }
 
+/// How API RBAC is applied when RoleBindings / ClusterRoleBindings exist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RbacMode {
+    /// Enforce policy (deny unless a rule allows).
+    #[default]
+    Enforce,
+    /// Log-friendly dev mode: bindings exist but all API calls are allowed.
+    Permissive,
+}
+
+impl RbacMode {
+    fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "enforce" | "strict" => Some(Self::Enforce),
+            "permissive" | "open" => Some(Self::Permissive),
+            _ => None,
+        }
+    }
+}
+
+/// When false, RBAC middleware and apply checks allow all requests.
+pub fn rbac_enforced() -> bool {
+    get().rbac_mode == RbacMode::Enforce
+}
+
 pub struct Config {
     pub api_port: u16,
     pub service_cidr_base: [u8; 4],
@@ -45,6 +70,7 @@ pub struct Config {
     pub node_ip: String,
     pub peers: Vec<(String, String)>,
     pub join_token: Option<String>,
+    pub rbac_mode: RbacMode,
 }
 
 impl Config {
@@ -94,6 +120,7 @@ impl Config {
             node_ip: auto_detect_node_ip().unwrap_or_else(|| "127.0.0.1".to_string()),
             peers: Vec::new(),
             join_token: None,
+            rbac_mode: RbacMode::Enforce,
         }
     }
 
@@ -202,6 +229,18 @@ impl Config {
                     i += 1;
                     if let Some(v) = args.get(i) {
                         cfg.join_token = Some(v.to_string());
+                    }
+                }
+                "--rbac-mode" => {
+                    i += 1;
+                    if let Some(v) = args.get(i) {
+                        cfg.rbac_mode = RbacMode::parse(v).unwrap_or_else(|| {
+                            eprintln!(
+                                "Invalid --rbac-mode (use enforce or permissive): {}",
+                                v
+                            );
+                            std::process::exit(1);
+                        });
                     }
                 }
                 "--vnet-cidr-size" => {
@@ -372,6 +411,7 @@ OPTIONS:
     --db-path <PATH>          Exact path to database file   [default: <data-dir>/z8s.redb]
     --peers <NAME=IP,...>     Other server nodes for gossip  [default: none]
     --join-token <TOKEN>      Token for worker node auth    [default: none]
+    --rbac-mode <MODE>        RBAC enforcement: enforce|permissive [default: enforce]
     --help                    Show this help
 
 EXAMPLES:

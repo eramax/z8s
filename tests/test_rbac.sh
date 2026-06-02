@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # test_rbac.sh — Test RBAC for pod-to-cluster API access
 # Demonstrates: a pod's service account can only do what its Role allows.
-# Requires: z8s running, kubectl configured
+# Requires: z8s running, k configured
 set -euo pipefail
 
-API="http://127.0.0.1:6443"
+API="${Z8S_SERVER:-${API:-http://127.0.0.1:6443}}"
+KUBECTL="${KUBECTL:-kubectl}"
+k() { "$KUBECTL" --server="$API" "$@"; }
 PASS=0; FAIL=0; SKIP=0
 
 pass() { echo "  PASS: $1"; ((PASS++)); }
@@ -13,9 +15,9 @@ skip() { echo "  SKIP: $1 — $2"; ((SKIP++)); }
 
 cleanup() {
     echo "Cleaning up..."
-    kubectl delete rolebinding viewer-binding deploy-bot-binding -n default --ignore-not-found 2>/dev/null || true
-    kubectl delete role pod-viewer pod-manager -n default --ignore-not-found 2>/dev/null || true
-    kubectl delete pod rbac-test-pod rbac-test-pod-2 -n default --ignore-not-found 2>/dev/null || true
+    k delete rolebinding viewer-binding deploy-bot-binding -n default --ignore-not-found 2>/dev/null || true
+    k delete role pod-viewer pod-manager -n default --ignore-not-found 2>/dev/null || true
+    k delete pod rbac-test-pod rbac-test-pod-2 -n default --ignore-not-found 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -24,7 +26,7 @@ echo ""
 
 # ── Setup: Create a test pod ──────────────────────────────────────
 echo "Setup: Create test pod 'rbac-test-pod'"
-kubectl apply -n default -f - <<'EOF' >/dev/null 2>&1
+k apply -n default -f - <<'EOF' >/dev/null 2>&1
 apiVersion: v1
 kind: Pod
 metadata:
@@ -37,7 +39,7 @@ spec:
       command: ["sleep", "3600"]
 EOF
 sleep 1
-if kubectl get pod rbac-test-pod -n default >/dev/null 2>&1; then
+if k get pod rbac-test-pod -n default >/dev/null 2>&1; then
     pass "Test pod created"
 else
     fail "Test pod creation" "pod not found"
@@ -46,7 +48,7 @@ fi
 # ── 1. Create a Role: pod-viewer can only get/list/watch pods ────
 echo ""
 echo "1. Create Role 'pod-viewer' (read-only pods)"
-kubectl apply -n default -f - <<'EOF'
+k apply -n default -f - <<'EOF'
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -57,7 +59,7 @@ rules:
     resources: ["pods"]
     verbs: ["get", "list", "watch"]
 EOF
-if kubectl get role pod-viewer -n default >/dev/null 2>&1; then
+if k get role pod-viewer -n default >/dev/null 2>&1; then
     pass "Role 'pod-viewer' created"
 else
     fail "Role creation" ""
@@ -66,7 +68,7 @@ fi
 # ── 2. Create a RoleBinding: deploy-bot SA → pod-viewer role ────
 echo ""
 echo "2. Create RoleBinding: deploy-bot SA → pod-viewer"
-kubectl apply -n default -f - <<'EOF'
+k apply -n default -f - <<'EOF'
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
@@ -81,7 +83,7 @@ roleRef:
   kind: Role
   name: pod-viewer
 EOF
-if kubectl get rolebinding viewer-binding -n default >/dev/null 2>&1; then
+if k get rolebinding viewer-binding -n default >/dev/null 2>&1; then
     pass "RoleBinding created"
 else
     fail "RoleBinding creation" ""
@@ -157,7 +159,7 @@ fi
 # ── 9. Create a more powerful role: pod-manager ─────────────────
 echo ""
 echo "9. Create Role 'pod-manager' (full CRUD on pods)"
-kubectl apply -n default -f - <<'EOF'
+k apply -n default -f - <<'EOF'
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -168,7 +170,7 @@ rules:
     resources: ["pods"]
     verbs: ["get", "list", "watch", "create", "update", "delete"]
 EOF
-if kubectl get role pod-manager -n default >/dev/null 2>&1; then
+if k get role pod-manager -n default >/dev/null 2>&1; then
     pass "Role 'pod-manager' created"
 else
     fail "Role creation" ""
@@ -177,7 +179,7 @@ fi
 # ── 10. Bind deploy-bot to pod-manager too ──────────────────────
 echo ""
 echo "10. Bind deploy-bot SA → pod-manager (upgrade permissions)"
-kubectl apply -n default -f - <<'EOF'
+k apply -n default -f - <<'EOF'
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
@@ -192,7 +194,7 @@ roleRef:
   kind: Role
   name: pod-manager
 EOF
-if kubectl get rolebinding deploy-bot-binding -n default >/dev/null 2>&1; then
+if k get rolebinding deploy-bot-binding -n default >/dev/null 2>&1; then
     pass "RoleBinding created (deploy-bot → pod-manager)"
 else
     fail "RoleBinding creation" ""
@@ -226,7 +228,7 @@ fi
 # ── 13. Test: deploy-bot SA still cannot touch services ─────────
 echo ""
 echo "13. deploy-bot SA cannot DELETE services (not in any Role)"
-kubectl apply -n default -f - <<'EOF' >/dev/null 2>&1
+k apply -n default -f - <<'EOF' >/dev/null 2>&1
 apiVersion: v1
 kind: Service
 metadata:
@@ -246,12 +248,12 @@ if [ "$RESP" = "403" ]; then
 else
     fail "DELETE services" "HTTP $RESP (expected 403)"
 fi
-kubectl delete service rbac-test-svc -n default --ignore-not-found 2>/dev/null || true
+k delete service rbac-test-svc -n default --ignore-not-found 2>/dev/null || true
 
 # ── 14. Verify: remove the viewer binding, deploy-bot loses read access
 echo ""
 echo "14. Remove viewer-binding → deploy-bot loses read access to pods"
-kubectl delete rolebinding viewer-binding -n default >/dev/null 2>&1
+k delete rolebinding viewer-binding -n default >/dev/null 2>&1
 # deploy-bot still has pod-manager binding, so should still have access
 RESP=$(curl -s -o /dev/null -w "%{http_code}" -H "X-Remote-User: system:serviceaccount:default:deploy-bot" \
     "$API/api/v1/namespaces/default/pods")
@@ -264,7 +266,7 @@ fi
 # ── 15. Remove pod-manager binding too → deploy-bot loses all access
 echo ""
 echo "15. Remove deploy-bot-binding → deploy-bot loses ALL pod access"
-kubectl delete rolebinding deploy-bot-binding -n default >/dev/null 2>&1
+k delete rolebinding deploy-bot-binding -n default >/dev/null 2>&1
 RESP=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE -H "X-Remote-User: system:serviceaccount:default:deploy-bot" \
     "$API/api/v1/namespaces/default/pods/rbac-test-pod")
 if [ "$RESP" = "403" ]; then

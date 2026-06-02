@@ -144,6 +144,14 @@ pub async fn run_node(
     if let Err(e) = crate::bootstrap::ensure_default_service_account(store.as_ref()).await {
         warn!("Failed to bootstrap default ServiceAccount: {}", e);
     }
+    if let Err(e) = crate::bootstrap::ensure_bootstrap_rbac(store.as_ref()).await {
+        warn!("Failed to bootstrap RBAC roles: {}", e);
+    }
+    if cfg.rbac_mode == crate::config::RbacMode::Permissive {
+        warn!(
+            "RBAC mode permissive: RoleBindings present but API requests are not denied"
+        );
+    }
 
     let require_join_auth = cfg.peers.is_empty() && redb.is_some();
     if require_join_auth {
