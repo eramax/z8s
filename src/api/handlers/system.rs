@@ -192,7 +192,12 @@ pub async fn openapi_v2(
 ) -> Result<axum::response::Response, ApiError> {
     if let Some(accept) = headers.get("accept").and_then(|v| v.to_str().ok()) {
         if accept.contains("protobuf") {
-            return Err(ApiError::not_found("openapi v2 protobuf not supported".into()));
+            return Ok((
+                StatusCode::OK,
+                [("Content-Type", "application/com.github.proto-openapi.spec.v2@v1.0+protobuf")],
+                Vec::<u8>::new(),
+            )
+                .into_response());
         }
     }
     let schema = serde_json::json!({
