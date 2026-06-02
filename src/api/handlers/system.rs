@@ -190,7 +190,11 @@ pub async fn self_subject_access_review(
 pub async fn openapi_v2(
     headers: axum::http::HeaderMap,
 ) -> Result<axum::response::Response, ApiError> {
-    let _ = headers;
+    if let Some(accept) = headers.get("accept").and_then(|v| v.to_str().ok()) {
+        if accept.contains("protobuf") {
+            return Err(ApiError::not_found("openapi v2 protobuf not supported".into()));
+        }
+    }
     let schema = serde_json::json!({
         "swagger": "2.0",
         "info": {"title": "z8s", "version": env!("CARGO_PKG_VERSION")},
