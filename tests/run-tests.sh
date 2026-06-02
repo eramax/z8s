@@ -2,12 +2,19 @@
 # Comprehensive z8s integration test suite
 # Validates pods, deployments, services, volumes, scaling, security isolation
 # Usage: ./run-tests.sh [--server http://localhost:6443]
+# Logs: set Z8S_TEST_LOG=/path/to/file (default: logs/test-latest.log)
 set -uo pipefail
 
-SERVER="${Z8S_SERVER:-http://localhost:6443}"
-DAEMON="$(dirname "$0")/../z8s.sh"
-LOG="/tmp/z8s.log"
 YAML_DIR="$(dirname "$0")"
+LOG_DIR="${YAML_DIR}/../logs"
+mkdir -p "$LOG_DIR"
+Z8S_TEST_LOG="${Z8S_TEST_LOG:-${LOG_DIR}/test-latest.log}"
+exec > >(tee -a "$Z8S_TEST_LOG") 2>&1
+echo "Test log: $Z8S_TEST_LOG"
+
+SERVER="${Z8S_SERVER:-http://localhost:6443}"
+Z8S_BIN="${Z8S_BIN:-$(cd "$(dirname "$0")/.." && pwd)/target/debug/z8s}"
+LOG="/tmp/z8s.log"
 PASS=0; FAIL=0; ERRORS=()
 
 GREEN='\033[0;32m'; RED='\033[0;31m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
@@ -162,6 +169,36 @@ cleanup() {
 # done
 
 # ── 1. Apply all YAML resources ────────────────────────────────────────────────
+# ── Fresh cluster (avoids reusing old redb / scaled deployments) ─────────────
+if [[ "${Z8S_SKIP_RESET:-}" != "1" ]]; then
+    section "0. Cluster reset and start"
+    sub "z8s reset — stop nodes, wipe redb/rootfs"
+    if sudo "$Z8S_BIN" reset; then
+        pass "z8s reset completed"
+    else
+        fail "z8s reset" "reset command failed"
+    fi
+    sub "Start main + worker nodes"
+    if sudo "$Z8S_BIN" node start && sudo "$Z8S_BIN" node start --port 7443; then
+        pass "z8s nodes started"
+    else
+        fail "z8s node start" "could not start cluster"
+    fi
+    sub "Wait for API"
+    ok=0
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        if curl -sf "${SERVER%/}/healthz" >/dev/null 2>&1; then ok=1; break; fi
+        sleep 1
+    done
+    if [[ $ok -eq 1 ]]; then
+        pass "API healthz ok on $SERVER"
+    else
+        fail "API healthz" "not ready after 10s"
+    fi
+else
+    echo "Skipping cluster reset (Z8S_SKIP_RESET=1)"
+fi
+
 section "1. Apply all manifest YAMLs"
 for f in "$YAML_DIR"/*.yaml; do
     base=$(basename "$f")
@@ -1251,7 +1288,7 @@ spec:
   containers:
   - name: main
     image: alpine:latest
-    command: ["sleep", "60"]
+    command: ["sleep", "infinity"]
     volumeMounts:
     - name: hostdata
       mountPath: /host-data
@@ -1260,6 +1297,7 @@ spec:
     hostPath:
       path: /tmp/z8s-hostpath-test
 EOF
+mkdir -p /tmp/z8s-hostpath-test 2>/dev/null || true
 
 if wait_pod_ready hostpath-vol-pod default 60; then
     out=$(k exec hostpath-vol-pod -- sh -c "echo '${TAG}' > /host-data/test.txt && cat /host-data/test.txt" 2>&1)
@@ -1286,7 +1324,7 @@ spec:
   containers:
   - name: main
     image: alpine:latest
-    command: ["sleep", "60"]
+    command: ["sleep", "infinity"]
     volumeMounts:
     - name: hostdata
       mountPath: /host-data
@@ -1454,7 +1492,7 @@ spec:
   containers:
   - name: sec
     image: alpine:latest
-    command: ["sleep", "60"]
+    command: ["sleep", "infinity"]
     env:
     - name: USER
       value: testuser
@@ -1544,7 +1582,7 @@ fi
 
 # Check that /proc/sysrq-trigger is not accessible (should be restricted)
     out=$(k exec alpine-pod -- cat /proc/sysrq-trigger 2>&1) || true
-    if echo "$out" | grep -qiE "permission denied|no such file|operation not permitted|I/O error"; then
+    if echo "$out" | grep -qiE "permission denied|no such file|operation not permitted|I/O error|input/output error"; then
         pass "isolation: root cannot access host /proc/sysrq-trigger"
     elif echo "$out" | grep -qiE "error|spawn|not found"; then
         fail "isolation: /proc/sysrq-trigger" "$out"

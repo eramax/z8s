@@ -1,0 +1,13 @@
+# Full reset (stop all nodes, unmount, wipe redb/rootfs — no stale deployments):
+sudo target/debug/z8s reset
+
+# Start fresh and run tests (run-tests.sh calls reset unless Z8S_SKIP_RESET=1):
+sudo target/debug/z8s node start
+sudo target/debug/z8s node start --port 7443
+sleep 7
+./tests/run-tests.sh
+
+# Manual equivalent of reset (legacy):
+# sudo pkill -9 -f z8s
+# for mount in $(mount | grep -E '/var/lib/z8s|/tmp/z8s' | awk '{print $3}'); do sudo umount -f $mount; done
+# sudo rm -rf /var/lib/z8s/z8s.redb /tmp/z8s-node-*.redb /var/lib/z8s/rootfs /tmp/z8s-node-*/rootfs

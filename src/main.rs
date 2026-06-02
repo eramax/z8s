@@ -184,6 +184,7 @@ Commands:
   node stop    Stop a peer node
   node list    List all running nodes
   stop         Stop the main z8s instance
+  reset        Stop all nodes, unmount volumes, wipe local DB/state
   restart      Restart the main z8s instance
   status       Show running z8s processes
 
@@ -214,24 +215,7 @@ fn main() -> Result<()> {
                 return default_start(&args);
             }
 
-            crate::config::init();
-            let cfg = crate::config::get();
-            let port = cfg.api_port;
-
-            // Acquire per-port lock (holds flock for entire lifetime)
-            let port_lock = acquire_lock(&port_lock_path(port))?;
-
-            // Main z8s also acquires the global lock
-            let global_lock = if cfg.peers.is_empty() {
-                let lock = acquire_lock(&global_lock_path())?;
-                Some(lock)
-            } else {
-                None
-            };
-
-            let rt = tokio::runtime::Runtime::new()?;
-            let result = rt.block_on(crate::node::run_node(port, port_lock, global_lock));
-            result
+            run_daemon_server(&args)
         }
 
         // ── Join a cluster as a worker ──────────────────────────────────
@@ -270,15 +254,40 @@ fn main() -> Result<()> {
         // ── Stop the main z8s instance ──────────────────────────────────
         Some("stop") => stop_z8s(),
 
+        // ── Full local reset (stop + umount + wipe redb/rootfs) ─────────
+        Some("reset") => reset_z8s(),
+
         // ── Status ──────────────────────────────────────────────────────
         Some("status") => show_status(),
 
-        // ── Default: show help ──────────────────────────────────────────
+        // ── Default: PID 1 in container runs server; otherwise help ───────
         _ => {
-            print_help();
-            Ok(())
+            if std::process::id() == 1 {
+                run_daemon_server(&args)
+            } else {
+                print_help();
+                Ok(())
+            }
         }
     }
+}
+
+/// Foreground server entry (container PID 1 or `z8s run --daemon`).
+fn run_daemon_server(args: &[String]) -> Result<()> {
+    crate::config::init();
+    let cfg = crate::config::get();
+    let port = cfg.api_port;
+
+    let port_lock = acquire_lock(&port_lock_path(port))?;
+
+    let global_lock = if cfg.peers.is_empty() {
+        Some(acquire_lock(&global_lock_path())?)
+    } else {
+        None
+    };
+
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(crate::node::run_node(port, port_lock, global_lock))
 }
 
 // ── Helper functions ────────────────────────────────────────────────
@@ -337,6 +346,147 @@ fn default_start(args: &[String]) -> Result<()> {
         }
     }
     anyhow::bail!("z8s failed to start on port {port}");
+}
+
+/// Stop every z8s node found via lock files (and any stray /proc matches).
+fn stop_all_z8s_nodes() {
+    let mut pids: Vec<i32> = scan_lock_files().into_iter().map(|(_, p)| p).collect();
+    for pid in find_z8s_pids() {
+        if !pids.contains(&pid) {
+            pids.push(pid);
+        }
+    }
+
+    if pids.is_empty() {
+        eprintln!("No z8s processes running.");
+        return;
+    }
+
+    for pid in &pids {
+        if is_pid_alive(*pid) && !is_pid_dstate(*pid) {
+            eprintln!("Stopping z8s (PID {pid})...");
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(*pid),
+                nix::sys::signal::Signal::SIGTERM,
+            );
+            let _ = std::process::Command::new("sudo")
+                .args(["kill", "-TERM", &pid.to_string()])
+                .output();
+        }
+    }
+
+    for _ in 0..80 {
+        if pids.iter().all(|p| !is_pid_alive(*p) || is_pid_dstate(*p)) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    for pid in &pids {
+        if is_pid_alive(*pid) && !is_pid_dstate(*pid) {
+            eprintln!("Force killing z8s (PID {pid})...");
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(*pid),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+            let _ = std::process::Command::new("sudo")
+                .args(["kill", "-KILL", &pid.to_string()])
+                .output();
+        }
+    }
+
+    for _ in 0..30 {
+        if pids.iter().all(|p| !is_pid_alive(*p)) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    for pid in &pids {
+        cleanup_external(*pid);
+    }
+}
+
+fn umount_z8s_mounts() {
+    let Ok(output) = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("mount | awk '/\\/var\\/lib\\/z8s|\\/tmp\\/z8s/ {print $3}'")
+        .output()
+    else {
+        return;
+    };
+    let mounts = String::from_utf8_lossy(&output.stdout);
+    for mount in mounts.lines().map(str::trim).filter(|s| !s.is_empty()) {
+        eprintln!("Unmounting {mount}...");
+        let _ = std::process::Command::new("sudo")
+            .args(["umount", "-f", mount])
+            .status();
+    }
+}
+
+fn remove_path_quiet(path: &str) {
+    let p = std::path::Path::new(path);
+    if !p.exists() {
+        return;
+    }
+    if p.is_dir() {
+        if let Err(e) = std::fs::remove_dir_all(p) {
+            eprintln!("Warning: failed to remove {}: {e}", path);
+        }
+    } else if let Err(e) = std::fs::remove_file(p) {
+        eprintln!("Warning: failed to remove {}: {e}", path);
+    }
+}
+
+fn remove_tmp_entries_with_prefix(prefix: &str) {
+    let Ok(entries) = std::fs::read_dir(Z8S_RUN_DIR) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with(prefix) {
+            let path = entry.path();
+            eprintln!("Removing {}...", path.display());
+            if path.is_dir() {
+                let _ = std::fs::remove_dir_all(&path);
+            } else {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+    }
+}
+
+/// Stop all nodes, unmount z8s mounts, and delete local redb/rootfs so the next
+/// start does not reload old deployments from disk.
+fn reset_z8s() -> Result<()> {
+    eprintln!("Resetting z8s local state...");
+    let lock_ports: Vec<u16> = scan_lock_files()
+        .into_iter()
+        .map(|(port, _)| port)
+        .collect();
+
+    stop_all_z8s_nodes();
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    umount_z8s_mounts();
+
+    for path in ["/var/lib/z8s/z8s.redb", "/var/lib/z8s/rootfs"] {
+        if std::path::Path::new(path).exists() {
+            eprintln!("Removing {path}...");
+            remove_path_quiet(path);
+        }
+    }
+
+    remove_tmp_entries_with_prefix("z8s-node-");
+    remove_tmp_entries_with_prefix("z8s-daemon-");
+    remove_path_quiet(&global_lock_path());
+    for port in lock_ports {
+        remove_path_quiet(&port_lock_path(port));
+    }
+    // Any stale port/global locks left after crash
+    remove_tmp_entries_with_prefix("z8s-");
+
+    eprintln!("z8s reset complete. Start fresh with: z8s node start");
+    Ok(())
 }
 
 fn stop_z8s() -> Result<()> {
