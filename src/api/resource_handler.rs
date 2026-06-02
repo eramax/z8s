@@ -76,6 +76,15 @@ pub async fn list_cluster(
     if entry.kind == "VNet" {
         return Ok(crate::api::enrich::list_vnets(&s, req.headers(), &wire).await);
     }
+    if entry.kind == "Subnet" {
+        return Ok(crate::api::enrich::list_subnets(&s, req.headers(), &wire).await);
+    }
+    if entry.kind == "NSG" {
+        return Ok(crate::api::enrich::list_nsgs(&s, req.headers(), &wire).await);
+    }
+    if entry.kind == "RouteTable" {
+        return Ok(crate::api::enrich::list_route_tables(&s, req.headers(), &wire).await);
+    }
     let resp = crd::generic_list_wire(&s, entry.kind, entry.list_kind, &wire.list_api_version).await;
     Ok((StatusCode::OK, resp).into_response())
 }
