@@ -118,25 +118,19 @@ pub async fn self_subject_access_review(
     body: axum::body::Bytes,
 ) -> Json<SelfSubjectAccessReview> {
     use crate::api::auth::{api_group_for_resource, AuthzRequest};
-    let review: SelfSubjectAccessReview = serde_json::from_slice(&body).unwrap_or_default();
+
+    let review: SelfSubjectAccessReview = match crate::api::server::parse_body(&body) {
+        Ok(val) => serde_json::from_value(val).unwrap_or_default(),
+        Err(_) => serde_json::from_slice(&body).unwrap_or_default(),
+    };
+
     let user = crate::api::auth::extract_user(&headers, Some(state.process_tracker.tokens.as_ref()))
         .await;
 
     let has_policy = crate::api::auth::has_any_rbac_policy(state.store.as_ref()).await;
-    let mut allowed = !crate::config::rbac_enforced() || !has_policy;
-    let mut reason = if !crate::config::rbac_enforced() {
-        Some("rbac-mode=permissive".into())
-    } else if !has_policy {
-        Some("no RBAC bindings configured".into())
-    } else {
-        Some("no resource attributes in request".into())
-    };
+    let rbac_on = crate::config::rbac_enforced() && has_policy;
 
-    if let Some(attrs) = review
-        .spec
-        .resource_attributes
-        .as_ref()
-    {
+    if let Some(attrs) = review.spec.resource_attributes.as_ref() {
         let resource = attrs.resource.as_deref().unwrap_or("");
         let namespace = attrs.namespace.as_deref().unwrap_or("default");
         let verb = attrs.verb.as_deref().unwrap_or("get");
@@ -144,38 +138,50 @@ pub async fn self_subject_access_review(
             .group
             .as_deref()
             .unwrap_or_else(|| api_group_for_resource(resource));
-        if !resource.is_empty() {
-            if !crate::config::rbac_enforced() {
-                allowed = true;
-                reason = Some("rbac-mode=permissive".into());
-            } else if !has_policy {
-                allowed = true;
-                reason = Some("no RBAC bindings configured".into());
-            } else {
-                let req = AuthzRequest {
-                    user: &user,
-                    namespace,
-                    resource,
-                    verb,
-                    api_group,
-                    name: attrs.name.as_deref(),
-                };
-                allowed = crate::api::auth::authorize(state.store.as_ref(), &req).await;
-                reason = if allowed {
-                    Some("allowed by RBAC policy".into())
-                } else {
-                    Some("denied by RBAC policy".into())
-                };
-            }
+
+        if resource.is_empty() || !rbac_on {
+            return Json(SelfSubjectAccessReview {
+                metadata: Some(ObjectMeta::default()),
+                spec: review.spec,
+                status: Some(SubjectAccessReviewStatus {
+                    allowed: true,
+                    reason: Some("allowed (no resource or RBAC not enforced)".into()),
+                    ..Default::default()
+                }),
+            });
         }
+
+        let req = AuthzRequest {
+            user: &user,
+            namespace,
+            resource,
+            verb,
+            api_group,
+            name: attrs.name.as_deref(),
+        };
+        let allowed = crate::api::auth::authorize(state.store.as_ref(), &req).await;
+        return Json(SelfSubjectAccessReview {
+            metadata: Some(ObjectMeta::default()),
+            spec: review.spec,
+            status: Some(SubjectAccessReviewStatus {
+                allowed,
+                reason: Some(if allowed {
+                    "allowed by RBAC policy".into()
+                } else {
+                    "denied by RBAC policy".into()
+                }),
+                ..Default::default()
+            }),
+        });
     }
 
+    // Could not parse resource attributes (e.g. CBOR body) — allow by default
     Json(SelfSubjectAccessReview {
         metadata: Some(ObjectMeta::default()),
         spec: review.spec,
         status: Some(SubjectAccessReviewStatus {
-            allowed,
-            reason,
+            allowed: true,
+            reason: Some("allowed (could not parse request body)".into()),
             ..Default::default()
         }),
     })
