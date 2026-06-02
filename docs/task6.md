@@ -1,3 +1,5 @@
+read everyfile in ./src
+
 I want a comprehensive refactoring and rewriting and rearchitecute and modernize and improvment with new features plan for this project. 
 your goal is to make it muture product for production, much better than k3s and s6. with cloud features like vnet, subnets, ngs, loadbalalncer,support assigning public IP (from the host subnets - i have a server with ipv6 /64) and much more faster and less blocking. better networking (current code is a mess, i want a clean code for managing the nft chains.) , cri (needs to use overlays efficient). with better architecture design and clean and decoupled components or better dependancy flow design.
 the current schedular is slow for two nodes, it is about 5x the time for single node, while mutli-node should be doubled the speed not 5x slower, we have to fix that.
@@ -8,4 +10,5 @@ true isolation is very important, form the network, storage (disks), and resourc
 all pods should be living in a default vent if they didnt set a vnet to use so we have a unified design.
 support running as PID 1 with multi-core systems. never crashes or get down. and can run normal processes in the host like bash commands, dhcp, sshd, etc. all, we need to know what capabilities each app will need and support that capabilities. 
 we are lacking roles. do we need it ?
-write your plan in a md file.
+checout this plan as well maybe it can give u some ideas.
+write your plan in a md file in chunks to avoid output tokens limits.

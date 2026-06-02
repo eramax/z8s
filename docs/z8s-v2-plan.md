@@ -351,7 +351,7 @@ spec:
 
 # NSG: firewall rules for a subnet
 apiVersion: z8s.io/v1
-kind: NetworkSecurityGroup
+kind: nsg
 metadata:
   name: web-nsg
 spec:
