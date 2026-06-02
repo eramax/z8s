@@ -212,6 +212,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(crate::api::handlers::nsg::routes())
         .merge(crate::api::handlers::routetable::routes())
         .merge(crate::api::handlers::rbac::routes())
+        .merge(crate::api::handlers::apply::routes())
         .route("/ws/gossip", axum::routing::any(gossip_ws_handler))
         .fallback(fallback_handler)
         .layer(axum::middleware::from_fn(move |headers, req, next| {

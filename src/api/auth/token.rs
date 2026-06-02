@@ -125,6 +125,7 @@ pub fn append_service_account_volumes(
         ("token", format!("{SA_CONTAINER_PATH}/token")),
         ("namespace", format!("{SA_CONTAINER_PATH}/namespace")),
         ("name", format!("{SA_CONTAINER_PATH}/name")),
+        ("kubeconfig", format!("{SA_CONTAINER_PATH}/kubeconfig")),
     ] {
         volumes.push(ResolvedVolume {
             host_path: format!("{base}/{file}"),
@@ -137,10 +138,12 @@ pub fn append_service_account_volumes(
 fn materialize_secret_dir(dir: &str, token: &str, namespace: &str, name: &str) -> Result<()> {
     std::fs::create_dir_all(dir).with_context(|| format!("create SA dir {dir}"))?;
     use std::os::unix::fs::PermissionsExt;
+    let kubeconfig = kubeconfig_yaml();
     for (file, contents) in [
         ("token", token),
         ("namespace", namespace),
         ("name", name),
+        ("kubeconfig", kubeconfig.as_str()),
     ] {
         let path = Path::new(dir).join(file);
         std::fs::write(&path, contents)
@@ -148,6 +151,30 @@ fn materialize_secret_dir(dir: &str, token: &str, namespace: &str, name: &str) -
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).ok();
     }
     Ok(())
+}
+
+fn kubeconfig_yaml() -> String {
+    format!(
+        r#"apiVersion: v1
+kind: Config
+clusters:
+- cluster:
+    server: https://kubernetes.default.svc.cluster.local
+    insecure-skip-tls-verify: true
+  name: z8s
+contexts:
+- context:
+    cluster: z8s
+    namespace: default
+    user: z8s-sa
+  name: z8s
+current-context: z8s
+users:
+- name: z8s-sa
+  user:
+    tokenFile: {SA_CONTAINER_PATH}/token
+"#
+    )
 }
 
 fn random_token() -> String {

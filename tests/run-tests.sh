@@ -1732,6 +1732,18 @@ section "22. Version endpoint"
 out=$(curl -sf "$SERVER/version" 2>&1)
 if echo "$out" | grep -q "z8s"; then pass "version endpoint returns z8s"; else fail "version endpoint" "$out"; fi
 
+# ── 23. RBAC cluster-dashboard (R8) ───────────────────────────────────────────
+section "23. RBAC cluster-dashboard E2E"
+if [[ -x "${YAML_DIR}/test-rbac-cluster-dashboard.sh" ]]; then
+    if Z8S_SERVER="$SERVER" "${YAML_DIR}/test-rbac-cluster-dashboard.sh"; then
+        pass "test-rbac-cluster-dashboard.sh"
+    else
+        fail "test-rbac-cluster-dashboard.sh" "see script output above"
+    fi
+else
+    fail "test-rbac-cluster-dashboard.sh" "not executable"
+fi
+
 # ── Summary ────────────────────────────────────────────────────────────────────
 section "All tests complete"
 echo "  Pods:       ${PODS_READY} ready, ${PODS_FAIL} failed"

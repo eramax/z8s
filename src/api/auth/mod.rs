@@ -1,5 +1,6 @@
 //! RBAC authorization engine (R1–R3) and ServiceAccount tokens (R4).
 
+pub mod apply;
 pub mod token;
 
 use axum::http::HeaderMap;
@@ -121,6 +122,8 @@ pub fn api_group_for_resource(resource: &str) -> &'static str {
         "roles" | "rolebindings" | "clusterroles" | "clusterrolebindings" => {
             "rbac.authorization.k8s.io"
         }
+        "pods/exec" => "",
+        "pods/log" => "",
         "vnets" | "subnets" | "nsgs" | "routetables" => "z8s.io",
         "storageclasses" => "storage.k8s.io",
         _ => "",

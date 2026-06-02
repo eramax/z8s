@@ -39,6 +39,18 @@ fn uri_to_resource(uri: &str) -> Option<(&str, &str, Option<&str>)> {
         return Some((resource, ns, name));
     }
 
+    if parts.len() >= 7 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "namespaces" {
+        let ns = parts[3];
+        if parts[4] == "pods" {
+            if parts.get(6) == Some(&"exec") {
+                return Some(("pods/exec", ns, parts.get(5).copied()));
+            }
+            if parts.get(6) == Some(&"log") {
+                return Some(("pods/log", ns, parts.get(5).copied()));
+            }
+        }
+    }
+
     if parts.len() >= 4 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "namespaces" {
         let ns = parts[3];
         let resource = parts.get(4).copied()?;
@@ -47,6 +59,9 @@ fn uri_to_resource(uri: &str) -> Option<(&str, &str, Option<&str>)> {
     }
 
     if parts.len() >= 4 && parts[0] == "api" && parts[1] == "v1" {
+        if parts[2] == "apply" {
+            return None;
+        }
         let resource = parts[2];
         let name = parts.get(3).copied();
         return Some((resource, "", name));

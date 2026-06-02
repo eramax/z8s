@@ -1,3 +1,4 @@
+pub mod apply;
 pub mod configmap;
 pub mod crd;
 pub mod deployment;
