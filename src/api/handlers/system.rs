@@ -194,7 +194,7 @@ pub async fn openapi_v2(
         if accept.contains("protobuf") {
             return Ok((
                 StatusCode::OK,
-                [("Content-Type", "application/com.github.proto-openapi.spec.v2@v1.0+protobuf")],
+                [("Content-Type", "application/vnd.kubernetes.protobuf")],
                 Vec::<u8>::new(),
             )
                 .into_response());
