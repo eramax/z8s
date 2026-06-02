@@ -358,10 +358,11 @@ pub async fn self_subject_access_review(
 ) -> Json<SelfSubjectAccessReview> {
     use crate::api::auth::{api_group_for_resource, AuthzRequest};
     let review: SelfSubjectAccessReview = serde_json::from_slice(&body).unwrap_or_default();
-    let user = crate::api::auth::extract_user(&headers);
+    let user = crate::api::auth::extract_user(&headers, Some(state.process_tracker.tokens.as_ref()))
+        .await;
 
-    let mut allowed = !crate::api::auth::has_any_role_binding(state.store.as_ref()).await;
-    let mut reason = Some("no RoleBindings configured".into());
+    let mut allowed = !crate::api::auth::has_any_rbac_policy(state.store.as_ref()).await;
+    let mut reason = Some("no RBAC bindings configured".into());
 
     if let Some(attrs) = review
         .spec

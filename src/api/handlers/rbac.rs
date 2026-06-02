@@ -1,6 +1,8 @@
-use crate::api::auth::{self, api_group_for_resource, verbs_for_http, AuthzRequest};
+use crate::api::auth::{self, api_group_for_resource, verbs_for_http, AuthzRequest, TokenRegistry};
 use crate::api::server::*;
-use crate::types::{Role, RoleBinding};
+use crate::types::{
+    ClusterRole, ClusterRoleBinding, Role, RoleBinding, ServiceAccount,
+};
 use axum::Router;
 use axum::extract::Request;
 use axum::http::{HeaderMap, StatusCode};
@@ -22,8 +24,10 @@ fn uri_to_resource(uri: &str) -> Option<(&str, &str, Option<&str>)> {
 
     if parts.len() >= 4 && parts[0] == "apis" && parts[1] == "rbac.authorization.k8s.io" {
         return match parts.get(3).copied() {
-            Some("roles") => Some(("roles", "", None)),
-            Some("rolebindings") => Some(("rolebindings", "", None)),
+            Some("roles") => Some(("roles", "", parts.get(4).copied())),
+            Some("rolebindings") => Some(("rolebindings", "", parts.get(4).copied())),
+            Some("clusterroles") => Some(("clusterroles", "", parts.get(4).copied())),
+            Some("clusterrolebindings") => Some(("clusterrolebindings", "", parts.get(4).copied())),
             _ => None,
         };
     }
@@ -61,6 +65,7 @@ pub async fn authorize_middleware_with_store(
     request: Request,
     next: Next,
     store: Arc<dyn StoreBackend>,
+    tokens: Arc<TokenRegistry>,
 ) -> Result<Response, StatusCode> {
     let method = request.method().as_str().to_string();
     let uri = request.uri().path().to_string();
@@ -69,7 +74,7 @@ pub async fn authorize_middleware_with_store(
         return Ok(next.run(request).await);
     }
 
-    if !auth::has_any_role_binding(store.as_ref()).await {
+    if !auth::has_any_rbac_policy(store.as_ref()).await {
         return Ok(next.run(request).await);
     }
 
@@ -77,7 +82,7 @@ pub async fn authorize_middleware_with_store(
         return Ok(next.run(request).await);
     };
 
-    let user = auth::extract_user(&headers);
+    let user = auth::extract_user(&headers, Some(tokens.as_ref())).await;
     let api_group = api_group_for_resource(resource);
     let verbs = verbs_for_http(&method, &uri);
 
@@ -217,6 +222,134 @@ pub async fn delete_rolebinding(
     crate::api::handlers::crd::generic_delete_namespaced(&s, "RoleBinding", &ns, &name).await
 }
 
+// ── ClusterRole CRUD ───────────────────────────────────────────────
+
+pub async fn list_clusterroles(State(s): State<AppState>) -> axum::response::Response {
+    crate::api::handlers::crd::generic_list(&s, "ClusterRole", "ClusterRoleList")
+        .await
+        .into_response()
+}
+
+pub async fn get_clusterrole(
+    State(s): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    crate::api::handlers::crd::generic_get(&s, "ClusterRole", &name).await
+}
+
+pub async fn create_clusterrole(
+    State(s): State<AppState>,
+    raw: axum::body::Bytes,
+) -> Result<axum::response::Response, ApiError> {
+    let body = parse_body(&raw)?;
+    let role: ClusterRole = serde_json::from_value(body)
+        .map_err(|e| ApiError::bad_request(format!("invalid ClusterRole: {}", e)))?;
+    crate::api::handlers::crd::generic_create(&s, AnyResource::ClusterRole(role), "ClusterRole")
+        .await
+}
+
+pub async fn delete_clusterrole(
+    State(s): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<Status>, ApiError> {
+    crate::api::handlers::crd::generic_delete(&s, "ClusterRole", &name).await
+}
+
+// ── ClusterRoleBinding CRUD ────────────────────────────────────────
+
+pub async fn list_clusterrolebindings(State(s): State<AppState>) -> axum::response::Response {
+    crate::api::handlers::crd::generic_list(&s, "ClusterRoleBinding", "ClusterRoleBindingList")
+        .await
+        .into_response()
+}
+
+pub async fn get_clusterrolebinding(
+    State(s): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    crate::api::handlers::crd::generic_get(&s, "ClusterRoleBinding", &name).await
+}
+
+pub async fn create_clusterrolebinding(
+    State(s): State<AppState>,
+    raw: axum::body::Bytes,
+) -> Result<axum::response::Response, ApiError> {
+    let body = parse_body(&raw)?;
+    let crb: ClusterRoleBinding = serde_json::from_value(body)
+        .map_err(|e| ApiError::bad_request(format!("invalid ClusterRoleBinding: {}", e)))?;
+    crate::api::handlers::crd::generic_create(
+        &s,
+        AnyResource::ClusterRoleBinding(crb),
+        "ClusterRoleBinding",
+    )
+    .await
+}
+
+pub async fn delete_clusterrolebinding(
+    State(s): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<Status>, ApiError> {
+    crate::api::handlers::crd::generic_delete(&s, "ClusterRoleBinding", &name).await
+}
+
+// ── ServiceAccount CRUD ────────────────────────────────────────────
+
+pub async fn list_serviceaccounts_all(State(s): State<AppState>) -> axum::response::Response {
+    crate::api::handlers::crd::generic_list_namespaced(
+        &s,
+        "ServiceAccount",
+        "ServiceAccountList",
+        None,
+    )
+    .await
+    .into_response()
+}
+
+pub async fn list_serviceaccounts(
+    State(s): State<AppState>,
+    Path(ns): Path<String>,
+) -> axum::response::Response {
+    crate::api::handlers::crd::generic_list_namespaced(
+        &s,
+        "ServiceAccount",
+        "ServiceAccountList",
+        Some(&ns),
+    )
+    .await
+    .into_response()
+}
+
+pub async fn get_serviceaccount(
+    State(s): State<AppState>,
+    Path((ns, name)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    crate::api::handlers::crd::generic_get_namespaced(&s, "ServiceAccount", &ns, &name).await
+}
+
+pub async fn create_serviceaccount(
+    State(s): State<AppState>,
+    Path(ns): Path<String>,
+    raw: axum::body::Bytes,
+) -> Result<axum::response::Response, ApiError> {
+    let body = parse_body(&raw)?;
+    let sa: ServiceAccount = serde_json::from_value(body)
+        .map_err(|e| ApiError::bad_request(format!("invalid ServiceAccount: {}", e)))?;
+    crate::api::handlers::crd::generic_create_namespaced(
+        &s,
+        AnyResource::ServiceAccount(sa),
+        &ns,
+        "ServiceAccount",
+    )
+    .await
+}
+
+pub async fn delete_serviceaccount(
+    State(s): State<AppState>,
+    Path((ns, name)): Path<(String, String)>,
+) -> Result<Json<Status>, ApiError> {
+    crate::api::handlers::crd::generic_delete_namespaced(&s, "ServiceAccount", &ns, &name).await
+}
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route(
@@ -226,6 +359,26 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/apis/rbac.authorization.k8s.io/v1/rolebindings",
             get(list_rolebindings_all),
+        )
+        .route(
+            "/apis/rbac.authorization.k8s.io/v1/clusterroles",
+            get(list_clusterroles).post(create_clusterrole),
+        )
+        .route(
+            "/apis/rbac.authorization.k8s.io/v1/clusterroles/{name}",
+            get(get_clusterrole).delete(delete_clusterrole),
+        )
+        .route(
+            "/apis/rbac.authorization.k8s.io/v1/clusterrolebindings",
+            get(list_clusterrolebindings).post(create_clusterrolebinding),
+        )
+        .route(
+            "/apis/rbac.authorization.k8s.io/v1/clusterrolebindings/{name}",
+            get(get_clusterrolebinding).delete(delete_clusterrolebinding),
+        )
+        .route(
+            "/api/v1/serviceaccounts",
+            get(list_serviceaccounts_all),
         )
         .route(
             "/apis/rbac.authorization.k8s.io/v1/namespaces/{namespace}/roles",
@@ -242,5 +395,13 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/apis/rbac.authorization.k8s.io/v1/namespaces/{namespace}/rolebindings/{name}",
             get(get_rolebinding).delete(delete_rolebinding),
+        )
+        .route(
+            "/api/v1/namespaces/{namespace}/serviceaccounts",
+            get(list_serviceaccounts).post(create_serviceaccount),
+        )
+        .route(
+            "/api/v1/namespaces/{namespace}/serviceaccounts/{name}",
+            get(get_serviceaccount).delete(delete_serviceaccount),
         )
 }

@@ -5,6 +5,7 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
+use crate::api::auth::TokenRegistry;
 use crate::cri::RuntimeProvider;
 use crate::cri::runtime::RunningContainer;
 use crate::netmux::network::PodResolver;
@@ -17,6 +18,7 @@ pub struct ProcessTracker {
     pub restart_counts: Arc<Mutex<HashMap<String, u32>>>,
     pub cri: Arc<dyn RuntimeProvider>,
     pub store: Arc<dyn StoreBackend>,
+    pub tokens: Arc<TokenRegistry>,
     pub broadcast_tx: tokio::sync::RwLock<Option<tokio::sync::mpsc::UnboundedSender<AnyResource>>>,
 }
 
@@ -26,12 +28,14 @@ impl ProcessTracker {
         restart_counts: Arc<Mutex<HashMap<String, u32>>>,
         cri: Arc<dyn RuntimeProvider>,
         store: Arc<dyn StoreBackend>,
+        tokens: Arc<TokenRegistry>,
     ) -> Self {
         Self {
             running,
             restart_counts,
             cri,
             store,
+            tokens,
             broadcast_tx: tokio::sync::RwLock::new(None),
         }
     }
@@ -41,9 +45,19 @@ impl ProcessTracker {
     }
 
     pub async fn start_pod(&self, resource: &AnyResource) -> anyhow::Result<()> {
-        let spec =
-            crate::components::compute::spec_builder::build_spec(resource, self.store.as_ref())
-                .await;
+        let sa_mount = if let AnyResource::Pod(pod) = resource {
+            self.tokens
+                .prepare_pod_mount(pod, &resource.uid())
+                .await?
+        } else {
+            None
+        };
+        let spec = crate::components::compute::spec_builder::build_spec(
+            resource,
+            self.store.as_ref(),
+            sa_mount,
+        )
+        .await;
         self.cri.start_pod(&spec).await?;
         self.store
             .update_state(&resource.uid(), ResourceState::Running)
@@ -58,10 +72,16 @@ impl ProcessTracker {
     }
 
     pub async fn stop_pod(&self, resource: &AnyResource) {
-        let spec =
-            crate::components::compute::spec_builder::build_spec(resource, self.store.as_ref())
-                .await;
+        let spec = crate::components::compute::spec_builder::build_spec(
+            resource,
+            self.store.as_ref(),
+            None,
+        )
+        .await;
         let _ = self.cri.stop_pod(&spec).await;
+        if matches!(resource, AnyResource::Pod(_)) {
+            self.tokens.revoke_for_pod(&resource.uid()).await;
+        }
         self.store
             .update_state(&resource.uid(), ResourceState::Terminated)
             .await;

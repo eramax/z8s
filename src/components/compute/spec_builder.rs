@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use crate::api::auth::{append_service_account_volumes, ServiceAccountMount};
 use crate::cri::health::{ExecProbe, HttpProbe, ProbeAction, ProbeConfig, TcpProbe};
 use crate::cri::spec::{ContainerConfig, ContainerSpec, ResolvedVolume};
 use crate::store::StoreBackend;
@@ -9,7 +10,11 @@ use anyhow::{Context, Result};
 use std::path::Path;
 use tracing::warn;
 
-pub async fn build_spec(resource: &AnyResource, store: &dyn StoreBackend) -> ContainerSpec {
+pub async fn build_spec(
+    resource: &AnyResource,
+    store: &dyn StoreBackend,
+    sa_mount: Option<ServiceAccountMount>,
+) -> ContainerSpec {
     let containers = extract_containers(resource);
     let pod_name = resource.name().to_string();
     let pod_uid = resource.uid();
@@ -75,7 +80,7 @@ pub async fn build_spec(resource: &AnyResource, store: &dyn StoreBackend) -> Con
             .cloned()
             .unwrap_or_default();
 
-        let volumes = if let Some(pod) = pod {
+        let mut volumes = if let Some(pod) = pod {
             if !is_native {
                 prepare_volumes(
                     pod,
@@ -96,6 +101,9 @@ pub async fn build_spec(resource: &AnyResource, store: &dyn StoreBackend) -> Con
         } else {
             vec![]
         };
+        if let Some(ref sa) = sa_mount {
+            append_service_account_volumes(&mut volumes, sa);
+        }
 
         let (memory_limit, memory_low, cpu_quota, cpu_period) = resolve_resource_limits(container);
 

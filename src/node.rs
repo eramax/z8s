@@ -141,6 +141,9 @@ pub async fn run_node(
     if let Err(e) = crate::bootstrap::ensure_kubernetes_service(store.as_ref()).await {
         warn!("Failed to bootstrap kubernetes Service: {}", e);
     }
+    if let Err(e) = crate::bootstrap::ensure_default_service_account(store.as_ref()).await {
+        warn!("Failed to bootstrap default ServiceAccount: {}", e);
+    }
 
     let require_join_auth = cfg.peers.is_empty() && redb.is_some();
     if require_join_auth {
@@ -230,11 +233,13 @@ pub async fn run_node(
         cgroup_manager.clone(),
     ));
 
+    let sa_tokens = crate::api::auth::TokenRegistry::new();
     let process_tracker = Arc::new(ProcessTracker::new(
         supervisor.running.clone(),
         supervisor.restart_counts.clone(),
         cri.clone(),
         store.clone(),
+        sa_tokens,
     ));
 
     let network = Arc::new(NetworkManager::new(store.clone(), netmux.clone()));
@@ -508,9 +513,12 @@ pub async fn run_node(
             }
         };
     for tracker in &resources {
-        let spec =
-            crate::components::compute::spec_builder::build_spec(&tracker.resource, store.as_ref())
-                .await;
+        let spec = crate::components::compute::spec_builder::build_spec(
+            &tracker.resource,
+            store.as_ref(),
+            None,
+        )
+        .await;
         let _ = tokio::time::timeout(
             std::time::Duration::from_secs(3),
             crate::cri::RuntimeProvider::stop_pod(cri.as_ref(), &spec),

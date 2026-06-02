@@ -188,6 +188,7 @@ pub async fn build_app_state(
 
 pub fn build_router(state: AppState) -> Router {
     let store_for_mw = state.store.clone();
+    let tokens_for_mw = state.process_tracker.tokens.clone();
     Router::new()
         .merge(crate::api::handlers::system::routes())
         .merge(crate::api::handlers::pod::routes())
@@ -215,7 +216,13 @@ pub fn build_router(state: AppState) -> Router {
         .fallback(fallback_handler)
         .layer(axum::middleware::from_fn(move |headers, req, next| {
             let store = store_for_mw.clone();
-            async move { crate::api::handlers::rbac::authorize_middleware_with_store(headers, req, next, store).await }
+            let tokens = tokens_for_mw.clone();
+            async move {
+                crate::api::handlers::rbac::authorize_middleware_with_store(
+                    headers, req, next, store, tokens,
+                )
+                .await
+            }
         }))
         .with_state(state)
 }
@@ -710,6 +717,7 @@ mod tests {
             restart_counts: supervisor.restart_counts.clone(),
             cri: container_runtime.clone(),
             store: store.clone(),
+            tokens: crate::api::auth::TokenRegistry::new(),
             broadcast_tx: tokio::sync::RwLock::new(None),
         });
         let test_netmux =
@@ -770,6 +778,7 @@ mod tests {
             restart_counts: supervisor.restart_counts.clone(),
             cri: container_runtime.clone(),
             store: store.clone(),
+            tokens: crate::api::auth::TokenRegistry::new(),
             broadcast_tx: tokio::sync::RwLock::new(None),
         });
         let test_netmux =
