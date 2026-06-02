@@ -188,21 +188,14 @@ pub async fn list_deployments_in_ns(
     headers: axum::http::HeaderMap,
 ) -> Result<axum::response::Response, ApiError> {
     let trackers = state.store.get_by_kind("Deployment").await;
-    let tracker = state.process_tracker.clone();
     let pods = state.store.get_by_kind("Pod").await;
+    let pt = &state.process_tracker;
 
     let mut items: Vec<serde_json::Value> = Vec::new();
     for t in &trackers {
-        if namespace
-            .as_deref()
-            .map_or(true, |ns| t.resource.namespace() == ns)
-        {
-            let (ready, avail) = count_deployment_pods(&t.resource, &pods, &tracker).await;
-            items.push(resource_to_deploy_json(
-                &t.resource,
-                Some(ready),
-                Some(avail),
-            ));
+        if namespace.as_deref().map_or(true, |ns| t.resource.namespace() == ns) {
+            let (ready, avail) = count_deployment_pods(&t.resource, &pods, pt).await;
+            items.push(resource_to_deploy_json(&t.resource, Some(ready), Some(avail)));
         }
     }
 
@@ -213,8 +206,7 @@ pub async fn list_deployments_in_ns(
         "kind": "DeploymentList", "apiVersion": "apps/v1",
         "metadata": { "resourceVersion": "1" },
         "items": items
-    }))
-    .into_response())
+    })).into_response())
 }
 
 pub async fn get_deployment(
@@ -225,19 +217,25 @@ pub async fn get_deployment(
     let pods = state.store.get_by_kind("Pod").await;
     for t in &trackers {
         if t.resource.namespace() == namespace && t.resource.name() == name {
-            let (ready, avail) =
-                count_deployment_pods(&t.resource, &pods, &state.process_tracker).await;
-            return Ok(Json(resource_to_deploy_json(
-                &t.resource,
-                Some(ready),
-                Some(avail),
-            )));
+            let (ready, avail) = count_deployment_pods(&t.resource, &pods, &state.process_tracker).await;
+            return Ok(Json(resource_to_deploy_json(&t.resource, Some(ready), Some(avail))));
         }
     }
-    Err(ApiError::not_found(format!(
-        "deployment \"{}\" not found",
-        name
-    )))
+    Err(ApiError::not_found(format!("deployment \"{}\" not found", name)))
+}
+
+async fn find_deployment_mut(
+    state: &AppState, namespace: &str, name: &str,
+) -> Option<crate::types::Deployment> {
+    let trackers = state.store.get_by_kind("Deployment").await;
+    for t in &trackers {
+        if t.resource.name() == name && t.resource.namespace() == namespace {
+            if let AnyResource::Deployment(d) = &t.resource {
+                return Some(d.clone());
+            }
+        }
+    }
+    None
 }
 
 pub async fn patch_deployment_scale(
@@ -247,69 +245,30 @@ pub async fn patch_deployment_scale(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     use crate::types::{Scale, ScaleSpec, ScaleStatus};
     let body = parse_body(&raw)?;
-
-    let trackers = state.store.get_by_kind("Deployment").await;
-    for t in &trackers {
-        if t.resource.name() == name && t.resource.namespace() == namespace {
-            if let AnyResource::Deployment(ref mut deploy) = t.resource.clone() {
-                let desired = body
-                    .get("spec")
-                    .and_then(|s| s.get("replicas"))
-                    .and_then(|r| r.as_i64())
-                    .or_else(|| body.get("replicas").and_then(|r| r.as_i64()));
-
-                let replicas = desired.unwrap_or_else(|| {
-                    deploy
-                        .spec
-                        .as_ref()
-                        .and_then(|s| s.replicas)
-                        .map(|r| r as i64)
-                        .unwrap_or(1)
-                }) as i32;
-
-                if let Some(spec) = deploy.spec.as_mut() {
-                    spec.replicas = Some(replicas);
-                    info!(
-                        "Scaled deployment {}/{} to {} replicas",
-                        namespace, name, replicas
-                    );
-                    state
-                        .apply_and_broadcast(AnyResource::Deployment(deploy.clone()))
-                        .await
-                        .ok();
-                }
-
-                let selector = deploy
-                    .spec
-                    .as_ref()
-                    .and_then(|s| s.selector.match_labels.as_ref())
-                    .map(|l| {
-                        l.iter()
-                            .map(|(k, v)| format!("{}={}", k, v))
-                            .collect::<Vec<_>>()
-                            .join(",")
-                    });
-
-                let scale = Scale {
-                    metadata: Some(ObjectMeta {
-                        name: Some(name.clone()),
-                        namespace: Some(namespace.clone()),
-                        uid: Some(format!("Deployment/{}/{}", namespace, name)),
-                        ..Default::default()
-                    }),
-                    spec: Some(ScaleSpec {
-                        replicas: Some(replicas),
-                    }),
-                    status: Some(ScaleStatus { replicas, selector }),
-                };
-                return Ok(Json(serde_json::to_value(&scale).unwrap_or_default()));
-            }
-        }
+    let mut deploy = find_deployment_mut(&state, &namespace, &name).await
+        .ok_or_else(|| ApiError::not_found(format!("deployment \"{}\" not found", name)))?;
+    let desired = body.get("spec").and_then(|s| s.get("replicas"))
+        .or_else(|| body.get("replicas"))
+        .and_then(|r| r.as_i64());
+    let replicas = desired.unwrap_or_else(|| {
+        deploy.spec.as_ref().and_then(|s| s.replicas).unwrap_or(1) as i64
+    }) as i32;
+    if let Some(spec) = deploy.spec.as_mut() {
+        spec.replicas = Some(replicas);
     }
-    Err(ApiError::not_found(format!(
-        "deployment \"{}\" not found",
-        name
-    )))
+    state.apply_and_broadcast(AnyResource::Deployment(deploy.clone())).await.ok();
+    let selector = deploy.spec.as_ref()
+        .and_then(|s| s.selector.match_labels.as_ref())
+        .map(|l| l.iter().map(|(k, v)| format!("{}={}", k, v)).collect::<Vec<_>>().join(","));
+    Ok(Json(serde_json::to_value(&Scale {
+        metadata: Some(ObjectMeta {
+            name: Some(name), namespace: Some(namespace),
+            uid: Some(format!("Deployment/{}/{}", deploy.metadata.namespace.as_deref().unwrap_or("default"), deploy.metadata.name.as_deref().unwrap_or("unknown"))),
+            ..Default::default()
+        }),
+        spec: Some(ScaleSpec { replicas: Some(replicas) }),
+        status: Some(ScaleStatus { replicas, selector }),
+    }).unwrap_or_default()))
 }
 
 pub async fn create_deployment(
@@ -318,76 +277,41 @@ pub async fn create_deployment(
     raw: axum::body::Bytes,
 ) -> Result<axum::response::Response, ApiError> {
     let body = parse_body(&raw)?;
-    let kind = body.get("kind").and_then(|k| k.as_str()).unwrap_or("");
-    if kind != "Deployment" {
-        return Err(ApiError::bad_request(format!(
-            "expected Deployment, got {}",
-            kind
-        )));
-    }
     let mut deploy: crate::types::Deployment = serde_json::from_value(body)
         .map_err(|e| ApiError::bad_request(format!("invalid Deployment: {}", e)))?;
-    if deploy.metadata.namespace.is_none() {
-        deploy.metadata.namespace = Some(namespace);
-    }
+    deploy.metadata.namespace = Some(namespace);
     fill_deployment_metadata(&mut deploy);
     let resource = AnyResource::Deployment(deploy);
-    state
-        .apply_and_broadcast(resource.clone())
-        .await
+    state.apply_and_broadcast(resource.clone()).await
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
-    let mut value = serde_json::to_value(&resource).unwrap_or_default();
-    value["status"] = serde_json::json!({ "replicas": 0 });
-    Ok((StatusCode::CREATED, Json(value)).into_response())
+    Ok((StatusCode::CREATED, Json(serde_json::to_value(&resource).unwrap_or_default())).into_response())
 }
 
 pub async fn delete_deployment(
     State(state): State<AppState>,
     Path((namespace, name)): Path<(String, String)>,
 ) -> Result<Json<Status>, ApiError> {
-    let trackers = state.store.get_by_kind("Deployment").await;
-    for t in &trackers {
-        if t.resource.name() == name && t.resource.namespace() == namespace {
-            if let AnyResource::Deployment(deploy) = &t.resource {
-                let selector = deploy
-                    .spec
-                    .as_ref()
-                    .and_then(|s| s.selector.match_labels.as_ref());
-                if let Some(match_labels) = selector {
-                    let pods = state.store.get_by_kind("Pod").await;
-                    for pt in &pods {
-                        if pt.resource.namespace() != namespace {
-                            continue;
-                        }
-                        if let AnyResource::Pod(pod) = &pt.resource {
-                            let pod_labels = pod.metadata.labels.clone().unwrap_or_default();
-                            if labels_match(match_labels, &pod_labels)
-                                && crate::components::compute::deployment::pod_owned_by_deployment(
-                                    pod, &name,
-                                )
-                            {
-                                info!(
-                                    "Deleting pod {} owned by deployment {}/{}",
-                                    pt.resource.name(),
-                                    namespace,
-                                    name
-                                );
-                                state.registry.on_delete(&state.ctx, &pt.resource).await;
-                                state.store.delete(&pt.resource).await.ok();
-                            }
-                        }
-                    }
+    let deploy = find_deployment_mut(&state, &namespace, &name).await
+        .ok_or_else(|| ApiError::not_found(format!("deployment \"{}\" not found", name)))?;
+    // Cascade: delete owned pods
+    if let Some(selector) = deploy.spec.as_ref().and_then(|s| s.selector.match_labels.as_ref()) {
+        let pods = state.store.get_by_kind("Pod").await;
+        for pt in &pods {
+            if pt.resource.namespace() != namespace { continue; }
+            if let AnyResource::Pod(pod) = &pt.resource {
+                let pod_labels = pod.metadata.labels.clone().unwrap_or_default();
+                if labels_match(selector, &pod_labels)
+                    && crate::components::compute::deployment::pod_owned_by_deployment(pod, &name)
+                {
+                    state.registry.on_delete(&state.ctx, &pt.resource).await;
+                    state.store.delete(&pt.resource).await.ok();
                 }
             }
-            state.store.delete(&t.resource).await.ok();
-            info!("Deleted deployment {}/{}", namespace, name);
-            return Ok(Json(ok_status()));
         }
     }
-    Err(ApiError::not_found(format!(
-        "deployment \"{}\" not found",
-        name
-    )))
+    let resource = AnyResource::Deployment(deploy);
+    state.store.delete(&resource).await.ok();
+    Ok(Json(ok_status()))
 }
 
 pub async fn patch_deployment(
@@ -396,32 +320,21 @@ pub async fn patch_deployment(
     raw: axum::body::Bytes,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let patch = parse_body(&raw)?;
-    let existing = state
-        .store
-        .get_by_kind("Deployment")
-        .await
-        .into_iter()
-        .find(|t| t.resource.namespace() == namespace && t.resource.name() == name)
-        .and_then(|t| serde_json::to_value(&t.resource).ok());
-    let mut merged = existing.unwrap_or(serde_json::Value::Object(Default::default()));
+    let existing = find_deployment_mut(&state, &namespace, &name).await;
+    let mut merged = existing
+        .map(|d| serde_json::to_value(d).ok())
+        .flatten()
+        .unwrap_or(serde_json::Value::Object(Default::default()));
     json_merge_patch(&mut merged, &patch);
     let mut deploy: crate::types::Deployment = serde_json::from_value(merged)
         .map_err(|e| ApiError::bad_request(format!("invalid Deployment: {}", e)))?;
-    if deploy.metadata.namespace.is_none() {
-        deploy.metadata.namespace = Some(namespace);
-    }
-    if deploy.metadata.name.is_none() {
-        deploy.metadata.name = Some(name);
-    }
+    deploy.metadata.namespace = Some(namespace);
+    deploy.metadata.name = Some(name);
     fill_deployment_metadata(&mut deploy);
     let resource = AnyResource::Deployment(deploy);
-    state
-        .apply_and_broadcast(resource.clone())
-        .await
+    state.apply_and_broadcast(resource.clone()).await
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
-    let mut value = serde_json::to_value(&resource).unwrap_or_default();
-    value["status"] = serde_json::json!({ "replicas": 0 });
-    Ok(Json(value))
+    Ok(Json(serde_json::to_value(&resource).unwrap_or_default()))
 }
 
 pub fn labels_match(
