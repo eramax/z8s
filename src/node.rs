@@ -135,6 +135,22 @@ pub async fn run_node(
         redb = None;
     };
 
+    let require_join_auth = cfg.peers.is_empty() && redb.is_some();
+    if require_join_auth {
+        if let Some(ref db) = redb {
+            match db.ensure_join_token(&cfg.node_name, false).await {
+                Ok(Some(_)) => {
+                    info!(
+                        "Join token created for '{}'. Run `z8s node {} token` to display it.",
+                        cfg.node_name, cfg.node_name
+                    );
+                }
+                Ok(None) => {}
+                Err(e) => warn!("Join token bootstrap failed: {}", e),
+            }
+        }
+    }
+
     // ── Cgroup manager — graceful degradation, no panic ───────────────
     let cgroup_manager = match CgroupManager::new() {
         Ok(m) => Arc::new(m),
@@ -314,8 +330,13 @@ pub async fn run_node(
 
             let notify = reconciler_notify.clone();
             let ev = store_events.clone();
+            let join_token = cfg.join_token.clone();
+            let node_name = cfg.node_name.clone();
             tokio::spawn(async move {
-                crate::store::ws::run_gossip_client(n, url, st, rx, ev, notify).await;
+                crate::store::ws::run_gossip_client(
+                    n, url, st, rx, ev, notify, join_token, node_name,
+                )
+                .await;
             });
 
             let ae_state = state.clone();
@@ -376,8 +397,21 @@ pub async fn run_node(
     let gs = gossip_state.clone();
     let srv_notify = reconciler_notify.clone();
     let srv_events = store_events.clone();
+    let join_db = redb.clone();
+    let require_auth = require_join_auth;
     tokio::spawn(async move {
-        crate::api::server::run_server(store_clone, pt2, reg2, ctx2, gs, srv_events, srv_notify).await;
+        crate::api::server::run_server(
+            store_clone,
+            pt2,
+            reg2,
+            ctx2,
+            gs,
+            srv_events,
+            srv_notify,
+            join_db,
+            require_auth,
+        )
+        .await;
     });
 
     if let Some(ref db) = redb {

@@ -183,6 +183,9 @@ Commands:
   node start   Start a peer node
   node stop    Stop a peer node
   node list    List all running nodes
+  node <NAME> token [--rotate]   Create/show join token (main redb)
+  node token   Join token for this host name
+  join <url>   Join cluster (use --token or Z8S_JOIN_TOKEN)
   stop         Stop the main z8s instance
   reset        Stop all nodes, unmount volumes, wipe local DB/state
   restart      Restart the main z8s instance
@@ -232,8 +235,9 @@ fn main() -> Result<()> {
                 .map(|s| s.clone());
             let token = token.or_else(|| cfg.join_token.clone());
             let url = url.to_string();
+            let node_name = cfg.node_name.clone();
             let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(join_cluster(&url, token));
+            rt.block_on(join_cluster(&url, token, node_name));
             Ok(())
         }
 
@@ -241,12 +245,16 @@ fn main() -> Result<()> {
         Some("restart") => restart_z8s(&args),
 
         // ── Node management ─────────────────────────────────────────────
-        Some("node") => match args.get(2).map(|s| s.as_str()) {
-            Some("start") => node_start(&args),
-            Some("stop") => node_stop(&args),
-            Some("list") => node_list(),
+        Some("node") => match (args.get(2).map(|s| s.as_str()), args.get(3).map(|s| s.as_str())) {
+            (Some("start"), _) => node_start(&args),
+            (Some("stop"), _) => node_stop(&args),
+            (Some("list"), _) => node_list(),
+            (Some("token"), None) => node_token_cmd(&default_cli_node_name(), &args),
+            (Some(name), Some("token")) => node_token_cmd(name, &args),
             _ => {
-                eprintln!("Usage: z8s node {{start|stop|list}} [options]");
+                eprintln!(
+                    "Usage: z8s node {{start|stop|list|token|<NAME> token [--rotate]}} [options]"
+                );
                 Ok(())
             }
         },
@@ -738,6 +746,12 @@ fn node_start(args: &[String]) -> Result<()> {
         node_args.push("--pod-cidr".to_string());
         node_args.push(cidr);
     }
+    if let Some(token) = parse_opt_arg(args, "--join-token")
+        .or_else(|| std::env::var("Z8S_JOIN_TOKEN").ok())
+    {
+        node_args.push("--join-token".to_string());
+        node_args.push(token);
+    }
 
     eprintln!("Starting node on port {node_port}...");
     let refs: Vec<&str> = node_args.iter().map(|s| s.as_str()).collect();
@@ -803,6 +817,55 @@ fn node_list() -> Result<()> {
     if !found {
         println!("No z8s processes running.");
     }
+
+    if let Ok(db) = crate::store::RedbBackend::open("/var/lib/z8s") {
+        let rt = tokio::runtime::Runtime::new()?;
+        for rec in rt.block_on(db.list_join_tokens()) {
+            let status = if rec.revoked {
+                "revoked"
+            } else {
+                "active"
+            };
+            println!("join-token:{}  id={}  status={status}", rec.node_name, rec.token_id);
+        }
+    }
+
+    Ok(())
+}
+
+fn default_cli_node_name() -> String {
+    std::env::var("HOSTNAME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "main".to_string())
+}
+
+fn open_cluster_redb(args: &[String]) -> Result<std::sync::Arc<crate::store::RedbBackend>> {
+    let dir = parse_opt_arg(args, "--data-dir").unwrap_or_else(|| "/var/lib/z8s".to_string());
+    Ok(std::sync::Arc::new(crate::store::RedbBackend::open(&dir)?))
+}
+
+fn node_token_cmd(node_name: &str, args: &[String]) -> Result<()> {
+    let rotate = args.iter().any(|a| a == "--rotate");
+    let db = open_cluster_redb(args)?;
+    let rt = tokio::runtime::Runtime::new()?;
+    let wire = rt.block_on(db.ensure_join_token(node_name, rotate))?;
+    match wire {
+        Some(token) => {
+            println!("{token}");
+            eprintln!(
+                "Join with:\n  \
+                 z8s join ws://<main>:6443/ws/gossip --token {token}\n  \
+                 z8s node start --port 7443 --peers main=<host>:6443 --join-token {token}"
+            );
+        }
+        None => {
+            eprintln!(
+                "Join token already exists for '{node_name}' (secret not stored). Use --rotate to issue a new one."
+            );
+            std::process::exit(1);
+        }
+    }
     Ok(())
 }
 
@@ -851,13 +914,21 @@ fn spawn_daemon(args: &[&str], port: u16) -> Result<std::process::Child> {
 }
 
 /// Connect to a cluster as a worker via WebSocket.
-async fn join_cluster(url: &str, _token: Option<String>) {
+async fn join_cluster(url: &str, token: Option<String>, node_name: String) {
     use std::time::Duration;
     use tokio::time::sleep;
     use tracing::warn;
 
     loop {
-        match tokio_tungstenite::connect_async(url).await {
+        let req = match crate::store::ws::build_gossip_request(url, token.as_deref(), &node_name) {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("Invalid join URL: {}", e);
+                sleep(Duration::from_secs(5)).await;
+                continue;
+            }
+        };
+        match tokio_tungstenite::connect_async(req).await {
             Ok((ws_stream, _)) => {
                 warn!("Connected to cluster at {}", url);
                 let (mut _write, mut read) = ws_stream.split();

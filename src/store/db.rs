@@ -15,9 +15,10 @@ const RESOURCES: TableDefinition<&str, &[u8]> = TableDefinition::new("resources"
 const NODES: TableDefinition<&str, &[u8]> = TableDefinition::new("nodes");
 const LEASES: TableDefinition<&str, &[u8]> = TableDefinition::new("leases");
 const EVENTS: TableDefinition<&str, &[u8]> = TableDefinition::new("events");
+pub(crate) const JOIN_TOKENS: TableDefinition<&str, &[u8]> = TableDefinition::new("join_tokens");
 
 pub struct RedbBackend {
-    db: Arc<Database>,
+    pub(crate) db: Arc<Database>,
 }
 
 impl RedbBackend {
@@ -37,6 +38,7 @@ impl RedbBackend {
             write_txn.open_table(NODES)?;
             write_txn.open_table(LEASES)?;
             write_txn.open_table(EVENTS)?;
+            write_txn.open_table(JOIN_TOKENS)?;
             write_txn.commit()?;
         }
         Ok(Self { db: Arc::new(db) })
@@ -58,6 +60,7 @@ impl RedbBackend {
             write_txn.open_table(NODES)?;
             write_txn.open_table(LEASES)?;
             write_txn.open_table(EVENTS)?;
+            write_txn.open_table(JOIN_TOKENS)?;
             write_txn.commit()?;
         }
         Ok(Self { db: Arc::new(db) })

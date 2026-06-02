@@ -5,6 +5,7 @@ pub mod events;
 pub mod gossip;
 pub mod gossip_apply;
 pub mod hub;
+pub mod join_tokens;
 pub mod leases;
 mod memory;
 pub mod ops;

@@ -10,7 +10,32 @@ use tracing::{info, warn};
 use crate::store::gossip::{GossipMessage, GossipState, SyncEntry};
 use crate::store::gossip_apply::apply_incoming_batch;
 use crate::store::hub::StoreEventHub;
-use crate::store::StoreBackend;
+
+fn gossip_connect_url(base: &str, node_name: &str) -> String {
+    if base.contains('?') {
+        format!("{base}&node_name={node_name}")
+    } else {
+        format!("{base}?node_name={node_name}")
+    }
+}
+
+pub fn build_gossip_request(
+    url: &str,
+    token: Option<&str>,
+    node_name: &str,
+) -> Result<tokio_tungstenite::tungstenite::http::Request<()>, tokio_tungstenite::tungstenite::Error> {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    use tokio_tungstenite::tungstenite::http::header::{AUTHORIZATION, HeaderValue};
+
+    let full_url = gossip_connect_url(url, node_name);
+    let mut req = full_url.as_str().into_client_request()?;
+    if let Some(t) = token {
+        let value = HeaderValue::from_str(&format!("Bearer {t}"))
+            .expect("join token must be valid header value");
+        req.headers_mut().insert(AUTHORIZATION, value);
+    }
+    Ok(req)
+}
 
 /// Handle an incoming WebSocket connection from a peer.
 pub async fn handle_gossip_ws(
@@ -178,72 +203,102 @@ pub async fn run_gossip_client(
     mut broadcast_rx: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
     store_events: StoreEventHub,
     notify: Arc<Notify>,
+    join_token: Option<String>,
+    node_name: String,
 ) {
     loop {
-        match tokio_tungstenite::connect_async(&peer_url).await {
-            Ok((ws_stream, _)) => {
-                info!("Connected to gossip peer {} at {}", peer_name, peer_url);
-                let (mut write, mut read) = ws_stream.split();
-
-                let msg = GossipMessage::SyncRequest { request_id: 0 };
-                if let Ok(json) = serde_json::to_string(&msg) {
-                    let _ = write
-                        .send(tokio_tungstenite::tungstenite::Message::Text(json.into()))
-                        .await;
+        let connect = build_gossip_request(&peer_url, join_token.as_deref(), &node_name);
+        match connect {
+            Ok(req) => match tokio_tungstenite::connect_async(req).await {
+                Ok((ws_stream, _)) => {
+                    handle_connected_client(
+                        ws_stream,
+                        &peer_name,
+                        &state,
+                        &store_events,
+                        &notify,
+                        &mut broadcast_rx,
+                    )
+                    .await;
                 }
-
-                loop {
-                    tokio::select! {
-                        msg = read.next() => {
-                            match msg {
-                                Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) => {
-                                    if let Ok(gmsg) = serde_json::from_str::<GossipMessage>(&text) {
-                                        handle_client_gossip(
-                                            gmsg,
-                                            &state,
-                                            &store_events,
-                                            &notify,
-                                            &mut write,
-                                        ).await;
-                                    }
-                                }
-                                Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_))) => {
-                                    info!("Peer {} disconnected", peer_name);
-                                    break;
-                                }
-                                Some(Err(e)) => {
-                                    warn!("Gossip client error from {}: {}", peer_name, e);
-                                    break;
-                                }
-                                None => break,
-                                _ => {}
-                            }
-                        }
-                        _ = sleep(Duration::from_secs(10)) => {
-                            let msg = GossipMessage::Heartbeat;
-                            if let Ok(json) = serde_json::to_string(&msg) {
-                                let _ = write.send(tokio_tungstenite::tungstenite::Message::Text(json.into())).await;
-                            }
-                        }
-                        msg = broadcast_rx.recv() => {
-                            if let Some(bytes) = msg {
-                                let text = String::from_utf8_lossy(&bytes).to_string();
-                                info!("Broadcast forwarding to {}: {}", peer_name, &text[..text.len().min(80)]);
-                                let _ = write.send(tokio_tungstenite::tungstenite::Message::Text(text.into())).await;
-                            }
-                        }
-                    }
+                Err(e) => {
+                    warn!(
+                        "Failed to connect to peer {} ({}): {}. Retrying in 5s...",
+                        peer_name, peer_url, e
+                    );
+                    sleep(Duration::from_secs(5)).await;
                 }
-            }
+            },
             Err(e) => {
-                warn!(
-                    "Failed to connect to peer {} ({}): {}. Retrying in 5s...",
-                    peer_name, peer_url, e
-                );
+                warn!("Invalid gossip request for {}: {}", peer_url, e);
                 sleep(Duration::from_secs(5)).await;
             }
         }
         sleep(Duration::from_secs(5)).await;
+    }
+}
+
+async fn handle_connected_client(
+    ws_stream: tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    peer_name: &str,
+    state: &Arc<tokio::sync::Mutex<GossipState>>,
+    store_events: &StoreEventHub,
+    notify: &Arc<Notify>,
+    broadcast_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+) {
+    info!("Connected to gossip peer {} ", peer_name);
+    let (mut write, mut read) = ws_stream.split();
+
+    let msg = GossipMessage::SyncRequest { request_id: 0 };
+    if let Ok(json) = serde_json::to_string(&msg) {
+        let _ = write
+            .send(tokio_tungstenite::tungstenite::Message::Text(json.into()))
+            .await;
+    }
+
+    loop {
+        tokio::select! {
+            msg = read.next() => {
+                match msg {
+                    Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) => {
+                        if let Ok(gmsg) = serde_json::from_str::<GossipMessage>(&text) {
+                            handle_client_gossip(
+                                gmsg,
+                                state,
+                                store_events,
+                                notify,
+                                &mut write,
+                            ).await;
+                        }
+                    }
+                    Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_))) => {
+                        info!("Peer {} disconnected", peer_name);
+                        break;
+                    }
+                    Some(Err(e)) => {
+                        warn!("Gossip client error from {}: {}", peer_name, e);
+                        break;
+                    }
+                    None => break,
+                    _ => {}
+                }
+            }
+            _ = sleep(Duration::from_secs(10)) => {
+                let msg = GossipMessage::Heartbeat;
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    let _ = write.send(tokio_tungstenite::tungstenite::Message::Text(json.into())).await;
+                }
+            }
+            msg = broadcast_rx.recv() => {
+                if let Some(bytes) = msg {
+                    let text = String::from_utf8_lossy(&bytes).to_string();
+                    info!("Broadcast forwarding to {}: {}", peer_name, &text[..text.len().min(80)]);
+                    let _ = write.send(tokio_tungstenite::tungstenite::Message::Text(text.into())).await;
+                }
+            }
+        }
     }
 }
 

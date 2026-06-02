@@ -21,6 +21,7 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["e
 notify = "8"
 anyhow = { version = "1", features = ["backtrace"] }
 getrandom = "0.2"
+sha2 = "0.10"
 axum = { version = "0.8", default-features = false, features = ["json", "tokio", "http1", "ws", "query"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 tokio-tungstenite = "0.21"

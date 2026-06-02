@@ -191,8 +191,10 @@ pub async fn delete_pod(
     let trackers = state.store.get_by_kind("Pod").await;
     for t in &trackers {
         if t.resource.name() == name && t.resource.namespace() == namespace {
-            state.registry.on_delete(&state.ctx, &t.resource).await;
-            state.store.delete(&t.resource).await.ok();
+            state
+                .delete_and_notify(&t.resource)
+                .await
+                .map_err(|e| ApiError::bad_request(e.to_string()))?;
             info!("Deleted pod {}/{}", namespace, name);
             return Ok(Json(ok_status()));
         }

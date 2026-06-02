@@ -6,8 +6,11 @@ use tokio::time::Duration;
 
 use crate::components::network::service::NetworkManager;
 use crate::components::{ComponentRegistry, ReconcileContext, ResourceCategory};
+use crate::scheduler::index::OrchestratorIndex;
 use crate::scheduler::process::ProcessTracker;
+use crate::scheduler::sync_pod::{stop_pod_local, sync_pod, sync_pods};
 use crate::scheduler::tasks::Task;
+use crate::store::{AnyResource, ResourceTracker};
 use crate::store::hub::StoreEventHub;
 use crate::store::ops::StoreEvent;
 use crate::store::StoreSnapshot;
@@ -19,6 +22,7 @@ const FULL_SWEEP_EVERY: u64 = 15;
 #[derive(Default)]
 struct PendingWork {
     touched_uids: HashSet<String>,
+    deleted: Vec<AnyResource>,
     network: bool,
     compute: bool,
     storage: bool,
@@ -52,6 +56,7 @@ pub struct Orchestrator {
     pub notify: Arc<Notify>,
     pub store_events: StoreEventHub,
     pending: Mutex<PendingWork>,
+    index: Mutex<OrchestratorIndex>,
     tick_count: Mutex<u64>,
 }
 
@@ -71,11 +76,18 @@ impl Orchestrator {
             notify: Arc::new(Notify::new()),
             store_events,
             pending: Mutex::new(PendingWork::default()),
+            index: Mutex::new(OrchestratorIndex::default()),
             tick_count: Mutex::new(0),
         }
     }
 
     pub async fn run(&self) {
+        let snap = self.ctx.store.snapshot().await;
+        self.index
+            .lock()
+            .await
+            .rebuild_from_snapshot(&snap);
+
         let mut events = self.store_events.subscribe();
         let mut ticker = tokio::time::interval(Duration::from_secs(TICK_SECS));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -94,8 +106,19 @@ impl Orchestrator {
         let kind = ev.kind().to_string();
         let uid = ev.uid();
         let mut p = self.pending.lock().await;
-        p.note_kind(&kind, uid);
+        match &ev {
+            StoreEvent::Deleted { resource } => {
+                if resource.kind() == "Pod" {
+                    p.deleted.push(resource.clone());
+                }
+                p.note_kind(&kind, uid);
+            }
+            StoreEvent::Applied { .. } => {
+                p.note_kind(&kind, uid);
+            }
+        }
         drop(p);
+        self.index.lock().await.apply_event(&ev);
         self.notify.notify_one();
     }
 
@@ -115,33 +138,55 @@ impl Orchestrator {
         let work = self.pending.lock().await.take();
         let full = work.force_full || periodic_full;
 
+        for resource in work.deleted {
+            if resource.kind() == "Pod" {
+                self.dispatch(Task::SyncPod {
+                    uid: resource.uid(),
+                })
+                .await;
+                stop_pod_local(&resource, &self.process_tracker, self.ctx.netmux.clone()).await;
+            }
+        }
+
         let snap = self.ctx.store.snapshot().await;
 
         if full {
+            self.index
+                .lock()
+                .await
+                .rebuild_from_snapshot(&snap);
             self.dispatch(Task::ReconcileSweep).await;
-            self.reconcile_all(&snap).await;
+            self.reconcile_components(&snap, snap.all()).await;
+            let local_uids = self.index.lock().await.local_pod_uids();
+            let local_pods = snap.filter_uids(local_uids.iter().map(String::as_str));
+            sync_pods(&local_pods, self.process_tracker.clone()).await;
             self.network.sync_all_services().await;
             return;
         }
 
-        if work.network {
+        let index_dirty_network = self.index.lock().await.take_network_dirty();
+        if work.network || index_dirty_network {
             self.dispatch(Task::SyncNetwork).await;
             self.network.sync_all_services().await;
         }
 
         let mut trackers = snap.filter_uids(work.touched_uids.iter().map(String::as_str));
         if work.compute && trackers.is_empty() {
-            trackers = snap
-                .by_kinds(&[
-                    "Pod",
-                    "Deployment",
-                    "ReplicaSet",
-                    "DaemonSet",
-                    "StatefulSet",
-                ])
-                .into_iter()
-                .cloned()
-                .collect();
+            let local_uids = self.index.lock().await.local_pod_uids();
+            trackers = snap.filter_uids(local_uids.iter().map(String::as_str));
+        }
+        if work.compute {
+            let comp_kinds = [
+                "Deployment",
+                "ReplicaSet",
+                "DaemonSet",
+                "StatefulSet",
+            ];
+            for t in snap.by_kinds(&comp_kinds) {
+                if !trackers.iter().any(|x| x.resource.uid() == t.resource.uid()) {
+                    trackers.push((*t).clone());
+                }
+            }
         }
         if work.storage {
             for t in snap.by_kinds(&["PersistentVolume", "PersistentVolumeClaim"]) {
@@ -152,30 +197,54 @@ impl Orchestrator {
         }
 
         if !trackers.is_empty() {
-            self.registry.reconcile_trackers(&self.ctx, &trackers).await;
+            self.reconcile_components(&snap, &trackers).await;
+            let pods: Vec<_> = trackers
+                .iter()
+                .filter(|t| t.resource.kind() == "Pod")
+                .cloned()
+                .collect();
+            sync_pods(&pods, self.process_tracker.clone()).await;
         } else if work.compute {
-            self.reconcile_category(&snap, ResourceCategory::Compute).await;
+            let kinds: Vec<&str> = self
+                .registry
+                .by_category(ResourceCategory::Compute)
+                .into_iter()
+                .map(|c| c.kind())
+                .filter(|k| *k != "Pod")
+                .collect();
+            let comp: Vec<_> = snap
+                .all()
+                .iter()
+                .filter(|t| kinds.contains(&t.resource.kind()))
+                .cloned()
+                .collect();
+            self.reconcile_components(&snap, &comp).await;
+            let pods: Vec<ResourceTracker> = snap.by_kind("Pod").into_iter().cloned().collect();
+            sync_pods(&pods, self.process_tracker.clone()).await;
         }
     }
 
-    async fn reconcile_all(&self, snap: &StoreSnapshot) {
-        self.registry.reconcile_trackers(&self.ctx, snap.all()).await;
-    }
-
-    async fn reconcile_category(&self, snap: &StoreSnapshot, cat: ResourceCategory) {
-        let kinds: Vec<&str> = self
-            .registry
-            .by_category(cat)
-            .into_iter()
-            .map(|c| c.kind())
-            .collect();
-        let trackers: Vec<_> = snap
-            .all()
+    /// Component reconcile (network/storage/apps) — pods are handled by `sync_pods`.
+    async fn reconcile_components(&self, _snap: &StoreSnapshot, trackers: &[ResourceTracker]) {
+        let non_pods: Vec<_> = trackers
             .iter()
-            .filter(|t| kinds.contains(&t.resource.kind()))
+            .filter(|t| t.resource.kind() != "Pod")
             .cloned()
             .collect();
-        self.registry.reconcile_trackers(&self.ctx, &trackers).await;
+        if !non_pods.is_empty() {
+            self.registry.reconcile_trackers(&self.ctx, &non_pods).await;
+        }
+    }
+
+    #[allow(dead_code)]
+    async fn sync_pod_uid(&self, uid: &str, snap: &StoreSnapshot) {
+        if let Some(tracker) = snap.get(uid) {
+            self.dispatch(Task::SyncPod {
+                uid: uid.to_string(),
+            })
+            .await;
+            let _ = sync_pod(tracker, self.process_tracker.clone()).await;
+        }
     }
 
     async fn dispatch(&self, task: Task) {

@@ -1,6 +1,8 @@
 pub mod engines;
+pub mod index;
 pub mod orchestrator;
 pub mod process;
+pub mod sync_pod;
 pub mod reconciler;
 pub mod scheduler;
 pub mod tasks;

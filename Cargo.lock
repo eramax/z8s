@@ -2597,6 +2597,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha2",
  "tar",
  "tokio",
  "tokio-tungstenite 0.21.0",

@@ -146,7 +146,12 @@ impl DeploymentResource {
                         excess_name,
                         name
                     );
-                    ctx.process_tracker.stop_pod(&remove.resource).await;
+                    crate::scheduler::sync_pod::stop_pod_local(
+                        &remove.resource,
+                        &ctx.process_tracker,
+                        ctx.netmux.clone(),
+                    )
+                    .await;
                     self.store.delete(&remove.resource).await.ok();
                 }
             }

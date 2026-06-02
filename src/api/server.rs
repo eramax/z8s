@@ -44,6 +44,10 @@ pub struct AppState {
     pub store_events: crate::store::StoreEventHub,
     /// Wakes the orchestrator immediately on store writes and gossip assignments.
     pub reconciler_notify: Arc<tokio::sync::Notify>,
+    /// Cluster redb for join-token auth on main (gossip inbound).
+    pub join_db: Option<Arc<crate::store::RedbBackend>>,
+    /// Main node: require Bearer join token on `/ws/gossip`.
+    pub require_join_auth: bool,
 }
 
 impl AppState {
@@ -65,6 +69,14 @@ impl AppState {
 
     pub async fn backend_port(&self, pod: &str, port: u16) -> u16 {
         self.process_tracker.backend_connect_port(pod, port).await
+    }
+
+    /// Delete a resource, emit a store event, wake the orchestrator, and gossip delete to peers.
+    pub async fn delete_and_notify(&self, resource: &AnyResource) -> anyhow::Result<()> {
+        self.store.delete(resource).await?;
+        self.store_events.emit_deleted(resource.clone());
+        self.reconciler_notify.notify_one();
+        Ok(())
     }
 
     /// Apply a resource, emit a store event, wake the orchestrator, and gossip to peers.
@@ -96,6 +108,8 @@ pub async fn build_app_state(
     gossip_state: Option<Arc<tokio::sync::Mutex<crate::store::gossip::GossipState>>>,
     store_events: crate::store::StoreEventHub,
     reconciler_notify: Arc<tokio::sync::Notify>,
+    join_db: Option<Arc<crate::store::RedbBackend>>,
+    require_join_auth: bool,
 ) -> AppState {
     // Log store state on startup
     let pods = store.get_by_kind("Pod").await.len();
@@ -167,6 +181,8 @@ pub async fn build_app_state(
         gossip_state,
         store_events,
         reconciler_notify,
+        join_db,
+        require_join_auth,
     }
 }
 
@@ -204,10 +220,40 @@ pub fn build_router(state: AppState) -> Router {
         .with_state(state)
 }
 
+#[derive(serde::Deserialize, Default)]
+pub struct GossipWsQuery {
+    pub node_name: Option<String>,
+}
+
 pub async fn gossip_ws_handler(
     ws: axum::extract::ws::WebSocketUpgrade,
+    headers: axum::http::HeaderMap,
+    axum::extract::Query(query): axum::extract::Query<GossipWsQuery>,
     State(state): State<AppState>,
 ) -> impl axum::response::IntoResponse {
+    if state.require_join_auth {
+        if let Some(ref db) = state.join_db {
+            match db
+                .authenticate_join(&headers, query.node_name.as_deref())
+                .await
+            {
+                Ok(id) => {
+                    tracing::info!(
+                        "Gossip join authenticated for node '{}'",
+                        id.node_name
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!("Gossip join auth failed: {}", e);
+                    return (
+                        axum::http::StatusCode::UNAUTHORIZED,
+                        format!("join authentication failed: {}", e),
+                    )
+                        .into_response();
+                }
+            }
+        }
+    }
     match state.gossip_state {
         Some(ref gs) => {
             let gs = gs.clone();
@@ -232,6 +278,8 @@ pub async fn run_server(
     gossip_state: Option<Arc<tokio::sync::Mutex<crate::store::gossip::GossipState>>>,
     store_events: crate::store::StoreEventHub,
     reconciler_notify: Arc<tokio::sync::Notify>,
+    join_db: Option<Arc<crate::store::RedbBackend>>,
+    require_join_auth: bool,
 ) {
     let state = build_app_state(
         store,
@@ -241,6 +289,8 @@ pub async fn run_server(
         gossip_state,
         store_events,
         reconciler_notify,
+        join_db,
+        require_join_auth,
     )
     .await;
     let app = build_router(state);
@@ -690,6 +740,8 @@ mod tests {
             gossip_state,
             crate::store::StoreEventHub::new(),
             Arc::new(tokio::sync::Notify::new()),
+            None,
+            false,
         )
         .await;
         build_router(state)
@@ -749,6 +801,8 @@ mod tests {
             gossip_state,
             crate::store::StoreEventHub::new(),
             Arc::new(tokio::sync::Notify::new()),
+            None,
+            false,
         )
         .await;
         (build_router(state), store)
