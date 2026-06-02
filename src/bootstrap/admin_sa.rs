@@ -114,7 +114,7 @@ pub async fn ensure_admin_sa(store: &dyn StoreBackend, data_dir: &str) -> Result
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o600)).ok();
+            std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o644)).ok();
         }
         info!("Admin token written to {}", token_path.display());
         t

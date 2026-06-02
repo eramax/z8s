@@ -4,9 +4,9 @@
 # Requires: z8s running, k configured
 set -euo pipefail
 
-API="${Z8S_SERVER:-${API:-http://127.0.0.1:6443}}"
+API="${Z8S_SERVER:-${API:-https://127.0.0.1:6443}}"
 KUBECTL="${KUBECTL:-kubectl}"
-k() { "$KUBECTL" --server="$API" "$@"; }
+k() { "$KUBECTL" --kubeconfig ~/.kube/config "$@"; }
 PASS=0; FAIL=0; SKIP=0
 
 pass() { echo "  PASS: $1"; ((PASS++)); }
@@ -92,7 +92,7 @@ fi
 # ── 3. Test: deploy-bot SA can GET pods ──────────────────────────
 echo ""
 echo "3. deploy-bot SA can GET pods (allowed by Role)"
-RESP=$(curl -s -o /dev/null -w "%{http_code}" -H "X-Remote-User: system:serviceaccount:default:deploy-bot" \
+RESP=$(curl -sk -o /dev/null -w "%{http_code}" -H "X-Remote-User: system:serviceaccount:default:deploy-bot" \
     "$API/api/v1/namespaces/default/pods")
 if [ "$RESP" = "200" ]; then
     pass "GET pods → 200 (allowed)"
@@ -103,7 +103,7 @@ fi
 # ── 4. Test: deploy-bot SA can LIST pods ─────────────────────────
 echo ""
 echo "4. deploy-bot SA can LIST pods (allowed by Role)"
-RESP=$(curl -s -o /dev/null -w "%{http_code}" -H "X-Remote-User: system:serviceaccount:default:deploy-bot" \
+RESP=$(curl -sk -o /dev/null -w "%{http_code}" -H "X-Remote-User: system:serviceaccount:default:deploy-bot" \
     "$API/api/v1/namespaces/default/pods")
 if [ "$RESP" = "200" ]; then
     pass "LIST pods → 200 (allowed)"
@@ -114,7 +114,7 @@ fi
 # ── 5. Test: deploy-bot SA CANNOT DELETE pods (role only allows get/list/watch)
 echo ""
 echo "5. deploy-bot SA CANNOT DELETE pods (not in Role)"
-RESP=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE -H "X-Remote-User: system:serviceaccount:default:deploy-bot" \
+RESP=$(curl -sk -o /dev/null -w "%{http_code}" -X DELETE -H "X-Remote-User: system:serviceaccount:default:deploy-bot" \
     "$API/api/v1/namespaces/default/pods/rbac-test-pod")
 if [ "$RESP" = "403" ]; then
     pass "DELETE pods → 403 (denied)"
@@ -125,7 +125,7 @@ fi
 # ── 6. Test: deploy-bot SA CANNOT CREATE pods ────────────────────
 echo ""
 echo "6. deploy-bot SA CANNOT CREATE pods (not in Role)"
-RESP=$(curl -s -o /dev/null -w "%{http_code}" -X POST -H "X-Remote-User: system:serviceaccount:default:deploy-bot" \
+RESP=$(curl -sk -o /dev/null -w "%{http_code}" -X POST -H "X-Remote-User: system:serviceaccount:default:deploy-bot" \
     -H "Content-Type: application/json" \
     -d '{"apiVersion":"v1","kind":"Pod","metadata":{"name":"rbac-test-pod-2"},"spec":{"containers":[{"name":"test","image":"busybox"}]}}' \
     "$API/api/v1/namespaces/default/pods")
@@ -138,7 +138,7 @@ fi
 # ── 7. Test: anonymous user has NO access (no RoleBinding for anonymous) ──
 echo ""
 echo "7. Anonymous user CANNOT DELETE pods (no RoleBinding)"
-RESP=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE \
+RESP=$(curl -sk -o /dev/null -w "%{http_code}" -X DELETE \
     "$API/api/v1/namespaces/default/pods/rbac-test-pod")
 if [ "$RESP" = "403" ]; then
     pass "Anonymous DELETE → 403 (denied)"
@@ -149,7 +149,7 @@ fi
 # ── 8. Test: GET without RBAC headers still works (read-only) ───
 echo ""
 echo "8. Unauthenticated GET pods → 200 (read-only allowed)"
-RESP=$(curl -s -o /dev/null -w "%{http_code}" "$API/api/v1/namespaces/default/pods")
+RESP=$(curl -sk -o /dev/null -w "%{http_code}" "$API/api/v1/namespaces/default/pods")
 if [ "$RESP" = "200" ]; then
     pass "Unauthenticated GET → 200 (read-only allowed)"
 else
@@ -203,7 +203,7 @@ fi
 # ── 11. Test: deploy-bot SA can now CREATE pods ─────────────────
 echo ""
 echo "11. deploy-bot SA can now CREATE pods (pod-manager role)"
-RESP=$(curl -s -o /dev/null -w "%{http_code}" -X POST -H "X-Remote-User: system:serviceaccount:default:deploy-bot" \
+RESP=$(curl -sk -o /dev/null -w "%{http_code}" -X POST -H "X-Remote-User: system:serviceaccount:default:deploy-bot" \
     -H "Content-Type: application/json" \
     -d '{"apiVersion":"v1","kind":"Pod","metadata":{"name":"rbac-test-pod-2"},"spec":{"containers":[{"name":"test","image":"busybox","command":["sleep","3600"]}]}}' \
     "$API/api/v1/namespaces/default/pods")
@@ -217,7 +217,7 @@ fi
 echo ""
 echo "12. deploy-bot SA can now DELETE pods (pod-manager role)"
 sleep 1
-RESP=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE -H "X-Remote-User: system:serviceaccount:default:deploy-bot" \
+RESP=$(curl -sk -o /dev/null -w "%{http_code}" -X DELETE -H "X-Remote-User: system:serviceaccount:default:deploy-bot" \
     "$API/api/v1/namespaces/default/pods/rbac-test-pod-2")
 if [ "$RESP" = "200" ] || [ "$RESP" = "204" ]; then
     pass "DELETE pods → $RESP (allowed after upgrade)"
@@ -241,7 +241,7 @@ spec:
     - port: 80
 EOF
 sleep 1
-RESP=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE -H "X-Remote-User: system:serviceaccount:default:deploy-bot" \
+RESP=$(curl -sk -o /dev/null -w "%{http_code}" -X DELETE -H "X-Remote-User: system:serviceaccount:default:deploy-bot" \
     "$API/api/v1/namespaces/default/services/rbac-test-svc")
 if [ "$RESP" = "403" ]; then
     pass "DELETE services → 403 (not in any Role)"
@@ -255,7 +255,7 @@ echo ""
 echo "14. Remove viewer-binding → deploy-bot loses read access to pods"
 k delete rolebinding viewer-binding -n default >/dev/null 2>&1
 # deploy-bot still has pod-manager binding, so should still have access
-RESP=$(curl -s -o /dev/null -w "%{http_code}" -H "X-Remote-User: system:serviceaccount:default:deploy-bot" \
+RESP=$(curl -sk -o /dev/null -w "%{http_code}" -H "X-Remote-User: system:serviceaccount:default:deploy-bot" \
     "$API/api/v1/namespaces/default/pods")
 if [ "$RESP" = "200" ]; then
     pass "GET pods → 200 (still allowed via pod-manager binding)"
@@ -267,7 +267,7 @@ fi
 echo ""
 echo "15. Remove deploy-bot-binding → deploy-bot loses ALL pod access"
 k delete rolebinding deploy-bot-binding -n default >/dev/null 2>&1
-RESP=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE -H "X-Remote-User: system:serviceaccount:default:deploy-bot" \
+RESP=$(curl -sk -o /dev/null -w "%{http_code}" -X DELETE -H "X-Remote-User: system:serviceaccount:default:deploy-bot" \
     "$API/api/v1/namespaces/default/pods/rbac-test-pod")
 if [ "$RESP" = "403" ]; then
     pass "DELETE pods → 403 (all bindings removed)"

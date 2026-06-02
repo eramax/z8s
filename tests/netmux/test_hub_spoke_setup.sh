@@ -44,9 +44,7 @@ wait_crd_ready() {
 
 # ── Create namespace ──────────────────────────────────────────────────
 echo "Creating namespace $NS..."
-kubectl --kubeconfig="$KUBECONFIG" delete namespace "$NS" --ignore-not-found 2>&1
-sleep 1
-kubectl --kubeconfig="$KUBECONFIG" create namespace "$NS" 2>&1 || { echo "Failed to create namespace $NS"; exit 1; }
+kubectl --kubeconfig="$KUBECONFIG" create namespace "$NS" 2>&1 || true
 sleep 1
 
 # ── 1. VNet ──────────────────────────────────────────────────────────

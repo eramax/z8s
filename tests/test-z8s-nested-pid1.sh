@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-HOST_API="${Z8S_SERVER:-http://127.0.0.1:6443}"
+HOST_API="${Z8S_SERVER:-https://127.0.0.1:6443}"
 INNER_API="${Z8S_INNER_SERVER:-http://127.0.0.1:16443}"
 K="${KUBECTL:-kubectl}"
 PASS=0
@@ -33,7 +33,7 @@ echo ""
 
 # ── 0. Host cluster up ─────────────────────────────────────────────
 echo "0. Host z8s health"
-if curl -sf "${HOST_API}/healthz" | grep -q ok; then
+if curl -sfk "${HOST_API}/healthz" | grep -q ok; then
   pass "Host /healthz"
 else
   fail "Host /healthz" "is host z8s running on ${HOST_API}?"
@@ -60,7 +60,7 @@ fi
 # ── 2. Inner API ───────────────────────────────────────────────────
 echo ""
 echo "2. Inner z8s API via hostPort 16443"
-if curl -sf "${INNER_API}/healthz" | grep -q ok; then
+if curl -sfk "${INNER_API}/healthz" | grep -q ok; then
   pass "Inner /healthz"
 else
   fail "Inner /healthz" "curl ${INNER_API}/healthz"

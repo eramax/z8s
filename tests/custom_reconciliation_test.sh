@@ -2,7 +2,7 @@
 # Targeted custom test validating CIDR separation, loopback activation, and /dev/null writable fix
 set -eo pipefail
 
-SERVER="http://localhost:6443"
+SERVER="https://localhost:6443"
 NS="z8s-custom-test"
 DAEMON="./z8s.sh"
 
@@ -17,8 +17,8 @@ fail() { echo -e "${RED}FAIL${NC} $1"; exit 1; }
 section() { echo -e "\n${YELLOW}══ $1 ══${NC}"; }
 sub() { echo -e "${CYAN}  ▸ $1${NC}"; }
 
-k() { /home/abb/.local/bin/kubectl --server="$SERVER" "$@" 2>&1 || true; }
-kapply() { /home/abb/.local/bin/kubectl --server="$SERVER" "$@" 2>&1; }
+k() { /home/abb/.local/bin/kubectl --kubeconfig ~/.kube/config "$@" 2>&1 || true; }
+kapply() { /home/abb/.local/bin/kubectl --kubeconfig ~/.kube/config "$@" 2>&1; }
 
 section "1. Starting z8s daemon cleanly"
 "$DAEMON" stop || true

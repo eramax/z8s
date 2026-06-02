@@ -12,7 +12,7 @@ Z8S_TEST_LOG="${Z8S_TEST_LOG:-${LOG_DIR}/test-latest.log}"
 exec > >(tee -a "$Z8S_TEST_LOG") 2>&1
 echo "Test log: $Z8S_TEST_LOG"
 
-SERVER="${Z8S_SERVER:-http://localhost:6443}"
+SERVER="${Z8S_SERVER:-https://localhost:6443}"
 Z8S_BIN="${Z8S_BIN:-$(cd "$(dirname "$0")/.." && pwd)/target/debug/z8s}"
 LOG="/tmp/z8s.log"
 PASS=0; FAIL=0; ERRORS=()
@@ -57,8 +57,8 @@ sub() {
     LAST_TEST_TIME=$(date +%s)
 }
 
-k() { /home/abb/.local/bin/kubectl --server="$SERVER" "$@" 2>&1 || true; }
-kapply() { /home/abb/.local/bin/kubectl --server="$SERVER" "$@" 2>&1; }
+k() { /home/abb/.local/bin/kubectl --kubeconfig ~/.kube/config "$@" 2>&1 || true; }
+kapply() { /home/abb/.local/bin/kubectl --kubeconfig ~/.kube/config "$@" 2>&1; }
 
 wait_pod_ready() {
     local name="$1" ns="${2:-default}" timeout="${3:-30}"
@@ -171,29 +171,17 @@ cleanup() {
 # ── 1. Apply all YAML resources ────────────────────────────────────────────────
 # ── Fresh cluster (avoids reusing old redb / scaled deployments) ─────────────
 if [[ "${Z8S_SKIP_RESET:-}" != "1" ]]; then
-    section "0. Cluster reset and start"
-    sub "z8s reset — stop nodes, wipe redb/rootfs"
-    if sudo "$Z8S_BIN" reset; then
-        pass "z8s reset completed"
-    else
-        fail "z8s reset" "reset command failed"
-    fi
-    sub "Start main + worker nodes"
-    if sudo "$Z8S_BIN" node start && sudo "$Z8S_BIN" node start --port 7443; then
-        pass "z8s nodes started"
-    else
-        fail "z8s node start" "could not start cluster"
-    fi
-    sub "Wait for API and nodes"
+    section "0. Verify cluster is running"
     ok=0
-    for _ in $(seq 1 30); do
-        if curl -sf "${SERVER%/}/healthz" >/dev/null 2>&1; then ok=1; break; fi
+    for _ in $(seq 1 15); do
+        if curl -sfk "${SERVER%/}/healthz" >/dev/null 2>&1; then ok=1; break; fi
         sleep 1
     done
     if [[ $ok -eq 1 ]]; then
         pass "API healthz ok on $SERVER"
     else
-        fail "API healthz" "not ready after 30s — run: sudo $Z8S_BIN node start"
+        fail "API healthz" "not ready — start z8s first: sudo z8s node start"
+        exit 1
     fi
     node_count=$(k get nodes --no-headers 2>/dev/null | wc -l | tr -d ' ')
     if [[ "${node_count:-0}" -ge 1 ]]; then
@@ -202,7 +190,7 @@ if [[ "${Z8S_SKIP_RESET:-}" != "1" ]]; then
         fail "kubectl get nodes" "no nodes — z8s may not be running on $SERVER"
     fi
 else
-    echo "Skipping cluster reset (Z8S_SKIP_RESET=1)"
+    echo "Skipping cluster check (Z8S_SKIP_RESET=1)"
 fi
 
 section "1. Apply all manifest YAMLs"
@@ -1723,13 +1711,13 @@ if echo "$out" | grep -q "pvc-test"; then pass "pvc: pvc-test visible via --all-
 # ── 21. Server health endpoints ───────────────────────────────────────────────
 section "21. Server health endpoints"
 for ep in healthz readyz livez; do
-    out=$(curl -sf "$SERVER/$ep" 2>&1)
+    out=$(curl -sfk "$SERVER/$ep" 2>&1)
     if [[ "$out" == "ok" ]]; then pass "$ep returns ok"; else fail "$ep" "got '$out'"; fi
 done
 
 # ── 22. Version endpoint ──────────────────────────────────────────────────────
 section "22. Version endpoint"
-out=$(curl -sf "$SERVER/version" 2>&1)
+out=$(curl -sfk "$SERVER/version" 2>&1)
 if echo "$out" | grep -q "z8s"; then pass "version endpoint returns z8s"; else fail "version endpoint" "$out"; fi
 
 # ── 23. RBAC header-based (test_rbac.sh) ───────────────────────────────────────

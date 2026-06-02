@@ -9,7 +9,7 @@
 set -uo pipefail
 
 export PATH="/home/abb/.local/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
-SERVER="${Z8S_SERVER:-http://localhost:6443}"
+SERVER="${Z8S_SERVER:-https://localhost:6443}"
 DAEMON="$(dirname "$0")/../z8s.sh"
 YAML_DIR="$(dirname "$0")"
 LOG="/tmp/z8s.log"
@@ -22,8 +22,8 @@ GREEN='\033[0;32m'; RED='\033[0;31m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC
 pass() { echo -e "${GREEN}PASS${NC} $1"; PASS=$((PASS+1)); }
 fail() { local m="$1" d="${2:-}"; echo -e "${RED}FAIL${NC} $m${d:+: $d}"; ERRORS+=("$m${d:+: $d}"); FAIL=$((FAIL+1)); }
 
-k() { kubectl --server="$SERVER" "$@" 2>&1 || true; }
-kapply() { kubectl --server="$SERVER" "$@" 2>&1; }
+k() { kubectl --kubeconfig ~/.kube/config "$@" 2>&1 || true; }
+kapply() { kubectl --kubeconfig ~/.kube/config "$@" 2>&1; }
 
 wait_pod_ready() {
     local name="$1" ns="${2:-default}" timeout="${3:-60}"
@@ -126,7 +126,7 @@ setup() {
     echo "══ Setup: start server + apply YAMLs ══"
     "$DAEMON" restart
     for i in $(seq 1 15); do
-        curl -sf "$SERVER/healthz" >/dev/null 2>&1 && break
+        curl -sfk "$SERVER/healthz" >/dev/null 2>&1 && break
         sleep 1
         [[ $i -eq 15 ]] && { echo "Server failed to start"; exit 1; }
     done
@@ -540,9 +540,9 @@ test_all_namespaces() {
 
 test_health() {
     for ep in healthz readyz livez; do
-        [[ "$(curl -sf "$SERVER/$ep" 2>&1)" == "ok" ]] || return 1
+        [[ "$(curl -sfk "$SERVER/$ep" 2>&1)" == "ok" ]] || return 1
     done
-    curl -sf "$SERVER/version" 2>&1 | grep -q "z8s" || return 1
+    curl -sfk "$SERVER/version" 2>&1 | grep -q "z8s" || return 1
     return 0
 }
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
-SERVER="${Z8S_SERVER:-http://localhost:6443}"
-k() { /home/abb/.local/bin/kubectl --server="$SERVER" "$@" 2>&1 || true; }
+SERVER="${Z8S_SERVER:-https://localhost:6443}"
+k() { /home/abb/.local/bin/kubectl --kubeconfig ~/.kube/config "$@" 2>&1 || true; }
 
 echo "=== python-deploy scale 2->3 ==="
 k scale deployment python-deploy --replicas=3

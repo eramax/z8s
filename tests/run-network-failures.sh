@@ -7,7 +7,7 @@
 #   ./tests/run-network-failures.sh
 set -eo pipefail
 
-SERVER="${Z8S_SERVER:-http://localhost:6443}"
+SERVER="${Z8S_SERVER:-https://localhost:6443}"
 YAML_DIR="$(dirname "$0")"
 NS="default"
 PASS=0
@@ -32,8 +32,8 @@ skip() { echo -e "${YELLOW}SKIP${NC} $1"; SKIP=$((SKIP + 1)); }
 section() { echo -e "\n${YELLOW}══ $1 ══${NC}"; }
 sub() { echo -e "${CYAN}  ▸ $1${NC}"; }
 
-k() { kubectl --server="$SERVER" "$@" 2>&1; }
-kapply() { kubectl --server="$SERVER" "$@" 2>&1; }
+k() { kubectl --kubeconfig ~/.kube/config "$@" 2>&1; }
+kapply() { kubectl --kubeconfig ~/.kube/config "$@" 2>&1; }
 
 wait_pod_ready() {
   local name="$1" timeout="${2:-90}"

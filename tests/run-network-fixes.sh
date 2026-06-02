@@ -10,7 +10,7 @@
 # Expect ~1–3 minutes (not the full 10-minute suite).
 set -eo pipefail
 
-SERVER="${Z8S_SERVER:-http://localhost:6443}"
+SERVER="${Z8S_SERVER:-https://localhost:6443}"
 NS="z8s-fixtest"
 PASS=0
 FAIL=0
@@ -32,8 +32,8 @@ fail() {
 section() { echo -e "\n${YELLOW}══ $1 ══${NC}"; }
 sub() { echo -e "${CYAN}  ▸ $1${NC}"; }
 
-k() { kubectl --server="$SERVER" "$@" 2>&1; }
-kapply() { kubectl --server="$SERVER" "$@" 2>&1; }  # caller checks exit status when needed
+k() { kubectl --kubeconfig ~/.kube/config "$@" 2>&1; }
+kapply() { kubectl --kubeconfig ~/.kube/config "$@" 2>&1; }  # caller checks exit status when needed
 
 wait_pod_ready() {
   local name="$1" timeout="${2:-45}"

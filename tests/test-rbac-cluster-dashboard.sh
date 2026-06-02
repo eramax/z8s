@@ -4,7 +4,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SERVER="${Z8S_SERVER:-http://127.0.0.1:6443}"
+SERVER="${Z8S_SERVER:-https://127.0.0.1:6443}"
 KUBECTL="${KUBECTL:-kubectl}"
 STACK="${SCRIPT_DIR}/rbac/cluster-dashboard-stack.yaml"
 
@@ -14,7 +14,7 @@ FAIL=0
 pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 fail() { echo "  FAIL: $1 — ${2:-}"; FAIL=$((FAIL + 1)); }
 
-k() { "$KUBECTL" --server="$SERVER" "$@"; }
+k() { "$KUBECTL" --kubeconfig ~/.kube/config "$@"; }
 
 cleanup() {
   echo "Cleaning up RBAC dashboard test resources..."
@@ -117,7 +117,7 @@ fi
 echo ""
 echo "Multi-doc apply authz smoke (optional)..."
 if command -v curl &>/dev/null; then
-  code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$SERVER/api/v1/apply" \
+  code=$(curl -sk -o /dev/null -w "%{http_code}" -X POST "$SERVER/api/v1/apply" \
     -H "Content-Type: application/yaml" \
     -H "X-Remote-User: anonymous" \
     --data-binary "apiVersion: v1

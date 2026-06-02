@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-SERVER="${Z8S_SERVER:-http://localhost:6443}"
+SERVER="${Z8S_SERVER:-https://localhost:6443}"
 NS="storage-test"
 GREEN='\033[0;32m'; RED='\033[0;31m'; CYAN='\033[0;36m'; NC='\033[0m'
 pass() { echo -e "${GREEN}PASS${NC} $1"; }
 fail() { echo -e "${RED}FAIL${NC} $1"; exit 1; }
-k()   { kubectl --server="$SERVER" "$@" 2>/dev/null; }
+k()   { kubectl --kubeconfig ~/.kube/config "$@" 2>/dev/null; }
 check() { local m="$1"; shift; "$@" && pass "$m" || fail "$m"; }
 
 PV_BASE="/var/lib/z8s/pv"

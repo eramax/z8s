@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -uo pipefail
-SERVER="${Z8S_SERVER:-http://localhost:6443}"
+SERVER="${Z8S_SERVER:-https://localhost:6443}"
 DAEMON="/home/abb/dev/z8s/z8s.sh"
 YAML_DIR="/home/abb/dev/z8s/tests"
 PASS=0; FAIL=0; ERRORS=()
 GREEN='\033[0;32m'; RED='\033[0;31m'; YELLOW='\033[1;33m'; NC='\033[0m'
 pass() { echo -e "${GREEN}PASS${NC} $1"; PASS=$((PASS+1)); }
 fail() { echo -e "${RED}FAIL${NC} $1"; ERRORS+=("$1"); FAIL=$((FAIL+1)); }
-k() { /home/abb/.local/bin/kubectl --server="$SERVER" "$@" 2>&1 || true; }
-kapply() { /home/abb/.local/bin/kubectl --server="$SERVER" --validate=false "$@" 2>&1; }
+k() { /home/abb/.local/bin/kubectl --kubeconfig ~/.kube/config "$@" 2>&1 || true; }
+kapply() { /home/abb/.local/bin/kubectl --kubeconfig ~/.kube/config --validate=false "$@" 2>&1; }
 
 wait_pod_regex() {
   local pattern="$1" ns="${2:-default}" timeout="${3:-90}"
@@ -22,7 +22,7 @@ wait_pod_regex() {
 
 echo "=== Start z8s ==="
 "$DAEMON" restart 2>&1; sleep 2
-curl -sf "$SERVER/healthz" >/dev/null && pass "server started" || { fail "server start"; exit 1; }
+curl -sfk "$SERVER/healthz" >/dev/null && pass "server started" || { fail "server start"; exit 1; }
 
 echo "=== Create resources ==="
 kapply apply -f "$YAML_DIR/00-namespace.yaml" 2>/dev/null
