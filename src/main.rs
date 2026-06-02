@@ -753,6 +753,14 @@ fn node_start(args: &[String]) -> Result<()> {
         node_args.push("--join-token".to_string());
         node_args.push(token);
     }
+    if let Some(cert) = parse_opt_arg(args, "--tls-cert") {
+        node_args.push("--tls-cert".to_string());
+        node_args.push(cert);
+    }
+    if let Some(key) = parse_opt_arg(args, "--tls-key") {
+        node_args.push("--tls-key".to_string());
+        node_args.push(key);
+    }
 
     eprintln!("Starting node on port {node_port}...");
     let refs: Vec<&str> = node_args.iter().map(|s| s.as_str()).collect();

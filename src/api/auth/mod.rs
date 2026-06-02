@@ -39,9 +39,33 @@ pub async fn extract_user(headers: &HeaderMap, tokens: Option<&TokenRegistry>) -
                 }
                 return raw.to_string();
             }
+            if let Some(encoded) = s.strip_prefix("Basic ") {
+                if let Some(decoded) = base64_decode(encoded) {
+                    if let Some(idx) = decoded.iter().position(|&b| b == b':') {
+                        let user = &decoded[..idx];
+                        if !user.is_empty() {
+                            if let Ok(user_str) = std::str::from_utf8(user) {
+                                return user_str.to_string();
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
     "anonymous".to_string()
+}
+
+fn base64_decode(input: &str) -> Option<Vec<u8>> {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD
+        .decode(input)
+        .ok()
+        .or_else(|| {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(input)
+                .ok()
+        })
 }
 
 pub fn verbs_for_http(method: &str, uri: &str) -> Vec<&'static str> {

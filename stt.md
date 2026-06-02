@@ -42,3 +42,17 @@ sudo target/debug/z8s node start
 sudo target/debug/z8s node start --port 7443
 sleep 3
 ./tests/run-tests.sh
+
+
+
+# Generate cert (one-time)
+openssl req -x509 -newkey rsa:2048 -keyout /tmp/z8s-key.pem -out /tmp/z8s-cert.pem \
+  -days 365 -nodes -subj "/CN=localhost" \
+  -addext "subjectAltName=IP:127.0.0.1,DNS:localhost"
+
+# Start with TLS
+z8s node start --tls-cert /tmp/z8s-cert.pem --tls-key /tmp/z8s-key.pem
+
+# kubectl kubeconfig (already configured)
+kubectl get pods
+

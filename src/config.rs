@@ -75,6 +75,10 @@ pub struct Config {
     pub overlay_rootfs: bool,
     /// Max concurrent pod starts on this node (scheduler SyncPod).
     pub pod_start_parallelism: usize,
+    /// TLS certificate path (PEM). If set, server listens on HTTPS.
+    pub tls_cert: Option<String>,
+    /// TLS key path (PEM).
+    pub tls_key: Option<String>,
 }
 
 impl Config {
@@ -127,6 +131,8 @@ impl Config {
             rbac_mode: RbacMode::Enforce,
             overlay_rootfs: false,
             pod_start_parallelism: 10,
+            tls_cert: None,
+            tls_key: None,
         }
     }
 
@@ -269,6 +275,14 @@ impl Config {
                             std::process::exit(1);
                         });
                     }
+                }
+                "--tls-cert" => {
+                    i += 1;
+                    cfg.tls_cert = args.get(i).cloned();
+                }
+                "--tls-key" => {
+                    i += 1;
+                    cfg.tls_key = args.get(i).cloned();
                 }
                 other => {
                     eprintln!("Unknown argument: {}", other);

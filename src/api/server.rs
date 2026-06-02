@@ -288,7 +288,6 @@ pub async fn run_server(
     let addr: std::net::SocketAddr = format!("0.0.0.0:{}", z8s_port())
         .parse()
         .expect("Invalid listen address");
-    info!("Starting k8s API server on {}", addr);
     let socket = tokio::net::TcpSocket::new_v4().expect("Failed to create TCP socket");
     socket
         .set_reuseaddr(true)
@@ -297,7 +296,68 @@ pub async fn run_server(
         .bind(addr)
         .unwrap_or_else(|e| panic!("Failed to bind to {} — port in use? ({})", addr, e));
     let listener = socket.listen(1024).expect("Failed to listen");
-    axum::serve(listener, app).await.unwrap();
+
+    let cfg = crate::config::get();
+    if let (Some(cert_path), Some(key_path)) = (&cfg.tls_cert, &cfg.tls_key) {
+        use tokio_rustls::rustls;
+        info!("Starting TLS API server on {}", addr);
+        let cert_file = std::fs::File::open(cert_path).expect("Cannot open TLS cert");
+        let key_file = std::fs::File::open(key_path).expect("Cannot open TLS key");
+        let mut cert_reader = std::io::BufReader::new(cert_file);
+        let mut key_reader = std::io::BufReader::new(key_file);
+        let certs: Vec<_> = rustls_pemfile::certs(&mut cert_reader)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("Invalid TLS cert PEM");
+        let key = rustls_pemfile::private_key(&mut key_reader)
+            .expect("Invalid TLS key PEM")
+            .expect("No private key found in key file");
+        let mut config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .expect("Invalid TLS cert/key pair");
+        config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        let tls_acceptor =
+            tokio_rustls::TlsAcceptor::from(Arc::new(config));
+
+        let mut tls_listener = TlsListener {
+            tcp: listener,
+            tls_acceptor,
+        };
+        axum::serve(tls_listener, app).await.unwrap();
+    } else {
+        info!("Starting API server on {}", addr);
+        axum::serve(listener, app).await.unwrap();
+    }
+}
+
+// ── TLS Listener adapter for axum::serve ─────────────────────────────────────
+
+struct TlsListener {
+    tcp: tokio::net::TcpListener,
+    tls_acceptor: tokio_rustls::TlsAcceptor,
+}
+
+impl axum::serve::Listener for TlsListener {
+    type Io = tokio_rustls::server::TlsStream<tokio::net::TcpStream>;
+    type Addr = std::net::SocketAddr;
+
+    fn accept(&mut self) -> impl std::future::Future<Output = (Self::Io, Self::Addr)> + Send {
+        async {
+            loop {
+                let (tcp_stream, peer_addr) = self.tcp.accept().await.expect("TCP accept failed");
+                match self.tls_acceptor.accept(tcp_stream).await {
+                    Ok(tls_stream) => return (tls_stream, peer_addr),
+                    Err(e) => {
+                        tracing::error!("TLS handshake error: {}", e);
+                    }
+                }
+            }
+        }
+    }
+
+    fn local_addr(&self) -> std::io::Result<Self::Addr> {
+        self.tcp.local_addr()
+    }
 }
 
 // ── Shared helpers ───────────────────────────────────────────────────────────
