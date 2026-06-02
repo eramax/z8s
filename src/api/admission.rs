@@ -39,7 +39,7 @@ pub fn prepare_create(resource: &mut AnyResource) {
         crate::api::enrich::fill_deployment_metadata(d);
     }
     if let AnyResource::Pod(p) = resource {
-        crate::api::enrich::fill_pod_metadata(p);
+        crate::components::compute::status::fill_pod_metadata(p);
     }
 }
 
@@ -48,7 +48,7 @@ pub fn prepare_update(resource: &mut AnyResource) {
         crate::api::enrich::fill_deployment_metadata(d);
     }
     if let AnyResource::Pod(p) = resource {
-        crate::api::enrich::fill_pod_metadata(p);
+        crate::components::compute::status::fill_pod_metadata(p);
     }
 }
 
