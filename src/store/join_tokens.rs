@@ -229,7 +229,9 @@ impl RedbBackend {
             bail!("invalid join token secret");
         }
         if let Some(claimed) = claimed_node_name {
-            if claimed != rec.node_name {
+            // "_gossip" tokens are shared secrets that any node can use
+            // (for same-machine multi-node setups where node_start can't open the redb).
+            if rec.node_name != "_gossip" && claimed != rec.node_name {
                 bail!(
                     "token is for node '{}' but connection claimed '{}'",
                     rec.node_name,

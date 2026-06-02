@@ -187,14 +187,56 @@ pub async fn run_node(
     let require_join_auth = cfg.peers.is_empty() && redb.is_some();
     if require_join_auth {
         if let Some(ref db) = redb {
+            // Ensure a join token exists for the main node name.
             match db.ensure_join_token(&cfg.node_name, false).await {
-                Ok(Some(_)) => {
+                Ok(Some(wire_token)) => {
                     info!(
                         "Join token created for '{}'. Run `z8s node {} token` to display it.",
                         cfg.node_name, cfg.node_name
                     );
+                    if let Some(ref data_dir) = cfg.data_dir {
+                        // Persist per-node token
+                        let token_path = format!("{}/join-token-{}", data_dir, cfg.node_name);
+                        if let Err(e) = std::fs::write(&token_path, &wire_token) {
+                            warn!("Failed to persist join token to {}: {}", token_path, e);
+                        }
+                        // Also create a shared gossip-secret for same-machine nodes.
+                        // This allows `node_start` to auth without opening the redb.
+                        let secret_path = format!("{}/gossip-secret", data_dir);
+                        if !std::path::Path::new(&secret_path).exists() {
+                            use crate::store::join_tokens::format_wire_token;
+                            use crate::store::join_tokens::new_join_record;
+                            let (record, secret) = new_join_record("_gossip");
+                            if db.write_join_token(&record).await.is_ok() {
+                                let wire = format_wire_token(&record.token_id, &secret);
+                                if let Err(e) = std::fs::write(&secret_path, &wire) {
+                                    warn!("Failed to persist gossip secret: {}", e);
+                                } else {
+                                    info!("Gossip secret written to {}", secret_path);
+                                }
+                            }
+                        }
+                    }
                 }
-                Ok(None) => {}
+                Ok(None) => {
+                    // Token already exists. Ensure gossip-secret file exists.
+                    if let Some(ref data_dir) = cfg.data_dir {
+                        let secret_path = format!("{}/gossip-secret", data_dir);
+                        if !std::path::Path::new(&secret_path).exists() {
+                            use crate::store::join_tokens::format_wire_token;
+                            use crate::store::join_tokens::new_join_record;
+                            let (record, secret) = new_join_record("_gossip");
+                            if db.write_join_token(&record).await.is_ok() {
+                                let wire = format_wire_token(&record.token_id, &secret);
+                                if let Err(e) = std::fs::write(&secret_path, &wire) {
+                                    warn!("Failed to persist gossip secret: {}", e);
+                                } else {
+                                    info!("Gossip secret written to {}", secret_path);
+                                }
+                            }
+                        }
+                    }
+                }
                 Err(e) => warn!("Join token bootstrap failed: {}", e),
             }
         }
@@ -372,8 +414,12 @@ pub async fn run_node(
             crate::store::gossip::GossipState::new(cfg.node_name.clone(), store.clone()),
         ));
 
+        let tls_active = cfg.tls_cert.is_some() || cfg.tls_key.is_some()
+            || crate::config::tls_cert_path().is_some();
+        let ws_scheme = if tls_active { "wss" } else { "ws" };
+
         for (name, addr) in &cfg.peers {
-            let url = format!("ws://{}/ws/gossip", addr);
+            let url = format!("{}://{}/ws/gossip", ws_scheme, addr);
             let st = state.clone();
             let n = name.clone();
 

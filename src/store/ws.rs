@@ -208,8 +208,21 @@ pub async fn run_gossip_client(
 ) {
     loop {
         let connect = build_gossip_request(&peer_url, join_token.as_deref(), &node_name);
+        // Build a TLS connector that accepts self-signed certs (for z8s auto-generated certs)
+        let ws_connector = {
+            let nc = native_tls::TlsConnector::builder()
+                .danger_accept_invalid_certs(true)
+                .build()
+                .expect("Failed to build TLS connector");
+            tokio_tungstenite::Connector::NativeTls(nc)
+        };
         match connect {
-            Ok(req) => match tokio_tungstenite::connect_async(req).await {
+            Ok(req) => match tokio_tungstenite::connect_async_tls_with_config(
+                req,
+                None,
+                false,
+                Some(ws_connector),
+            ).await {
                 Ok((ws_stream, _)) => {
                     handle_connected_client(
                         ws_stream,

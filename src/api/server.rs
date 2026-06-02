@@ -221,6 +221,8 @@ pub async fn gossip_ws_handler(
     axum::extract::Query(query): axum::extract::Query<GossipWsQuery>,
     State(state): State<AppState>,
 ) -> impl axum::response::IntoResponse {
+    // When join auth is required, validate the Bearer token.
+    // Skip auth if no join_db is available (e.g. in-memory mode).
     if state.require_join_auth {
         if let Some(ref db) = state.join_db {
             match db

@@ -846,11 +846,61 @@ fn node_start(args: &[String]) -> Result<()> {
         node_args.push("--pod-cidr".to_string());
         node_args.push(cidr);
     }
+    // Auto-fetch join token from main redb if not provided explicitly
     if let Some(token) = parse_opt_arg(args, "--join-token")
         .or_else(|| std::env::var("Z8S_JOIN_TOKEN").ok())
     {
         node_args.push("--join-token".to_string());
         node_args.push(token);
+    } else if node_port != 6443 {
+        // Secondary node without explicit token — try to read from main data dir
+        let main_data_dir = parse_opt_arg(args, "--main-data-dir")
+            .unwrap_or_else(|| "/var/lib/z8s".to_string());
+        let node_name_for_token = format!("node-{}", node_port);
+
+        // 1. Try the gossip-secret file (shared secret for same-machine nodes)
+        let gossip_secret_path = format!("{}/gossip-secret", main_data_dir);
+        let token_path = format!("{}/join-token-{}", main_data_dir, node_name_for_token);
+
+        let wire_token = std::fs::read_to_string(&gossip_secret_path)
+            .map(|s| s.trim().to_string())
+            .or_else(|_| std::fs::read_to_string(&token_path).map(|s| s.trim().to_string()));
+
+        match wire_token {
+            Ok(token) if !token.is_empty() => {
+                node_args.push("--join-token".to_string());
+                node_args.push(token);
+            }
+            _ => {
+                // 3. Try opening the redb directly (works if main is not running)
+                match open_cluster_redb_from(&main_data_dir) {
+                    Ok(db) => {
+                        let rt = tokio::runtime::Runtime::new()?;
+                        match rt.block_on(db.ensure_join_token(&node_name_for_token, false)) {
+                            Ok(Some(wire_token)) => {
+                                eprintln!("Join token created: {wire_token}");
+                                node_args.push("--join-token".to_string());
+                                node_args.push(wire_token);
+                            }
+                            Ok(None) => {
+                                eprintln!(
+                                    "Join token already exists for '{node_name_for_token}'. \
+                                     Run: z8s node {node_name_for_token} token"
+                                );
+                                eprintln!("Then start with: z8s node start --port {node_port} --join-token <token>");
+                                anyhow::bail!("Join token already exists but secret cannot be retrieved. Use --join-token.");
+                            }
+                            Err(e) => {
+                                eprintln!("Warning: could not read join token from main db: {e}");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Warning: could not read join token: {e}");
+                    }
+                }
+            }
+        }
     }
     if let Some(cert) = parse_opt_arg(args, "--tls-cert") {
         node_args.push("--tls-cert".to_string());
@@ -953,6 +1003,10 @@ fn open_cluster_redb(args: &[String]) -> Result<std::sync::Arc<crate::store::Red
     Ok(std::sync::Arc::new(crate::store::RedbBackend::open(&dir)?))
 }
 
+fn open_cluster_redb_from(dir: &str) -> Result<std::sync::Arc<crate::store::RedbBackend>> {
+    Ok(std::sync::Arc::new(crate::store::RedbBackend::open(dir)?))
+}
+
 fn node_token_cmd(node_name: &str, args: &[String]) -> Result<()> {
     let rotate = args.iter().any(|a| a == "--rotate");
     let db = open_cluster_redb(args)?;
@@ -1036,7 +1090,16 @@ async fn join_cluster(url: &str, token: Option<String>, node_name: String) {
                 continue;
             }
         };
-        match tokio_tungstenite::connect_async(req).await {
+        let ws_connector = {
+            let nc = native_tls::TlsConnector::builder()
+                .danger_accept_invalid_certs(true)
+                .build()
+                .expect("Failed to build TLS connector");
+            tokio_tungstenite::Connector::NativeTls(nc)
+        };
+        match tokio_tungstenite::connect_async_tls_with_config(
+            req, None, false, Some(ws_connector),
+        ).await {
             Ok((ws_stream, _)) => {
                 warn!("Connected to cluster at {}", url);
                 let (mut _write, mut read) = ws_stream.split();
