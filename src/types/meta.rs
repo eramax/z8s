@@ -187,4 +187,39 @@ pub struct LabelSelectorRequirement {
     pub values: Option<Vec<String>>,
 }
 
-// ── ReplicaSet / Deployment types ────────────────────────────────────────────
+// ── API Status (error/list response envelope) ────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Status {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<StatusDetails>,
+    pub metadata: ListMeta,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(rename = "apiVersion", skip_serializing_if = "Option::is_none")]
+    pub api_version: Option<String>,
+}
+
+impl Default for Status {
+    fn default() -> Self {
+        Self {
+            code: None,
+            details: None,
+            metadata: ListMeta::default(),
+            message: None,
+            reason: None,
+            status: None,
+            kind: Some("Status".into()),
+            api_version: Some("v1".into()),
+        }
+    }
+}
