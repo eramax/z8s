@@ -1,4 +1,0 @@
-read last compaction /home/abb/dev/z8s/docs/last-compaction-summary.md
-read our /home/abb/dev/z8s/ROADMAP.md and /home/abb/dev/z8s/FINDINGS.md and our test results /tmp/z8s-test-output.txt and then explorer our src code and plan what should u do to make a cleaver and clean z8s and complete the networking and security and do we need to change our roadmap since the other ai agent has done some changes like what has been written in findings. I want to fix the plan and make the solution much better and pass all the tests without cheating or app specifc fixes or hardcoded. we need a real networking and we need to know if our rootless approach can work or we need to run z8s as a root? you have to work on this and also search the internet and come to me with the best approach we have to follow? 
-
-also give a look to /home/abb/dev/z8s/docs/Review & Revised Plan.md

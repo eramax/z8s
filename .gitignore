@@ -14,3 +14,5 @@
 codedb.snapshot
 build-server.yaml
 stt.md
+logs/
+tasks/

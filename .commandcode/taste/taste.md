@@ -12,4 +12,4 @@
 - Use standard K8s annotations (e.g., `z8s.io/*`) for z8s-specific features rather than inventing new spec fields or extension patterns. Confidence: 0.80
 
 # Testing
-- Use kubectl commands instead of curl for test scripts. User explicitly corrected curl-based test to use kubectl. Confidence: 0.75
+- Use kubectl commands instead of curl for test scripts. User explicitly corrected curl-based test to use kubectl. Confidence: 0.80
