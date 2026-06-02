@@ -158,14 +158,6 @@ pub async fn pod_handler(
                 .await
                 .map_err(|e| ApiError::bad_request(e.to_string()))?;
             let pod_name = resource.name().to_string();
-            let already_running = state.process_tracker.is_running(&pod_name).await;
-            if !already_running {
-                state.registry.on_apply(&state.ctx, &resource).await;
-                state
-                    .store
-                    .update_state(&resource.uid(), ResourceState::Running)
-                    .await;
-            }
             let tracker_state = state
                 .store
                 .get(&resource.uid())
@@ -229,11 +221,6 @@ pub async fn create_pod(
         .apply_and_broadcast(resource.clone())
         .await
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
-
-    state.registry.on_apply(&state.ctx, &resource).await;
-
-    let pod_state = ResourceState::Running;
-    state.store.update_state(&resource.uid(), pod_state).await;
     let tracker_state = state
         .store
         .get(&resource.uid())

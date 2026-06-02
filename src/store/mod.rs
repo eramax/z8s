@@ -3,6 +3,7 @@ mod backend;
 pub mod db;
 pub mod events;
 pub mod gossip;
+pub mod gossip_apply;
 pub mod hub;
 pub mod leases;
 mod memory;

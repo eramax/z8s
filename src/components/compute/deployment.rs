@@ -87,10 +87,7 @@ impl Component for DeploymentResource {
         self.reconcile_impl(ctx, tracker).await
     }
 
-    async fn on_apply(&self, ctx: &ReconcileContext, resource: &AnyResource) -> Result<()> {
-        if let Some(tracker) = ctx.store.get(&resource.uid()).await {
-            self.reconcile_impl(ctx, &tracker).await?;
-        }
+    async fn on_apply(&self, _ctx: &ReconcileContext, _resource: &AnyResource) -> Result<()> {
         Ok(())
     }
 

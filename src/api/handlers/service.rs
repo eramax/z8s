@@ -153,7 +153,6 @@ pub async fn create_service(
         .apply_and_broadcast(resource.clone())
         .await
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
-    state.registry.on_apply(&state.ctx, &resource).await;
 
     let status = if already_exists {
         StatusCode::OK
@@ -204,7 +203,6 @@ pub async fn update_service(
         .apply_and_broadcast(resource.clone())
         .await
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
-    state.registry.on_apply(&state.ctx, &resource).await;
     Ok(Json(serde_json::to_value(&resource).unwrap_or_default()))
 }
 

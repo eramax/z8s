@@ -25,14 +25,9 @@ impl Component for IngressResource {
     fn category(&self) -> ResourceCategory {
         ResourceCategory::Network
     }
-    async fn reconcile(&self, _ctx: &ReconcileContext, _tracker: &ResourceTracker) -> Result<()> {
-        Ok(())
-    }
-
-    async fn on_apply(&self, _ctx: &ReconcileContext, resource: &AnyResource) -> Result<()> {
-        if let AnyResource::Ingress(ing) = resource {
+    async fn reconcile(&self, _ctx: &ReconcileContext, tracker: &ResourceTracker) -> Result<()> {
+        if let AnyResource::Ingress(ing) = &tracker.resource {
             crate::netmux::ingress::apply_ingress(&self.netmux.ingress_state, ing)?;
-            // Register DNS records for ingress hosts → gateway IP
             let gw = self.netmux.gateway;
             if let Some(spec) = &ing.spec {
                 if let Some(rules) = &spec.rules {
@@ -56,6 +51,10 @@ impl Component for IngressResource {
                 ing.metadata.name.as_deref().unwrap_or("?")
             );
         }
+        Ok(())
+    }
+
+    async fn on_apply(&self, _ctx: &ReconcileContext, _resource: &AnyResource) -> Result<()> {
         Ok(())
     }
 

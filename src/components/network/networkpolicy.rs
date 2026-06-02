@@ -26,12 +26,8 @@ impl Component for NetworkPolicyResource {
         ResourceCategory::Network
     }
 
-    async fn reconcile(&self, _ctx: &ReconcileContext, _tracker: &ResourceTracker) -> Result<()> {
-        Ok(())
-    }
-
-    async fn on_apply(&self, _ctx: &ReconcileContext, resource: &AnyResource) -> Result<()> {
-        if let AnyResource::NetworkPolicy(np) = resource {
+    async fn reconcile(&self, _ctx: &ReconcileContext, tracker: &ResourceTracker) -> Result<()> {
+        if let AnyResource::NetworkPolicy(np) = &tracker.resource {
             let npc =
                 crate::netmux::np_controller::NetworkPolicyController::new(self.netmux.clone());
             npc.apply_network_policy(np).await?;
@@ -41,6 +37,10 @@ impl Component for NetworkPolicyResource {
                 np.metadata.name.as_deref().unwrap_or("?")
             );
         }
+        Ok(())
+    }
+
+    async fn on_apply(&self, _ctx: &ReconcileContext, _resource: &AnyResource) -> Result<()> {
         Ok(())
     }
 

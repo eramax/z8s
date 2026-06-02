@@ -25,12 +25,8 @@ impl Component for VNetResource {
         ResourceCategory::Network
     }
 
-    async fn reconcile(&self, _ctx: &ReconcileContext, _tracker: &ResourceTracker) -> Result<()> {
-        Ok(())
-    }
-
-    async fn on_apply(&self, _ctx: &ReconcileContext, resource: &AnyResource) -> Result<()> {
-        if let AnyResource::VNet(vnet) = resource {
+    async fn reconcile(&self, _ctx: &ReconcileContext, tracker: &ResourceTracker) -> Result<()> {
+        if let AnyResource::VNet(vnet) = &tracker.resource {
             let cidr = vnet.spec.cidr.as_deref().unwrap_or("10.42.0.0/20");
             self.netmux.apply_vnet(vnet, cidr).await?;
             if vnet.spec.internet_access {
@@ -45,6 +41,10 @@ impl Component for VNetResource {
                 cidr
             );
         }
+        Ok(())
+    }
+
+    async fn on_apply(&self, _ctx: &ReconcileContext, _resource: &AnyResource) -> Result<()> {
         Ok(())
     }
 

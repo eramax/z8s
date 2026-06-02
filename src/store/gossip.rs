@@ -56,8 +56,12 @@ pub struct GossipState {
     pub seen: HashMap<String, u64>,
     pub db: Arc<dyn StoreBackend>,
     pub peers: Vec<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>,
-    pending: Vec<GossipEntry>,
+    /// Coalesce by resource uid — last write wins before flush.
+    pending: HashMap<String, GossipEntry>,
 }
+
+pub const GOSSIP_BATCH_MAX: usize = 32;
+pub const GOSSIP_FLUSH_MS: u64 = 100;
 
 #[derive(Clone)]
 struct GossipEntry {
@@ -74,7 +78,7 @@ impl GossipState {
             seen: HashMap::new(),
             db,
             peers: Vec::new(),
-            pending: Vec::new(),
+            pending: HashMap::new(),
         }
     }
 
@@ -83,19 +87,29 @@ impl GossipState {
         self.peers.push(tx);
     }
 
-    /// Queue a resource for batched broadcast (reduces per-write allocations)
-    pub fn queue_write(&mut self, resource: &AnyResource) {
+    /// Queue a resource for batched broadcast (coalesces duplicate keys).
+    /// Returns true when the pending map reached `GOSSIP_BATCH_MAX` and caller should flush.
+    pub fn queue_write(&mut self, resource: &AnyResource) -> bool {
         if self.peers.is_empty() {
-            return;
+            return false;
         }
         if let Ok(value) = serde_json::to_vec(resource) {
             let term = self.next_term();
-            self.pending.push(GossipEntry {
-                key: resource.uid(),
-                value,
-                term,
-            });
+            let key = resource.uid();
+            self.pending.insert(
+                key,
+                GossipEntry {
+                    key: resource.uid(),
+                    value,
+                    term,
+                },
+            );
         }
+        self.pending.len() >= GOSSIP_BATCH_MAX
+    }
+
+    pub fn pending_len(&self) -> usize {
+        self.pending.len()
     }
 
     /// Flush all pending entries as a single batched message per peer.
@@ -104,7 +118,7 @@ impl GossipState {
         if self.pending.is_empty() || self.peers.is_empty() {
             return;
         }
-        let batch: Vec<GossipEntry> = self.pending.drain(..).collect();
+        let batch: Vec<GossipEntry> = self.pending.drain().map(|(_, e)| e).collect();
         let msg = GossipMessage::BatchGossip {
             entries: batch
                 .iter()
@@ -126,28 +140,10 @@ impl GossipState {
         }
     }
 
-    /// Called after a local write to broadcast to all peers (immediate, unbatched)
-    pub async fn broadcast_write(&self, resource: &AnyResource) {
-        if self.peers.is_empty() {
-            tracing::warn!("broadcast_write: no peers");
-            return;
-        }
-        let key = resource.uid();
-        if let Ok(value) = serde_json::to_vec(resource) {
-            let msg = GossipMessage::Gossip {
-                key: key.clone(),
-                value,
-                term: 0,
-                source: self.node_name.clone(),
-            };
-            if let Ok(json) = serde_json::to_string(&msg) {
-                for (i, tx) in self.peers.iter().enumerate() {
-                    match tx.send(json.as_bytes().to_vec()) {
-                        Ok(()) => tracing::info!("Broadcast {} to peer {}", key, i),
-                        Err(e) => tracing::warn!("Broadcast to peer {} failed: {}", i, e),
-                    }
-                }
-            }
+    /// Queue then flush immediately (used when batch threshold is hit).
+    pub async fn broadcast_write(&mut self, resource: &AnyResource) {
+        if self.queue_write(resource) {
+            self.flush_batch().await;
         }
     }
 

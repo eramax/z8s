@@ -79,7 +79,10 @@ impl AppState {
             .emit_applied(resource.clone(), change);
         self.reconciler_notify.notify_one();
         if let Some(ref gs) = self.gossip_state {
-            gs.lock().await.broadcast_write(&resource).await;
+            let mut g = gs.lock().await;
+            if g.queue_write(&resource) {
+                g.flush_batch().await;
+            }
         }
         Ok(())
     }
@@ -209,7 +212,8 @@ pub async fn gossip_ws_handler(
         Some(ref gs) => {
             let gs = gs.clone();
             let notify = state.reconciler_notify.clone();
-            ws.on_upgrade(move |socket| crate::store::ws::handle_gossip_ws(socket, gs, notify))
+            let events = state.store_events.clone();
+            ws.on_upgrade(move |socket| crate::store::ws::handle_gossip_ws(socket, gs, events, notify))
                 .into_response()
         }
         None => (

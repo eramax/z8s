@@ -30,12 +30,8 @@ impl Component for PvcResource {
         ResourceCategory::Storage
     }
 
-    async fn reconcile(&self, _ctx: &ReconcileContext, _tracker: &ResourceTracker) -> Result<()> {
-        Ok(())
-    }
-
-    async fn on_apply(&self, ctx: &ReconcileContext, resource: &AnyResource) -> Result<()> {
-        let pvc = match resource {
+    async fn reconcile(&self, ctx: &ReconcileContext, tracker: &ResourceTracker) -> Result<()> {
+        let pvc = match &tracker.resource {
             AnyResource::PersistentVolumeClaim(p) => p.clone(),
             _ => return Ok(()),
         };
@@ -111,6 +107,10 @@ impl Component for PvcResource {
         self.store
             .apply(AnyResource::PersistentVolumeClaim(updated_pvc))
             .await?;
+        Ok(())
+    }
+
+    async fn on_apply(&self, _ctx: &ReconcileContext, _resource: &AnyResource) -> Result<()> {
         Ok(())
     }
 

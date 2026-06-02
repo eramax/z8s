@@ -41,7 +41,6 @@ pub async fn generic_create(
     s.apply_and_broadcast(resource.clone())
         .await
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
-    s.registry.on_apply(&s.ctx, &resource).await;
     let status = if exists {
         StatusCode::OK
     } else {
@@ -160,7 +159,6 @@ pub async fn generic_create_namespaced(
     s.apply_and_broadcast(resource.clone())
         .await
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
-    s.registry.on_apply(&s.ctx, &resource).await;
     let status = if already_exists {
         StatusCode::OK
     } else {

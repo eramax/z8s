@@ -55,26 +55,7 @@ impl Component for PodResource {
         Ok(())
     }
 
-    async fn on_apply(&self, ctx: &ReconcileContext, resource: &AnyResource) -> Result<()> {
-        if let AnyResource::Pod(pod) = resource {
-            let assigned = pod.assigned_node.as_deref().unwrap_or("");
-            let local_node = crate::config::get().node_name.as_str();
-            
-            if assigned == local_node {
-                let pod_name = pod.metadata.name.clone().unwrap_or_default();
-                let already_running = ctx.process_tracker.is_running(&pod_name).await;
-                if !already_running {
-                    let ctx = ctx.clone();
-                    let resource = resource.clone();
-                    tokio::spawn(async move {
-                        let _permit = pod_start_semaphore().acquire().await;
-                        if let Err(e) = ctx.process_tracker.start_pod(&resource).await {
-                            tracing::error!("Failed to start pod in on_apply: {}", e);
-                        }
-                    });
-                }
-            }
-        }
+    async fn on_apply(&self, _ctx: &ReconcileContext, _resource: &AnyResource) -> Result<()> {
         Ok(())
     }
 

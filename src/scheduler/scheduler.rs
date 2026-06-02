@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::sync::Notify;
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
@@ -152,6 +153,8 @@ pub async fn scheduler_tick(
     db: &Arc<crate::store::RedbBackend>,
     lease: &LeaseRecord,
     gs: &Option<Arc<tokio::sync::Mutex<crate::store::gossip::GossipState>>>,
+    store_events: &crate::store::StoreEventHub,
+    notify: &Arc<tokio::sync::Notify>,
 ) -> u32 {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -228,11 +231,16 @@ pub async fn scheduler_tick(
     // --- Broadcast all assignments in one go, outside any per-pod lock ---
     if !to_broadcast.is_empty() {
         if let Some(state) = gs {
-            let gs_lock = state.lock().await;
+            let mut gs_lock = state.lock().await;
             for resource in &to_broadcast {
-                gs_lock.broadcast_write(resource).await;
+                gs_lock.queue_write(resource);
             }
+            gs_lock.flush_batch().await;
         }
+        for resource in &to_broadcast {
+            store_events.emit_applied(resource.clone(), crate::store::StoreChange::Updated);
+        }
+        notify.notify_one();
     }
 
     total
@@ -243,6 +251,8 @@ pub async fn run_scheduler(
     node_name: String,
     db: Arc<crate::store::RedbBackend>,
     gs: Option<Arc<tokio::sync::Mutex<crate::store::gossip::GossipState>>>,
+    store_events: crate::store::StoreEventHub,
+    notify: Arc<tokio::sync::Notify>,
 ) {
     let mut lease = run_lease_loop(db.clone(), node_name.clone()).await;
     crate::config::set_scheduler_leader(true);
@@ -281,7 +291,7 @@ pub async fn run_scheduler(
             }
         }
 
-        let n = scheduler_tick(&store, &db, &lease, &gs).await;
+        let n = scheduler_tick(&store, &db, &lease, &gs, &store_events, &notify).await;
         if n > 0 {
             // Rebuild index after scheduling to reflect new assignments
             index.rebuild(&store, &db).await;

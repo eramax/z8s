@@ -225,7 +225,7 @@ pub async fn run_node(
         crate::config::set_dns_port(port);
     }
 
-    let watcher = Arc::new(ManifestWatcher::new(store.clone()));
+    let store_events = crate::store::StoreEventHub::new();
 
     let pipeline = Arc::new(PipelineBuilder::new().build());
 
@@ -271,18 +271,6 @@ pub async fn run_node(
         panic!("Init handler required");
     });
 
-    if let Err(e) = watcher.load_existing().await {
-        error!("Failed to load existing manifests: {}", e);
-    }
-
-    let watcher_clone = watcher.clone();
-    tokio::spawn(async move {
-        if let Err(e) = watcher_clone.start_watching().await {
-            error!("Manifest watcher failed: {}", e);
-        }
-    });
-
-    let store_events = crate::store::StoreEventHub::new();
     let reconciler = Arc::new(Reconciler::new(
         registry.clone(),
         ctx.clone(),
@@ -293,6 +281,21 @@ pub async fn run_node(
     let reconciler_notify = reconciler.notify.clone();
     let rec = reconciler.clone();
     tokio::spawn(async move { rec.run().await });
+
+    let watcher = Arc::new(ManifestWatcher::new(
+        store.clone(),
+        store_events.clone(),
+        reconciler_notify.clone(),
+    ));
+    if let Err(e) = watcher.load_existing().await {
+        error!("Failed to load existing manifests: {}", e);
+    }
+    let watcher_clone = watcher.clone();
+    tokio::spawn(async move {
+        if let Err(e) = watcher_clone.start_watching().await {
+            error!("Manifest watcher failed: {}", e);
+        }
+    });
 
     // ── Gossip setup (no blocking) ────────────────────────────────────
     let gossip_state = {
@@ -310,8 +313,9 @@ pub async fn run_node(
             st.lock().await.add_peer(tx);
 
             let notify = reconciler_notify.clone();
+            let ev = store_events.clone();
             tokio::spawn(async move {
-                crate::store::ws::run_gossip_client(n, url, st, rx, notify).await;
+                crate::store::ws::run_gossip_client(n, url, st, rx, ev, notify).await;
             });
 
             let ae_state = state.clone();
@@ -325,12 +329,29 @@ pub async fn run_node(
     };
 
     if let Some(ref gs) = gossip_state {
+        let gs_flush = gs.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(
+                crate::store::gossip::GOSSIP_FLUSH_MS,
+            ));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                gs_flush.lock().await.flush_batch().await;
+            }
+        });
+    }
+
+    if let Some(ref gs) = gossip_state {
         let (btx, mut brx) = tokio::sync::mpsc::unbounded_channel();
         process_tracker.set_broadcast_tx(btx).await;
         let gs_clone = gs.clone();
         tokio::spawn(async move {
             while let Some(resource) = brx.recv().await {
-                gs_clone.lock().await.broadcast_write(&resource).await;
+                let mut g = gs_clone.lock().await;
+                if g.queue_write(&resource) {
+                    g.flush_batch().await;
+                }
             }
         });
     }
@@ -342,10 +363,9 @@ pub async fn run_node(
         }
         store.apply(AnyResource::Node(node.clone())).await.ok();
         if let Some(ref gs) = gossip_state {
-            gs.lock()
-                .await
-                .broadcast_write(&AnyResource::Node(node))
-                .await;
+            let mut g = gs.lock().await;
+            g.queue_write(&AnyResource::Node(node));
+            g.flush_batch().await;
         }
     }
 
@@ -355,9 +375,9 @@ pub async fn run_node(
     let ctx2 = ctx.clone();
     let gs = gossip_state.clone();
     let srv_notify = reconciler_notify.clone();
+    let srv_events = store_events.clone();
     tokio::spawn(async move {
-        let ev = store_events.clone();
-        crate::api::server::run_server(store_clone, pt2, reg2, ctx2, gs, ev, srv_notify).await;
+        crate::api::server::run_server(store_clone, pt2, reg2, ctx2, gs, srv_events, srv_notify).await;
     });
 
     if let Some(ref db) = redb {
@@ -376,8 +396,15 @@ pub async fn run_node(
             let sched_db = db.clone();
             let sched_gs = gossip_state.clone();
             tokio::spawn(async move {
-                crate::scheduler::scheduler::run_scheduler(sched_store, sched_name, sched_db, sched_gs)
-                    .await;
+                crate::scheduler::scheduler::run_scheduler(
+                    sched_store,
+                    sched_name,
+                    sched_db,
+                    sched_gs,
+                    store_events.clone(),
+                    reconciler_notify.clone(),
+                )
+                .await;
             });
         }
     }

@@ -1,23 +1,31 @@
 use crate::api::AnyResource;
-use crate::store::StoreBackend;
-use crate::store::parse_manifest_yaml;
+use crate::store::ops::{StoreChange, StoreOp};
+use crate::store::{parse_manifest_yaml, StoreBackend, StoreEventHub};
 use anyhow::{Context, Result};
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::path::Path;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{Notify, RwLock};
 use tracing::{error, info, warn};
 
 pub struct ManifestWatcher {
     store: Arc<dyn StoreBackend>,
+    store_events: StoreEventHub,
+    scheduler_notify: Arc<Notify>,
     dir: String,
     processed: Arc<RwLock<std::collections::HashSet<String>>>,
 }
 
 impl ManifestWatcher {
-    pub fn new(store: Arc<dyn StoreBackend>) -> Self {
+    pub fn new(
+        store: Arc<dyn StoreBackend>,
+        store_events: StoreEventHub,
+        scheduler_notify: Arc<Notify>,
+    ) -> Self {
         Self {
             store,
+            store_events,
+            scheduler_notify,
             dir: crate::config::get().manifests_dir.clone(),
             processed: Arc::new(RwLock::new(std::collections::HashSet::new())),
         }
@@ -38,7 +46,6 @@ impl ManifestWatcher {
 
     /// Recursively load all YAML manifests from a directory tree (iterative BFS).
     async fn load_dir_recursive(&self, root: &Path) -> Result<()> {
-        // Collect yaml paths first (sync traversal), then process async
         let yaml_paths = collect_yaml_paths(root);
         for path in yaml_paths {
             if let Err(e) = self.process_file(&path).await {
@@ -60,6 +67,7 @@ impl ManifestWatcher {
         let resources = parse_manifest_yaml(&content)
             .context(format!("Failed to parse YAML in {}", path.display()))?;
 
+        let mut applied = Vec::new();
         for resource in &resources {
             info!(
                 "Loaded resource: {} '{}' in namespace '{}'",
@@ -67,11 +75,18 @@ impl ManifestWatcher {
                 resource.name(),
                 resource.namespace()
             );
-
-            // Set default namespace if not specified
             let resource = set_default_namespace(resource);
+            applied.push(resource);
+        }
 
-            self.store.apply(resource).await?;
+        if !applied.is_empty() {
+            let ops: Vec<StoreOp> = applied.iter().cloned().map(StoreOp::Upsert).collect();
+            self.store.apply_batch(ops).await?;
+            for resource in applied {
+                self.store_events
+                    .emit_applied(resource, StoreChange::Created);
+            }
+            self.scheduler_notify.notify_one();
         }
 
         let mut processed = self.processed.write().await;
@@ -101,103 +116,61 @@ impl ManifestWatcher {
 
         info!("Watching manifests directory: {}", dir);
 
-        // Clear startup-dedup set so re-creates and modify-as-create events are handled
-        self.processed.write().await.clear();
-
-        while let Some(event) = rx.recv().await {
-            match event {
+        while let Some(res) = rx.recv().await {
+            match res {
                 Ok(event) => {
-                    match event.kind {
-                        EventKind::Create(_) => {
-                            for path in &event.paths {
-                                if !path
-                                    .extension()
-                                    .map_or(false, |e| e == "yaml" || e == "yml")
-                                {
-                                    continue;
-                                }
-                                // Skip spurious Create events for files already loaded at startup
-                                let processed = self.processed.read().await;
-                                if processed.contains(&path.to_string_lossy().to_string()) {
-                                    continue;
-                                }
-                                drop(processed);
-                                info!("Detected new manifest: {}", path.display());
-                                if let Err(e) = self.process_file(path).await {
+                    if matches!(
+                        event.kind,
+                        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Any
+                    ) {
+                        for path in event.paths {
+                            if is_yaml(&path) {
+                                if let Err(e) = self.process_file(&path).await {
                                     error!("Failed to process {}: {}", path.display(), e);
                                 }
                             }
                         }
-                        EventKind::Modify(_) => {
-                            for path in &event.paths {
-                                if !path
-                                    .extension()
-                                    .map_or(false, |e| e == "yaml" || e == "yml")
-                                {
-                                    continue;
-                                }
-                                info!("Detected manifest update: {}", path.display());
-                                if let Err(e) = self.process_file(path).await {
-                                    error!("Failed to process {}: {}", path.display(), e);
-                                }
-                            }
-                        }
-                        EventKind::Remove(_) => {
-                            for path in &event.paths {
-                                let processed = self.processed.read().await;
-                                if processed.contains(&path.to_string_lossy().to_string()) {
-                                    // Resource removal would be handled here
-                                    info!("Manifest removed: {}", path.display());
-                                }
-                            }
-                        }
-                        _ => {}
                     }
                 }
-                Err(e) => {
-                    error!("File watch error: {}", e);
-                }
+                Err(e) => error!("Watcher error: {}", e),
             }
         }
-
         Ok(())
     }
 }
 
-/// BFS walk of `root`, collecting paths to all `.yaml`/`.yml` files (skip hidden dirs).
+fn is_yaml(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e == "yaml" || e == "yml")
+        .unwrap_or(false)
+}
+
 fn collect_yaml_paths(root: &Path) -> Vec<std::path::PathBuf> {
-    let mut result = Vec::new();
-    let mut dirs = vec![root.to_path_buf()];
-    while let Some(dir) = dirs.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
+    let mut stack = vec![root.to_path_buf()];
+    let mut yaml_paths = Vec::new();
+    while let Some(dir) = stack.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => continue,
         };
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
-                if path
-                    .file_name()
-                    .map_or(false, |n| !n.to_string_lossy().starts_with('.'))
-                {
-                    dirs.push(path);
-                }
-            } else if path
-                .extension()
-                .map_or(false, |e| e == "yaml" || e == "yml")
-            {
-                result.push(path);
+                stack.push(path);
+            } else if is_yaml(&path) {
+                yaml_paths.push(path);
             }
         }
     }
-    result.sort(); // deterministic order
-    result
+    yaml_paths
 }
 
 fn set_default_namespace(resource: &AnyResource) -> AnyResource {
-    let mut resource = resource.clone();
-    resource
-        .metadata_mut()
-        .namespace
-        .get_or_insert_with(|| "default".to_string());
-    resource
+    let mut r = resource.clone();
+    let meta = r.metadata_mut();
+    if meta.namespace.is_none() {
+        meta.namespace = Some("default".into());
+    }
+    r
 }
