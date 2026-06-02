@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use tracing::{error, warn};
 
 use super::context::ContainerSpawnCtx;
+use super::pipeline::SpawnState;
 use super::{StdPipes, create_std_pipes};
 use crate::cri::rootfs;
 use crate::cri::runtime::{ProcessSupervisor, RunningContainer};
@@ -11,7 +12,7 @@ use crate::cri::runtime::{ProcessSupervisor, RunningContainer};
 impl ProcessSupervisor {
     pub(crate) async fn spawn_root_ns_container(
         &self,
-        ctx: ContainerSpawnCtx<'_>,
+        state: SpawnState<'_>,
     ) -> Result<RunningContainer> {
         let ContainerSpawnCtx {
             entrypoint,
@@ -32,7 +33,8 @@ impl ProcessSupervisor {
             working_dir,
             probes,
             subnet,
-        } = ctx;
+        } = state.ctx;
+        let env_owned = state.merged_env.unwrap_or_else(|| Self::merge_env(env_vars, rootfs_path));
         let pipes = create_std_pipes()?;
         let StdPipes {
             stdout_r,
@@ -49,7 +51,6 @@ impl ProcessSupervisor {
         let rootfs_owned = rootfs_path.to_string();
         let entrypoint_owned = entrypoint.to_string();
         let args_owned = cmd_args.to_vec();
-        let env_owned = Self::merge_env(env_vars, &rootfs_owned);
 
         // Fork #1: create intermediate child that will unshare namespaces (including PID)
         // and then fork #2 to place the grandchild (actual container) in the new PID ns.

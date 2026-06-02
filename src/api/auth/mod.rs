@@ -151,6 +151,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn rule_allows_list_verb() {
+        use crate::types::PolicyRule;
+        let rule = PolicyRule {
+            verbs: vec!["list".into()],
+            api_groups: vec!["".into()],
+            resources: vec!["pods".into()],
+            resource_names: vec![],
+        };
+        let req = AuthzRequest {
+            user: "u",
+            namespace: "default",
+            resource: "pods",
+            verb: "list",
+            api_group: "",
+            name: None,
+        };
+        assert!(rule_allows(&rule, &req));
+    }
+
+    #[test]
     fn collection_path_uses_catalog_plural() {
         assert!(is_collection_path("/api/v1/namespaces/default/pods"));
         assert!(!is_collection_path("/api/v1/namespaces/default/pods/nginx"));

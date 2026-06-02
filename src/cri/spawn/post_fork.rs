@@ -174,8 +174,11 @@ impl ProcessSupervisor {
         log_buffer: Arc<Mutex<Vec<String>>>,
         probes: &[ProbeConfig],
     ) -> RunningContainer {
-        let (ready, healthy) =
-            Self::spawn_probes(probes, &instance.container_id, &instance.published_ports);
+        let (ready, healthy) = crate::cri::probe_runner::spawn_container_probes(
+            probes,
+            &instance.container_id,
+            &instance.published_ports,
+        );
         RunningContainer {
             child: None,
             instance,

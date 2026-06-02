@@ -1,6 +1,6 @@
 use crate::cri::RuntimeProvider;
 use crate::cri::cgroup::CgroupManager;
-use crate::cri::health::{HealthChecker, HealthStatus, ProbeAction, ProbeConfig};
+use crate::cri::health::ProbeConfig;
 use crate::cri::image::ImageManager;
 use crate::cri::rootfs;
 use crate::cri::spec::ContainerSpec;
@@ -349,63 +349,6 @@ impl ProcessSupervisor {
             }
         }
     }
-
-    pub(crate) fn spawn_probes(
-        probes: &[ProbeConfig],
-        container_id: &str,
-        container_port_map: &std::collections::HashMap<u16, u16>,
-    ) -> (Arc<AtomicBool>, Arc<Mutex<bool>>) {
-        let ready = Arc::new(AtomicBool::new(true));
-        let healthy = Arc::new(Mutex::new(true));
-        if probes.is_empty() {
-            return (ready, healthy);
-        }
-        let p_ready = ready.clone();
-        let p_healthy = healthy.clone();
-        let cid = container_id.to_string();
-        let probes_owned = probes.to_vec();
-        let port_map = container_port_map.clone();
-        tokio::spawn(async move {
-            for config in &probes_owned {
-                tokio::time::sleep(Duration::from_secs(config.initial_delay_seconds as u64)).await;
-                loop {
-                    let status = match &config.action {
-                        ProbeAction::Exec(exec) => {
-                            HealthChecker::check_exec(
-                                exec.command.as_deref().unwrap_or(&[]),
-                                config.timeout(),
-                            )
-                            .await
-                        }
-                        ProbeAction::HTTPGet(http) => {
-                            let mut h = http.clone();
-                            if let Some(&host_port) = port_map.get(&h.port) {
-                                h.port = host_port;
-                            }
-                            HealthChecker::check_http(&h, config.timeout()).await
-                        }
-                        ProbeAction::TCPSocket(tcp) => {
-                            let mut t = tcp.clone();
-                            if let Some(&host_port) = port_map.get(&t.port) {
-                                t.port = host_port;
-                            }
-                            HealthChecker::check_tcp(&t, config.timeout()).await
-                        }
-                    };
-                    let ok = matches!(status, HealthStatus::Healthy);
-                    p_ready.store(ok, Ordering::SeqCst);
-                    *p_healthy.lock().await = ok;
-                    if !ok {
-                        warn!("Probe for {} failed", cid);
-                    }
-                    tokio::time::sleep(Duration::from_secs(config.period_seconds as u64)).await;
-                }
-            }
-        });
-        (ready, healthy)
-    }
-
-
 
     async fn build_running_container(
         &self,

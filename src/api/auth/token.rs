@@ -138,7 +138,7 @@ pub fn append_service_account_volumes(
 fn materialize_secret_dir(dir: &str, token: &str, namespace: &str, name: &str) -> Result<()> {
     std::fs::create_dir_all(dir).with_context(|| format!("create SA dir {dir}"))?;
     use std::os::unix::fs::PermissionsExt;
-    let kubeconfig = kubeconfig_yaml();
+    let kubeconfig = kubeconfig_yaml(namespace);
     for (file, contents) in [
         ("token", token),
         ("namespace", namespace),
@@ -153,7 +153,7 @@ fn materialize_secret_dir(dir: &str, token: &str, namespace: &str, name: &str) -
     Ok(())
 }
 
-fn kubeconfig_yaml() -> String {
+fn kubeconfig_yaml(namespace: &str) -> String {
     format!(
         r#"apiVersion: v1
 kind: Config
@@ -165,7 +165,7 @@ clusters:
 contexts:
 - context:
     cluster: z8s
-    namespace: default
+    namespace: {namespace}
     user: z8s-sa
   name: z8s
 current-context: z8s

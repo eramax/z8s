@@ -9,11 +9,16 @@ use crate::cri::runtime::{ProcessSupervisor, RunningContainer};
 /// Mutable state accumulated across spawn steps (extended as steps migrate).
 pub struct SpawnState<'a> {
     pub ctx: ContainerSpawnCtx<'a>,
+    /// Filled by [`super::steps::MergeEnvStep`].
+    pub merged_env: Option<Vec<(String, String)>>,
 }
 
 impl<'a> SpawnState<'a> {
     pub fn new(ctx: ContainerSpawnCtx<'a>) -> Self {
-        Self { ctx }
+        Self {
+            ctx,
+            merged_env: None,
+        }
     }
 }
 
@@ -52,8 +57,8 @@ impl SpawnPipeline {
         }
         use super::context::{IsolationStrategy, isolation_strategy};
         match isolation_strategy() {
-            IsolationStrategy::RootNs => supervisor.spawn_root_ns_container(state.ctx).await,
-            IsolationStrategy::UserNs => supervisor.spawn_userns_container(state.ctx).await,
+            IsolationStrategy::RootNs => supervisor.spawn_root_ns_container(state).await,
+            IsolationStrategy::UserNs => supervisor.spawn_userns_container(state).await,
         }
     }
 }

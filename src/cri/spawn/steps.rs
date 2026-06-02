@@ -26,6 +26,25 @@ impl SpawnStep for PrepareVolumesStep {
     }
 }
 
+struct MergeEnvStep;
+
+#[async_trait]
+impl SpawnStep for MergeEnvStep {
+    async fn apply(
+        &self,
+        _supervisor: &ProcessSupervisor,
+        state: &mut SpawnState<'_>,
+    ) -> Result<()> {
+        let ContainerSpawnCtx {
+            env_vars,
+            rootfs_path,
+            ..
+        } = &state.ctx;
+        state.merged_env = Some(ProcessSupervisor::merge_env(env_vars, rootfs_path));
+        Ok(())
+    }
+}
+
 struct PrepareRootfsStep;
 
 #[async_trait]
@@ -45,5 +64,6 @@ impl super::pipeline::SpawnPipeline {
         Self::legacy_isolated()
             .push_step(Box::new(PrepareVolumesStep))
             .push_step(Box::new(PrepareRootfsStep))
+            .push_step(Box::new(MergeEnvStep))
     }
 }
