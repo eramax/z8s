@@ -34,6 +34,7 @@ pub struct ContainerSpawnCtx<'a> {
     pub run_as_group: Option<u32>,
     pub isolate_net: bool,
     pub privileged: bool,
+    pub is_native: bool,
     pub extra_caps: Vec<String>,
     pub working_dir: Option<String>,
     pub probes: Vec<ProbeConfig>,

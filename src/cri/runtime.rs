@@ -131,6 +131,7 @@ impl ProcessSupervisor {
                 run_as_group,
                 isolate_net,
                 privileged,
+                is_native: cfg.is_native,
                 extra_caps: extra_caps.clone(),
                 working_dir: working_dir.clone(),
                 probes: cfg.probes.clone(),

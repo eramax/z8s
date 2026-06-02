@@ -10,7 +10,10 @@ use crate::store::{AnyResource, ResourceState, ResourceTracker};
 
 fn pod_start_semaphore() -> &'static Semaphore {
     static SEM: OnceLock<Semaphore> = OnceLock::new();
-    SEM.get_or_init(|| Semaphore::new(10))
+    SEM.get_or_init(|| {
+        let n = crate::config::get().pod_start_parallelism.max(1);
+        Semaphore::new(n)
+    })
 }
 
 /// Reconcile one pod against CRI (scheduler-owned; components must not call CRI for pods).

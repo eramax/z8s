@@ -43,6 +43,7 @@ pub fn child_setup_privileges(
         privileged: bool,
         extra_caps: &[String],
         isolation: rootfs::RootfsIsolation,
+        skip_landlock: bool,
     ) {
         if let Some(gid) = run_as_group {
             if let Err(e) = nix::unistd::setgid(nix::unistd::Gid::from_raw(gid)) {
@@ -61,7 +62,7 @@ pub fn child_setup_privileges(
         }
         raise_nproc_limit();
         rootfs::drop_capabilities(privileged, extra_caps);
-        if isolation != rootfs::RootfsIsolation::Degraded {
+        if isolation != rootfs::RootfsIsolation::Degraded && !skip_landlock {
             rootfs::apply_landlock();
         }
     }

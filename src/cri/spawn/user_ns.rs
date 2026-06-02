@@ -27,6 +27,7 @@ impl ProcessSupervisor {
             run_as_group,
             isolate_net,
             privileged,
+            is_native,
             extra_caps,
             working_dir,
             probes,
@@ -155,6 +156,7 @@ impl ProcessSupervisor {
                     privileged,
                     &extra_caps,
                     isolation,
+                    is_native,
                 );
 
                 let (exec_path, prog_args) = crate::cri::spawn::child::argv_for_isolation(

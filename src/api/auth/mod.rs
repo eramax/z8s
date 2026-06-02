@@ -64,41 +64,11 @@ pub fn verbs_for_http(method: &str, uri: &str) -> Vec<&'static str> {
     }
 }
 
+/// Collection URLs end with a catalog plural (`…/pods`); item URLs end with a name (`…/pods/foo`).
 fn is_collection_path(uri: &str) -> bool {
     let path = uri.split('?').next().unwrap_or(uri).trim_end_matches('/');
     let last = path.rsplit('/').next().unwrap_or("");
-    matches!(
-        last,
-        "pods"
-            | "services"
-            | "configmaps"
-            | "secrets"
-            | "persistentvolumeclaims"
-            | "persistentvolumes"
-            | "nodes"
-            | "namespaces"
-            | "deployments"
-            | "replicasets"
-            | "daemonsets"
-            | "statefulsets"
-            | "jobs"
-            | "cronjobs"
-            | "ingresses"
-            | "networkpolicies"
-            | "events"
-            | "endpoints"
-            | "endpointslices"
-            | "roles"
-            | "rolebindings"
-            | "clusterroles"
-            | "clusterrolebindings"
-            | "serviceaccounts"
-            | "vnets"
-            | "subnets"
-            | "nsgs"
-            | "routetables"
-            | "storageclasses"
-    )
+    crate::api::catalog::by_plural(last).is_some()
 }
 
 pub fn api_group_for_resource(resource: &str) -> &'static str {
@@ -174,6 +144,19 @@ fn resource_names_match(rule_names: &[String], name: Option<&str>) -> bool {
         return false;
     };
     rule_names.iter().any(|n| n == name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn collection_path_uses_catalog_plural() {
+        assert!(is_collection_path("/api/v1/namespaces/default/pods"));
+        assert!(!is_collection_path("/api/v1/namespaces/default/pods/nginx"));
+        assert!(is_collection_path("/apis/apps/v1/namespaces/default/deployments"));
+        assert!(is_collection_path("/apis/z8s.io/v1/vnets"));
+    }
 }
 
 pub async fn has_any_rbac_policy(store: &dyn StoreBackend) -> bool {

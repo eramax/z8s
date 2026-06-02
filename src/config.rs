@@ -73,6 +73,8 @@ pub struct Config {
     pub rbac_mode: RbacMode,
     /// Use OverlayFS (lower=image cache) for container rootfs when possible.
     pub overlay_rootfs: bool,
+    /// Max concurrent pod starts on this node (scheduler SyncPod).
+    pub pod_start_parallelism: usize,
 }
 
 impl Config {
@@ -124,6 +126,7 @@ impl Config {
             join_token: None,
             rbac_mode: RbacMode::Enforce,
             overlay_rootfs: false,
+            pod_start_parallelism: 10,
         }
     }
 
@@ -248,6 +251,15 @@ impl Config {
                 }
                 "--overlay-rootfs" => {
                     cfg.overlay_rootfs = true;
+                }
+                "--pod-start-parallelism" => {
+                    i += 1;
+                    if let Some(v) = args.get(i) {
+                        cfg.pod_start_parallelism = v.parse().unwrap_or_else(|_| {
+                            eprintln!("Invalid --pod-start-parallelism: {}", v);
+                            std::process::exit(1);
+                        });
+                    }
                 }
                 "--vnet-cidr-size" => {
                     i += 1;
@@ -419,6 +431,7 @@ OPTIONS:
     --join-token <TOKEN>      Token for worker node auth    [default: none]
     --rbac-mode <MODE>        RBAC enforcement: enforce|permissive [default: enforce]
     --overlay-rootfs          Use OverlayFS for container rootfs (fallback: copy)
+    --pod-start-parallelism N Concurrent pod starts per node [default: 10]
     --help                    Show this help
 
 EXAMPLES:
