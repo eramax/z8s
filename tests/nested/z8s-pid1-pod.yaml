@@ -1,0 +1,62 @@
+# z8s running as PID 1 inside a pod (nested control plane).
+# Requires: host z8s with privileges to run privileged pods; image built from deploy/z8s/Dockerfile
+# or set image to your local tag, e.g. z8s:dev
+#
+# Apply on HOST cluster:
+#   kubectl apply --validate=false -f tests/nested/z8s-pid1-pod.yaml
+#
+# Inner API (hostPort):
+#   curl -s http://127.0.0.1:16443/healthz
+#
+# See tests/test-z8s-nested-pid1.sh
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: z8s-nested
+  namespace: default
+  labels:
+    app: z8s-nested
+    test: nested-pid1
+spec:
+  restartPolicy: Never
+  hostNetwork: false
+  containers:
+    - name: z8s
+      image: z8s:dev
+      imagePullPolicy: IfNotPresent
+      command: ["/z8s", "run", "--daemon"]
+      args:
+        - "--port"
+        - "6443"
+        - "--pod-cidr"
+        - "10.201.0.0/16"
+        - "--service-cidr"
+        - "10.111.0.0/16"
+        - "--data-dir"
+        - "/var/lib/z8s"
+      ports:
+        - name: api
+          containerPort: 6443
+          hostPort: 16443
+      securityContext:
+        privileged: true
+      readinessProbe:
+        httpGet:
+          path: /healthz
+          port: 6443
+        initialDelaySeconds: 5
+        periodSeconds: 3
+        failureThreshold: 20
+      volumeMounts:
+        - name: z8s-data
+          mountPath: /var/lib/z8s
+        - name: cgroup
+          mountPath: /sys/fs/cgroup
+  volumes:
+    - name: z8s-data
+      emptyDir: {}
+    - name: cgroup
+      hostPath:
+        path: /sys/fs/cgroup
+        type: Directory
