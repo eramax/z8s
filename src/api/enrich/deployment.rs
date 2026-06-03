@@ -132,6 +132,12 @@ pub async fn count_deployment_pods(
 
     let mut ready = 0;
     for t in &matching {
+        // A pod is ready if its store state is Running (via gossip from remote nodes)
+        // OR if the local process tracker knows it's ready.
+        if matches!(t.state, crate::store::ResourceState::Running) {
+            ready += 1;
+            continue;
+        }
         for c in extract_containers(&t.resource) {
             let cid = format!("{}-{}", t.resource.name(), c.name);
             if tracker.is_container_ready(&cid).await {

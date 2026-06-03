@@ -8,7 +8,7 @@ use axum::response::IntoResponse;
 use crate::api::compat::{self, WireContext};
 use crate::api::server::*;
 use crate::api::table::{self, build_table, make_table};
-use crate::store::AnyResource;
+use crate::store::{AnyResource, ResourceState};
 
 pub async fn list_nodes(
     s: &AppState,
@@ -32,11 +32,13 @@ pub async fn list_nodes(
         let svc_count = s.store.get_by_kind("Service").await.len();
         let running: Vec<String> = futures_util::future::join_all(pods.iter().map(|t| async {
             if let AnyResource::Pod(p) = &t.resource {
-                if s.process_tracker
-                    .is_running(p.metadata.name.as_deref().unwrap_or(""))
-                    .await
+                let name = p.metadata.name.clone().unwrap_or_default();
+                // A pod is "running" if either the local process tracker knows about it,
+                // OR its store state is Running (for remote nodes via gossip).
+                if s.process_tracker.is_running(&name).await
+                    || matches!(t.state, ResourceState::Running)
                 {
-                    return p.metadata.name.clone().unwrap_or_default();
+                    return name;
                 }
             }
             String::new()
