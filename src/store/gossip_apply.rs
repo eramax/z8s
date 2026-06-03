@@ -42,21 +42,15 @@ pub async fn apply_incoming_batch_with_state(
     if entries.is_empty() {
         return;
     }
-    for (resource, state_override) in entries {
-        let uid = resource.uid();
-        let ops = vec![StoreOp::Upsert(resource.clone())];
-        if let Err(e) = store.apply_batch(ops).await {
-            tracing::warn!("gossip apply_batch failed: {}", e);
-            continue;
-        }
-        if let Some(state) = state_override {
-            // Apply state in a tight loop until it sticks — a concurrent
-            // orchestrator sweep may call store.apply() which resets state
-            // to Pending between our update_state and the next read.
-            for _ in 0..3 {
-                store.update_state(&uid, state.clone()).await;
-            }
-        }
+    let ops: Vec<StoreOp> = entries
+        .iter()
+        .map(|(r, s)| StoreOp::UpsertWithState(r.clone(), s.clone()))
+        .collect();
+    if let Err(e) = store.apply_batch(ops).await {
+        tracing::warn!("gossip apply_batch failed: {}", e);
+        return;
+    }
+    for (resource, _) in entries {
         hub.emit_applied(resource.clone(), StoreChange::Updated);
     }
     notify.notify_one();

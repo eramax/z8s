@@ -79,6 +79,16 @@ impl StoreBackend for MemoryBackend {
                     }
                     store.insert(uid, tracker);
                 }
+                StoreOp::UpsertWithState(resource, state_override) => {
+                    let uid = resource.uid();
+                    let mut tracker = ResourceTracker::new(resource);
+                    if let Some(state) = state_override {
+                        tracker.state = state;
+                    } else if let Some(existing) = store.get(&uid).map(|t| t.state.clone()) {
+                        tracker.state = existing;
+                    }
+                    store.insert(uid, tracker);
+                }
                 StoreOp::Delete(resource) => {
                     store.remove(&resource.uid());
                 }

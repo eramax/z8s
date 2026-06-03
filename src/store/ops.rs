@@ -1,4 +1,4 @@
-use crate::store::AnyResource;
+use crate::store::{AnyResource, ResourceState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StoreChange {
@@ -10,6 +10,7 @@ pub enum StoreChange {
 #[derive(Debug, Clone)]
 pub enum StoreOp {
     Upsert(AnyResource),
+    UpsertWithState(AnyResource, Option<ResourceState>),
     Delete(AnyResource),
 }
 

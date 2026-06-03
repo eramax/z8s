@@ -18,6 +18,12 @@ pub trait StoreBackend: Send + Sync {
         for op in ops {
             match op {
                 StoreOp::Upsert(r) => self.apply(r).await?,
+                StoreOp::UpsertWithState(r, state) => {
+                    self.apply(r.clone()).await?;
+                    if let Some(s) = state {
+                        self.update_state(&r.uid(), s).await;
+                    }
+                }
                 StoreOp::Delete(r) => self.delete(&r).await?,
             }
         }

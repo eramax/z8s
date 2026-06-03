@@ -17,7 +17,7 @@ async fn pod_json_with_runtime(s: &AppState, resource: &AnyResource, state: &Res
     // Use gossiped ResourceState::Running as fallback — it's only set after the
     // container successfully starts on the worker node.
     let ready = local_ready || matches!(state, ResourceState::Running);
-    tracing::info!("pod_json_with_runtime name={} state={:?} local_ready={} ready={}", name, state, local_ready, ready);
+    tracing::debug!("pod_json_with_runtime name={} state={:?} local_ready={} ready={}", name, state, local_ready, ready);
     let restarts = s.process_tracker.pod_restart_counts(name).await;
     let ip = s
         .process_tracker

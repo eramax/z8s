@@ -204,6 +204,11 @@ impl StoreBackend for RedbBackend {
                             let bytes = serde_json::to_vec(&resource)?;
                             table.insert(key.as_str(), bytes.as_slice())?;
                         }
+                        StoreOp::UpsertWithState(resource, _state) => {
+                            let key = resource.uid();
+                            let bytes = serde_json::to_vec(&resource)?;
+                            table.insert(key.as_str(), bytes.as_slice())?;
+                        }
                         StoreOp::Delete(resource) => {
                             let key = resource.uid();
                             table.remove(key.as_str()).ok();

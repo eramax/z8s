@@ -180,7 +180,7 @@ async fn handle_message(
                 let mut to_apply = Vec::with_capacity(entries.len());
                 for entry in entries {
                     let should_apply = st.dedup(&entry.key, entry.term);
-                    tracing::info!("  entry key={} state={:?} apply={}", entry.key, entry.state, should_apply);
+                    tracing::debug!("  entry key={} state={:?} apply={}", entry.key, entry.state, should_apply);
                     if !should_apply {
                         continue;
                     }
