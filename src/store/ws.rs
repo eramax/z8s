@@ -8,7 +8,7 @@ use tokio::time::sleep;
 use tracing::{info, warn};
 
 use crate::store::gossip::{GossipMessage, GossipState, SyncEntry};
-use crate::store::gossip_apply::apply_incoming_batch;
+use crate::store::gossip_apply::{apply_incoming_batch, apply_incoming_batch_with_state};
 use crate::store::hub::StoreEventHub;
 
 fn gossip_connect_url(base: &str, node_name: &str) -> String {
@@ -133,7 +133,7 @@ async fn handle_message(
                     let key = t.resource.uid();
                     let term = st.seen.get(&key).copied().unwrap_or(0);
                     let value = serde_json::to_vec(&t.resource).unwrap_or_default();
-                    SyncEntry { key, value, term }
+                    SyncEntry { key, value, term, state: Some(t.state.clone()) }
                 })
                 .collect();
             let count = entries.len();
@@ -158,12 +158,12 @@ async fn handle_message(
                     if let Ok(resource) =
                         serde_json::from_slice::<crate::store::AnyResource>(&entry.value)
                     {
-                        to_apply.push(resource);
+                        to_apply.push((resource, entry.state.clone()));
                     }
                 }
                 (db, to_apply)
             };
-            apply_incoming_batch(&db, store_events, notify, to_apply).await;
+            apply_incoming_batch_with_state(&db, store_events, notify, &to_apply).await;
         }
         GossipMessage::Heartbeat => {
             let _ = tx.send(Message::Text(
@@ -173,23 +173,26 @@ async fn handle_message(
             ));
         }
         GossipMessage::BatchGossip { entries, source: _ } => {
+            tracing::info!("Server-side BatchGossip: {} entries", entries.len());
             let (db, to_apply) = {
                 let mut st = state.lock().await;
                 let db = st.db.clone();
                 let mut to_apply = Vec::with_capacity(entries.len());
                 for entry in entries {
-                    if !st.dedup(&entry.key, entry.term) {
+                    let should_apply = st.dedup(&entry.key, entry.term);
+                    tracing::info!("  entry key={} state={:?} apply={}", entry.key, entry.state, should_apply);
+                    if !should_apply {
                         continue;
                     }
                     if let Ok(resource) =
                         serde_json::from_slice::<crate::store::AnyResource>(&entry.value)
                     {
-                        to_apply.push(resource);
+                        to_apply.push((resource, entry.state.clone()));
                     }
                 }
                 (db, to_apply)
             };
-            apply_incoming_batch(&db, store_events, notify, to_apply).await;
+            apply_incoming_batch_with_state(&db, store_events, notify, &to_apply).await;
         }
         _ => {}
     }
@@ -349,12 +352,12 @@ async fn handle_client_gossip(
                     if let Ok(resource) =
                         serde_json::from_slice::<crate::store::AnyResource>(&entry.value)
                     {
-                        to_apply.push(resource);
+                        to_apply.push((resource, entry.state.clone()));
                     }
                 }
                 (db, to_apply)
             };
-            apply_incoming_batch(&db, store_events, notify, to_apply).await;
+            apply_incoming_batch_with_state(&db, store_events, notify, &to_apply).await;
         }
         GossipMessage::SyncRequest { request_id } => {
             let st = state.lock().await;
@@ -365,7 +368,7 @@ async fn handle_client_gossip(
                     let key = t.resource.uid();
                     let term = st.seen.get(&key).copied().unwrap_or(0);
                     let value = serde_json::to_vec(&t.resource).unwrap_or_default();
-                    SyncEntry { key, value, term }
+                    SyncEntry { key, value, term, state: Some(t.state.clone()) }
                 })
                 .collect();
             let response = GossipMessage::SyncFull {
@@ -390,12 +393,12 @@ async fn handle_client_gossip(
                     if let Ok(resource) =
                         serde_json::from_slice::<crate::store::AnyResource>(&entry.value)
                     {
-                        to_apply.push(resource);
+                        to_apply.push((resource, entry.state.clone()));
                     }
                 }
                 (db, to_apply)
             };
-            apply_incoming_batch(&db, store_events, notify, to_apply).await;
+            apply_incoming_batch_with_state(&db, store_events, notify, &to_apply).await;
         }
         _ => {}
     }

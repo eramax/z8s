@@ -12,7 +12,12 @@ use crate::store::AnyResource;
 
 async fn pod_json_with_runtime(s: &AppState, resource: &AnyResource, state: &ResourceState) -> serde_json::Value {
     let name = resource.name();
-    let ready = s.process_tracker.is_ready(name).await;
+    let local_ready = s.process_tracker.is_ready(name).await;
+    // For pods on remote nodes, the local ProcessTracker doesn't know about them.
+    // Use gossiped ResourceState::Running as fallback — it's only set after the
+    // container successfully starts on the worker node.
+    let ready = local_ready || matches!(state, ResourceState::Running);
+    tracing::info!("pod_json_with_runtime name={} state={:?} local_ready={} ready={}", name, state, local_ready, ready);
     let restarts = s.process_tracker.pod_restart_counts(name).await;
     let ip = s
         .process_tracker

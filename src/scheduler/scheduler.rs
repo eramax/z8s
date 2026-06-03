@@ -238,6 +238,10 @@ pub async fn scheduler_tick(
                     if rec.last_seen >= deadline && rec.state != NodeState::Dead {
                         continue;
                     }
+                } else {
+                    // Node not found in heartbeat DB — don't evict pods from it;
+                    // secondary nodes write heartbeats to their own redb, not ours.
+                    continue;
                 }
                 if node_loads.is_empty() {
                     continue;

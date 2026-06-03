@@ -467,9 +467,9 @@ pub async fn run_node(
         process_tracker.set_broadcast_tx(btx).await;
         let gs_clone = gs.clone();
         tokio::spawn(async move {
-            while let Some(resource) = brx.recv().await {
+            while let Some((resource, state)) = brx.recv().await {
                 let mut g = gs_clone.lock().await;
-                if g.queue_write(&resource) {
+                if g.queue_write_with_state(&resource, state) {
                     g.flush_batch().await;
                 }
             }

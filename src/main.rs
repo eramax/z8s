@@ -488,10 +488,20 @@ fn reset_z8s() -> Result<()> {
     std::thread::sleep(std::time::Duration::from_millis(500));
     umount_z8s_mounts();
 
-    for path in ["/var/lib/z8s/z8s.redb", "/var/lib/z8s/rootfs"] {
+    for path in ["/var/lib/z8s/z8s.redb", "/var/lib/z8s/rootfs", "/var/lib/z8s/gossip-secret"] {
         if std::path::Path::new(path).exists() {
             eprintln!("Removing {path}...");
             remove_path_quiet(path);
+        }
+    }
+    // Also remove join-token-* files
+    if let Ok(entries) = std::fs::read_dir("/var/lib/z8s") {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if name.to_string_lossy().starts_with("join-token-") {
+                eprintln!("Removing {}...", entry.path().display());
+                remove_path_quiet(entry.path().to_str().unwrap_or(""));
+            }
         }
     }
 

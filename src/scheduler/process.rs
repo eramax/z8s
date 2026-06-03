@@ -19,7 +19,7 @@ pub struct ProcessTracker {
     pub cri: Arc<dyn RuntimeProvider>,
     pub store: Arc<dyn StoreBackend>,
     pub tokens: Arc<TokenRegistry>,
-    pub broadcast_tx: tokio::sync::RwLock<Option<tokio::sync::mpsc::UnboundedSender<AnyResource>>>,
+    pub broadcast_tx: tokio::sync::RwLock<Option<tokio::sync::mpsc::UnboundedSender<(AnyResource, Option<ResourceState>)>>>,
 }
 
 impl ProcessTracker {
@@ -40,7 +40,7 @@ impl ProcessTracker {
         }
     }
 
-    pub async fn set_broadcast_tx(&self, tx: tokio::sync::mpsc::UnboundedSender<AnyResource>) {
+    pub async fn set_broadcast_tx(&self, tx: tokio::sync::mpsc::UnboundedSender<(AnyResource, Option<ResourceState>)>) {
         *self.broadcast_tx.write().await = Some(tx);
     }
 
@@ -65,7 +65,7 @@ impl ProcessTracker {
         if let Some(mut t) = self.store.get(&resource.uid()).await {
             t.state = ResourceState::Running;
             if let Some(tx) = &*self.broadcast_tx.read().await {
-                let _ = tx.send(t.resource);
+                let _ = tx.send((t.resource, Some(ResourceState::Running)));
             }
         }
         Ok(())
@@ -88,7 +88,7 @@ impl ProcessTracker {
         if let Some(mut t) = self.store.get(&resource.uid()).await {
             t.state = ResourceState::Terminated;
             if let Some(tx) = &*self.broadcast_tx.read().await {
-                let _ = tx.send(t.resource);
+                let _ = tx.send((t.resource, Some(ResourceState::Terminated)));
             }
         }
     }
@@ -307,20 +307,21 @@ impl ProcessTracker {
                         if let Some(mut t) = store.get(&pod_uid).await {
                             t.state = ResourceState::Succeeded;
                             if let Some(tx) = &*self.broadcast_tx.read().await {
-                                let _ = tx.send(t.resource);
+                                let _ = tx.send((t.resource, Some(ResourceState::Succeeded)));
                             }
                         }
                     } else {
+                        let fail_state = ResourceState::Failed(format!("exit code {}", exit_code));
                         store
                             .update_state(
                                 &pod_uid,
-                                ResourceState::Failed(format!("exit code {}", exit_code)),
+                                fail_state.clone(),
                             )
                             .await;
                         if let Some(mut t) = store.get(&pod_uid).await {
-                            t.state = ResourceState::Failed(format!("exit code {}", exit_code));
+                            t.state = fail_state.clone();
                             if let Some(tx) = &*self.broadcast_tx.read().await {
-                                let _ = tx.send(t.resource);
+                                let _ = tx.send((t.resource, Some(fail_state)));
                             }
                         }
                     }

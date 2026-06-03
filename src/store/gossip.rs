@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
-use crate::store::{AnyResource, StoreBackend};
+use crate::store::{AnyResource, ResourceState, StoreBackend};
 
 /// Gossip message types exchanged over WebSocket.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,6 +47,8 @@ pub struct SyncEntry {
     pub key: String,
     pub value: Vec<u8>,
     pub term: u64,
+    #[serde(default)]
+    pub state: Option<ResourceState>,
 }
 
 /// Tracks known terms per key for deduplication.
@@ -68,6 +70,7 @@ struct GossipEntry {
     key: String,
     value: Vec<u8>,
     term: u64,
+    state: Option<ResourceState>,
 }
 
 impl GossipState {
@@ -90,6 +93,11 @@ impl GossipState {
     /// Queue a resource for batched broadcast (coalesces duplicate keys).
     /// Returns true when the pending map reached `GOSSIP_BATCH_MAX` and caller should flush.
     pub fn queue_write(&mut self, resource: &AnyResource) -> bool {
+        self.queue_write_with_state(resource, None)
+    }
+
+    /// Queue a resource with explicit ResourceState for gossip.
+    pub fn queue_write_with_state(&mut self, resource: &AnyResource, state: Option<ResourceState>) -> bool {
         if self.peers.is_empty() {
             return false;
         }
@@ -102,6 +110,7 @@ impl GossipState {
                     key: resource.uid(),
                     value,
                     term,
+                    state,
                 },
             );
         }
@@ -126,6 +135,7 @@ impl GossipState {
                     key: e.key.clone(),
                     value: e.value.clone(),
                     term: e.term,
+                    state: e.state.clone(),
                 })
                 .collect(),
             source: self.node_name.clone(),
