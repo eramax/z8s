@@ -497,27 +497,32 @@ fn build_command(
         let iso_net = isolated_net;
         let exec_gid = run_as_group;
         let exec_uid = run_as_user;
+        let has_pid_ns = ns_fds.pid.is_some();
         unsafe {
             c.as_std_mut().pre_exec(move || {
-                let _ = enter_container_namespaces(&ns_fds, iso_net, use_mnt_ns);
-                if use_mnt_ns {
-                    if let Some(ref pid) = ns_fds.pid {
-                        let _ = nix::sched::setns(pid, CloneFlags::CLONE_NEWPID);
-                        let child = nix::libc::fork();
-                        if child > 0 {
-                            // Parent exits immediately — no waitpid (would block tokio).
-                            nix::libc::_exit(0);
-                        }
-                        // Child: mount fresh procfs scoped to this PID namespace.
-                        if let Err(e) = mount(
-                            Some("proc"),
-                            "/proc",
-                            Some("proc"),
-                            MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC | MsFlags::MS_NODEV,
-                            None::<&str>,
-                        ) {
-                            tracing::warn!("exec: mount proc failed: {e}");
-                        }
+                // Always enter mount namespace when PID namespace is available,
+                // so /proc shows container processes (not host processes).
+                let enter_mnt = use_mnt_ns || has_pid_ns;
+                let _ = enter_container_namespaces(&ns_fds, iso_net, enter_mnt);
+
+                // Always enter PID namespace if available — this is what gives
+                // the exec'd process its own PID view (ps shows only container procs).
+                if let Some(ref pid) = ns_fds.pid {
+                    let _ = nix::sched::setns(pid, CloneFlags::CLONE_NEWPID);
+                    let child = nix::libc::fork();
+                    if child > 0 {
+                        // Parent exits immediately — no waitpid (would block tokio).
+                        nix::libc::_exit(0);
+                    }
+                    // Child: mount fresh procfs scoped to this PID namespace.
+                    if let Err(e) = mount(
+                        Some("proc"),
+                        "/proc",
+                        Some("proc"),
+                        MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC | MsFlags::MS_NODEV,
+                        None::<&str>,
+                    ) {
+                        tracing::warn!("exec: mount proc failed: {e}");
                     }
                 }
                 if let Some(gid) = exec_gid {

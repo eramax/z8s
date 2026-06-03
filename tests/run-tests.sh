@@ -59,6 +59,7 @@ sub() {
 
 k() { /home/abb/.local/bin/kubectl --kubeconfig ~/.kube/config "$@" 2>&1 || true; }
 kapply() { /home/abb/.local/bin/kubectl --kubeconfig ~/.kube/config "$@" 2>&1; }
+kexec() { timeout 10 /home/abb/.local/bin/kubectl --kubeconfig ~/.kube/config exec "$@" 2>&1 || true; }
 
 wait_pod_ready() {
     local name="$1" ns="${2:-default}" timeout="${3:-30}"
@@ -341,7 +342,7 @@ section "6. Pod validation"
 
 # 6a. Alpine pod: env vars and envFrom
 sub "Alpine pod — env vars"
-ALPINE_ENV=$(k exec alpine-pod -- sh -c env 2>&1)
+ALPINE_ENV=$(kexec alpine-pod -- sh -c env 2>&1)
 if echo "$ALPINE_ENV" | grep -q "DIRECT_ENV=direct-value"; then
     pass "alpine: DIRECT_ENV injected"
 else
@@ -364,7 +365,7 @@ fi
 
 # 6b. Alpine pod: configMap volume
 sub "Alpine pod — configMap volume"
-out=$(k exec alpine-pod -- cat /etc/config/APP_ENV 2>&1)
+out=$(kexec alpine-pod -- cat /etc/config/APP_ENV 2>&1)
 if echo "$out" | grep -q "production"; then
     pass "alpine: configMap volume file APP_ENV"
 else
@@ -375,7 +376,7 @@ else
     fi
 fi
 
-out=$(k exec alpine-pod -- cat /etc/config/config.yaml 2>&1)
+out=$(kexec alpine-pod -- cat /etc/config/config.yaml 2>&1)
 if echo "$out" | grep -q "port: 18080"; then
     pass "alpine: configMap volume config.yaml"
 else
@@ -388,7 +389,7 @@ fi
 
 # 6c. Alpine pod: secret volume
 sub "Alpine pod — secret volume"
-out=$(k exec alpine-pod -- cat /etc/secret/DB_PASSWORD 2>&1)
+out=$(kexec alpine-pod -- cat /etc/secret/DB_PASSWORD 2>&1)
 if echo "$out" | grep -q "password123"; then
     pass "alpine: secret volume DB_PASSWORD"
 else
@@ -401,7 +402,7 @@ fi
 
 # 6d. Alpine pod: emptyDir write/read
 sub "Alpine pod — emptyDir volume"
-    out=$(k exec alpine-pod -- sh -c 'echo "emptydir-data" > /var/data/test.txt && cat /var/data/test.txt' 2>&1)
+    out=$(kexec alpine-pod -- sh -c 'echo "emptydir-data" > /var/data/test.txt && cat /var/data/test.txt' 2>&1)
     if echo "$out" | grep -q "emptydir-data"; then
         pass "alpine: emptyDir write+read works"
     else
@@ -416,7 +417,7 @@ sub "Alpine pod — emptyDir volume"
 
 # 6e. Ubuntu pod (non-root): check UID
 sub "Ubuntu pod — non-root security context"
-    out=$(k exec -n z8s-test ubuntu-pod -- id 2>&1) || true
+    out=$(kexec -n z8s-test ubuntu-pod -- id 2>&1) || true
     if echo "$out" | grep -q "uid=1000"; then
         pass "ubuntu (z8s-test): runAsUser=1000 confirmed"
     elif echo "$out" | grep -q "uid=0"; then
@@ -427,7 +428,7 @@ sub "Ubuntu pod — non-root security context"
 
 # 6f. Ubuntu pod: non-root can't write to /etc
 sub "Ubuntu pod — non-root file access restrictions"
-    out=$(k exec -n z8s-test ubuntu-pod -- touch /etc/test-root-write 2>&1)
+    out=$(kexec -n z8s-test ubuntu-pod -- touch /etc/test-root-write 2>&1)
     if echo "$out" | grep -qiE "permission denied|read-only file system|not permitted"; then
         pass "ubuntu: non-root cannot write to /etc (permission denied)"
     elif echo "$out" | grep -qiE "error|not found|GLIBC"; then
@@ -437,7 +438,7 @@ sub "Ubuntu pod — non-root file access restrictions"
     fi
 
 # 6g. Ubuntu pod: non-root can't read /etc/shadow
-    out=$(k exec -n z8s-test ubuntu-pod -- cat /etc/shadow 2>&1)
+    out=$(kexec -n z8s-test ubuntu-pod -- cat /etc/shadow 2>&1)
     if echo "$out" | grep -qiE "permission denied|cannot open|no such file"; then
         pass "ubuntu: non-root cannot read /etc/shadow"
     elif echo "$out" | grep -qiE "error|GLIBC"; then
@@ -448,7 +449,7 @@ sub "Ubuntu pod — non-root file access restrictions"
 
 # 6h. Ubuntu pod: hostPath volume
 sub "Ubuntu pod — hostPath volume"
-    out=$(k exec -n z8s-test ubuntu-pod -- ls /host/etc/hostname 2>&1)
+    out=$(kexec -n z8s-test ubuntu-pod -- ls /host/etc/hostname 2>&1)
     if echo "$out" | grep -qiE "hostname|no such file"; then
         pass "ubuntu: hostPath volume accessible: $out"
     elif echo "$out" | grep -qiE "error|GLIBC"; then
@@ -458,7 +459,7 @@ sub "Ubuntu pod — hostPath volume"
     fi
 
 # 6i. Ubuntu pod: envFrom validation
-out=$(k exec -n z8s-test ubuntu-pod -- env 2>&1)
+out=$(kexec -n z8s-test ubuntu-pod -- env 2>&1)
 if echo "$out" | grep -q "APP_ENV=staging"; then pass "ubuntu (z8s-test): envFrom configmap APP_ENV=staging"; else fail "ubuntu envFrom configmap" "$out"; fi
 if echo "$out" | grep -q "DB_PASSWORD=test-pass"; then pass "ubuntu (z8s-test): envFrom secret DB_PASSWORD"; else fail "ubuntu envFrom secret" "$out"; fi
 
@@ -466,7 +467,7 @@ if echo "$out" | grep -q "DB_PASSWORD=test-pass"; then pass "ubuntu (z8s-test): 
 sub "Python pod — HTTP server"
 PYTHON_OK=0
 for try in 1 2 3; do
-    out=$(k exec python-pod -- python3 -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:18080/').read().decode())" 2>&1) || true
+    out=$(kexec python-pod -- python3 -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:18080/').read().decode())" 2>&1) || true
     if echo "$out" | grep -qiE "directory listing|http|html"; then
         pass "python: HTTP server responds (try $try)"
         PYTHON_OK=1
@@ -479,7 +480,7 @@ for try in 1 2 3; do
     sleep 2
 done
 if [[ $PYTHON_OK -eq 0 ]]; then
-    out=$(k exec python-pod -- python3 -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8080/').read().decode())" 2>&1) || true
+    out=$(kexec python-pod -- python3 -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8080/').read().decode())" 2>&1) || true
     if echo "$out" | grep -qiE "directory listing|http|html"; then
         pass "python: HTTP server check — $out"
     else
@@ -488,7 +489,7 @@ if [[ $PYTHON_OK -eq 0 ]]; then
 fi
 
 # 6k. Python pod: check non-root UID
-    out=$(k exec python-pod -- id 2>&1)
+    out=$(kexec python-pod -- id 2>&1)
     if echo "$out" | grep -q "uid=2000"; then
         pass "python: runAsUser=2000 confirmed"
     elif echo "$out" | grep -qiE "error|spawn|not found"; then
@@ -499,7 +500,7 @@ fi
 
 # 6l. Postgres pod: check process
 sub "Postgres pod — database process"
-    out=$(k exec postgres-pod -- pg_isready -U admin -d testdb 2>&1) || true
+    out=$(kexec postgres-pod -- pg_isready -U admin -d testdb 2>&1) || true
     if echo "$out" | grep -qiE "ready|accepting"; then
         pass "postgres: pg_isready reports accepting connections"
     elif echo "$out" | grep -qiE "spawn error|No such file or directory"; then
@@ -508,7 +509,7 @@ sub "Postgres pod — database process"
         pass "postgres: pg_isready — $out (postgres may still be starting)"
     fi
 
-    out=$(k exec postgres-pod -- psql -U admin -d testdb -c "SELECT 1 AS ok;" 2>&1) || true
+    out=$(kexec postgres-pod -- psql -U admin -d testdb -c "SELECT 1 AS ok;" 2>&1) || true
     if echo "$out" | grep -q "1"; then
         pass "postgres: psql query succeeded"
     elif echo "$out" | grep -qiE "spawn error|No such file or directory"; then
@@ -599,7 +600,7 @@ if [[ "$out" == "2" ]]; then pass "alpine-deploy: replicas=2"; else fail "alpine
 # Check that deployment pods inherit envFrom correctly
 POD_NAME=$(k get pods -n default -l app=alpine -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
 if [[ -n "$POD_NAME" ]]; then
-    out=$(k exec -n default "$POD_NAME" -- sh -c env 2>&1)
+    out=$(kexec -n default "$POD_NAME" -- sh -c env 2>&1)
     if echo "$out" | grep -q "APP_ENV=production"; then
         pass "alpine-deploy pod: envFrom configmap works"
     else
@@ -620,7 +621,7 @@ if [[ "$out" == "1" ]]; then pass "ubuntu-deploy (z8s-test): replicas=1"; else f
 
 POD_NAME=$(k get pods -n z8s-test -l app=ubuntu -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
     if [[ -n "$POD_NAME" ]]; then
-        out=$(k exec -n z8s-test "$POD_NAME" -- id 2>&1) || true
+        out=$(kexec -n z8s-test "$POD_NAME" -- id 2>&1) || true
         if echo "$out" | grep -q "uid=1001"; then
             pass "ubuntu-deploy pod: runAsUser=1001"
         elif echo "$out" | grep -qiE "error|GLIBC|spawn"; then
@@ -628,7 +629,7 @@ POD_NAME=$(k get pods -n z8s-test -l app=ubuntu -o jsonpath='{.items[0].metadata
         else
             pass "ubuntu-deploy pod uid — $out"
         fi
-    out=$(k exec -n z8s-test "$POD_NAME" -- env 2>&1)
+    out=$(kexec -n z8s-test "$POD_NAME" -- env 2>&1)
     if echo "$out" | grep -q "APP_ENV=staging"; then
         pass "ubuntu-deploy pod: envFrom configmap (z8s-test ns)"
     else
@@ -642,7 +643,7 @@ if [[ "$out" == "2" ]]; then pass "python-deploy: replicas=2"; else fail "python
 
 POD_NAME=$(k get pods -n default -l app=python -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
 if [[ -n "$POD_NAME" ]]; then
-    out=$(k exec -n default "$POD_NAME" -- sh -c env 2>&1)
+    out=$(kexec -n default "$POD_NAME" -- sh -c env 2>&1)
     if echo "$out" | grep -q "APP_ENV=production"; then
         pass "python-deploy pod: direct env var"
     else
@@ -656,7 +657,7 @@ if [[ "$out" == "1" ]]; then pass "postgres-deploy: replicas=1"; else fail "post
 
 POD_NAME=$(k get pods -n default -l app=postgres -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
 if [[ -n "$POD_NAME" ]]; then
-    out=$(k exec -n default "$POD_NAME" -- sh -c env 2>&1)
+    out=$(kexec -n default "$POD_NAME" -- sh -c env 2>&1)
     if echo "$out" | grep -q "POSTGRES_DB=testdb"; then
         pass "postgres-deploy pod: DB env vars"
     else
@@ -670,7 +671,7 @@ if [[ "$out" == "2" ]]; then pass "nginx-deploy: replicas=2"; else fail "nginx-d
 
 POD_NAME=$(k get pods -n default -l app=nginx -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
 if [[ -n "$POD_NAME" ]]; then
-    out=$(k exec -n default "$POD_NAME" -- sh -c env 2>&1)
+    out=$(kexec -n default "$POD_NAME" -- sh -c env 2>&1)
     if echo "$out" | grep -q "NGINX_HOST=localhost"; then
         pass "nginx-deploy pod: env var NGINX_HOST"
     else
@@ -679,7 +680,7 @@ if [[ -n "$POD_NAME" ]]; then
 
     # Check nginx serves content
     for try in 1 2 3; do
-        out=$(k exec -n default "$POD_NAME" -- wget -q -O- http://127.0.0.1:80/ 2>&1) || true
+        out=$(kexec -n default "$POD_NAME" -- wget -q -O- http://127.0.0.1:80/ 2>&1) || true
         if echo "$out" | grep -qiE "nginx|html|welcome"; then
             pass "nginx-deploy: serves HTTP content"
             break
@@ -910,14 +911,14 @@ if wait_pod_ready vol-test-pod z8s-test 60; then
     pass "vol-test-pod: pod with cm+secret volumes ready"
 
     # Verify via kubectl exec
-    cm_out=$(k exec -n z8s-test vol-test-pod -- cat /mnt/config/GREETING 2>&1)
+    cm_out=$(kexec -n z8s-test vol-test-pod -- cat /mnt/config/GREETING 2>&1)
     if echo "$cm_out" | grep -q "HelloFromCM"; then
         pass "volume exec: configMap file content correct via exec"
     else
         pass "volume exec: configMap — $cm_out (volumes may not be mounted in z8s — known limitation)"
     fi
 
-    sec_out=$(k exec -n z8s-test vol-test-pod -- cat /mnt/secrets/TOKEN 2>&1)
+    sec_out=$(kexec -n z8s-test vol-test-pod -- cat /mnt/secrets/TOKEN 2>&1)
     if echo "$sec_out" | grep -q "super-secret-token"; then
         pass "volume exec: secret file content correct via exec"
     else
@@ -955,8 +956,8 @@ if wait_pod_ready vol-test-pod z8s-test 60; then
     fi
 
     # Validate read-only (if the dir exists)
-    ro_cm=$(k exec -n z8s-test vol-test-pod -- sh -c 'echo "x" > /mnt/config/GREETING 2>&1' 2>&1)
-    ro_sec=$(k exec -n z8s-test vol-test-pod -- sh -c 'echo "x" > /mnt/secrets/TOKEN 2>&1' 2>&1)
+    ro_cm=$(kexec -n z8s-test vol-test-pod -- sh -c 'echo "x" > /mnt/config/GREETING 2>&1' 2>&1)
+    ro_sec=$(kexec -n z8s-test vol-test-pod -- sh -c 'echo "x" > /mnt/secrets/TOKEN 2>&1' 2>&1)
     if echo "$ro_cm" | grep -qiE "permission denied|read-only|cannot create"; then
         pass "volume read-only: configMap volume rejects writes"
     elif echo "$ro_cm" | grep -qiE "no such file|no such directory"; then
@@ -992,7 +993,7 @@ if wait_pod_ready alpine-pod default 5 2>/dev/null; then
     sub "Combined exec validation"
 
     # Single exec: hostname, write test, PID isolation, /proc isolation
-    out=$(k exec alpine-pod -- sh -c '
+    out=$(kexec alpine-pod -- sh -c '
         echo "HOST=$(hostname)"
         echo "WRITE=ok" > /tmp/test && cat /tmp/test
         ls /proc/1/exe 2>&1
@@ -1003,11 +1004,11 @@ if wait_pod_ready alpine-pod default 5 2>/dev/null; then
     if echo "$out" | grep -qiE "systemd|lib/systemd"; then fail "exec: /proc/1/exe points to host init"; else pass "exec: PID namespace isolated"; fi
 
     # Internet connectivity — single fast curl (3s timeout)
-    out=$(k exec alpine-pod -- wget -q -O- --timeout=3 http://1.1.1.1/ 2>&1) || true
+    out=$(kexec alpine-pod -- wget -q -O- --timeout=3 http://1.1.1.1/ 2>&1) || true
     if [[ -n "$out" ]]; then pass "exec: internet reachable (1.1.1.1)"; else pass "exec: internet — not reachable in this env"; fi
 
     # Stdin pipe
-    out=$(echo "echo piped-works" | k exec -i alpine-pod -- sh 2>&1)
+    out=$(echo "echo piped-works" | kexec -i alpine-pod -- sh 2>&1)
     if echo "$out" | grep -q "piped-works"; then pass "exec: stdin pipe works"; else pass "exec: stdin pipe — $out"; fi
 else
     pass "exec: alpine-pod not available — skipping"
@@ -1119,7 +1120,7 @@ wait_pod_ready svc-client default 30 2>/dev/null && CLIENT="svc-client" || CLIEN
 if [[ -z "$CLIENT" ]]; then
     # Fallback: try any running pod with wget
     for try in python-pod logger-pod postgres-pod; do
-        if k exec "$try" -- wget --version >/dev/null 2>&1; then
+        if kexec "$try" -- wget --version >/dev/null 2>&1; then
             CLIENT="$try"; break
         fi
     done
@@ -1136,7 +1137,7 @@ if [[ -n "$CLIENT" ]]; then
         [[ -z "$ip" ]] && ip="$svc"
         for try in 1 2 3; do
             local out
-            out=$(k exec "$CLIENT" -- wget -q -O- -T 3 "http://${ip}:${port}/" 2>&1) || true
+            out=$(kexec "$CLIENT" -- wget -q -O- -T 3 "http://${ip}:${port}/" 2>&1) || true
             if echo "$out" | grep -qiE "$expected"; then
                 pass "svc: $label — response matches (try $try)"
                 return
@@ -1158,7 +1159,7 @@ if [[ -n "$CLIENT" ]]; then
 
     # Service env var injection from inside the client pod
     sub "Service env var injection"
-    svc_env=$(k exec "$CLIENT" -- sh -c 'env | sort' 2>&1)
+    svc_env=$(kexec "$CLIENT" -- sh -c 'env | sort' 2>&1)
     svc_vars_found=0
     for expected in "PYTHON_SVC_SERVICE_HOST" "NGINX_SVC_SERVICE_HOST" "POSTGRES_SVC_SERVICE_HOST"; do
         if echo "$svc_env" | grep -q "$expected"; then
@@ -1173,7 +1174,7 @@ if [[ -n "$CLIENT" ]]; then
 
     # Resolve service by name from inside cluster
     sub "DNS-based service resolution"
-    dns_out=$(k exec "$CLIENT" -- sh -c 'wget -q -O- -T 3 "http://python-svc:18080/" 2>&1') || true
+    dns_out=$(kexec "$CLIENT" -- sh -c 'wget -q -O- -T 3 "http://python-svc:18080/" 2>&1') || true
     if echo "$dns_out" | grep -qiE "directory listing|http|html"; then
         pass "svc: DNS name resolution works (python-svc:18080)"
     else
@@ -1204,7 +1205,7 @@ section "13. Volume persistence tests"
 # 10a. emptyDir: data LOST after pod recreate
 sub "emptyDir persistence: data should NOT survive pod delete+recreate"
 # Write data to emptyDir on alpine-pod
-out=$(k exec alpine-pod -- sh -c 'echo "persistence-test-data" > /var/data/persistence.txt && cat /var/data/persistence.txt' 2>&1)
+out=$(kexec alpine-pod -- sh -c 'echo "persistence-test-data" > /var/data/persistence.txt && cat /var/data/persistence.txt' 2>&1)
 if echo "$out" | grep -q "persistence-test-data"; then
     pass "emptyDir: initial write successful"
 else
@@ -1257,7 +1258,7 @@ EOF
 
 if wait_pod_ready alpine-pod default 60; then
     pass "emptyDir: alpine-pod recreated and ready"
-    out=$(k exec alpine-pod -- cat /var/data/persistence.txt 2>&1)
+    out=$(kexec alpine-pod -- cat /var/data/persistence.txt 2>&1)
     if echo "$out" | grep -q "persistence-test-data"; then
         fail "emptyDir: data survived pod recreate (BUG — emptyDir should be ephemeral)"
     elif echo "$out" | grep -qiE "no such file|cannot open|not found"; then
@@ -1294,7 +1295,7 @@ EOF
 mkdir -p /tmp/z8s-hostpath-test 2>/dev/null || true
 
 if wait_pod_ready hostpath-vol-pod default 60; then
-    out=$(k exec hostpath-vol-pod -- sh -c "echo '${TAG}' > /host-data/test.txt && cat /host-data/test.txt" 2>&1)
+    out=$(kexec hostpath-vol-pod -- sh -c "echo '${TAG}' > /host-data/test.txt && cat /host-data/test.txt" 2>&1)
     if echo "$out" | grep -q "$TAG"; then
         pass "hostPath: initial write successful"
     else
@@ -1329,7 +1330,7 @@ spec:
 EOF
 
 if wait_pod_ready hostpath-vol-pod-2 default 60; then
-    out=$(k exec hostpath-vol-pod-2 -- cat /host-data/test.txt 2>&1)
+    out=$(kexec hostpath-vol-pod-2 -- cat /host-data/test.txt 2>&1)
     if echo "$out" | grep -q "$TAG"; then
         pass "hostPath: data PERSISTED across pod recreate"
     elif echo "$out" | grep -qiE "no such file|cannot open|not found"; then
@@ -1345,7 +1346,7 @@ rm -rf /tmp/z8s-hostpath-test 2>/dev/null || true
 
 # 10c. ConfigMap volume read-only
 sub "ConfigMap volume: should be read-only or immutable"
-out=$(k exec alpine-pod -- sh -c 'echo "should-fail" > /etc/config/APP_ENV 2>&1' 2>&1)
+out=$(kexec alpine-pod -- sh -c 'echo "should-fail" > /etc/config/APP_ENV 2>&1' 2>&1)
 if echo "$out" | grep -qiE "permission denied|read-only file system|cannot create"; then
     pass "configMap volume: write attempt correctly rejected"
 else
@@ -1353,7 +1354,7 @@ else
 fi
 
 # 10d. Secret volume read-only
-out=$(k exec alpine-pod -- sh -c 'echo "hack" > /etc/secret/DB_PASSWORD 2>&1' 2>&1)
+out=$(kexec alpine-pod -- sh -c 'echo "hack" > /etc/secret/DB_PASSWORD 2>&1' 2>&1)
 if echo "$out" | grep -qiE "permission denied|read-only file system|cannot create"; then
     pass "secret volume: write attempt correctly rejected"
 else
@@ -1364,7 +1365,7 @@ fi
 sub "Deployment volume persistence: emptyDir data LOST after scale"
 POD_NAME=$(k get pods -n default -l app=nginx -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
 if [[ -n "$POD_NAME" ]]; then
-    out=$(k exec "$POD_NAME" -- sh -c 'echo "nginx-persist" > /var/www/html/test-persist.txt' 2>&1)
+    out=$(kexec "$POD_NAME" -- sh -c 'echo "nginx-persist" > /var/www/html/test-persist.txt' 2>&1)
     if [[ $? -eq 0 ]]; then
         pass "nginx-deploy: wrote test file to emptyDir"
         # Scale down to 0, then up
@@ -1377,7 +1378,7 @@ if [[ -n "$POD_NAME" ]]; then
             pass "nginx-deploy: scaled 0→1 in $((T1-T0))s"
             NEW_POD=$(k get pods -n default -l app=nginx -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
             if [[ -n "$NEW_POD" && "$NEW_POD" != "$POD_NAME" ]]; then
-                out=$(k exec "$NEW_POD" -- cat /var/www/html/test-persist.txt 2>&1)
+                out=$(kexec "$NEW_POD" -- cat /var/www/html/test-persist.txt 2>&1)
                 if echo "$out" | grep -q "nginx-persist"; then
                     fail "nginx-deploy: emptyDir data survived scale (BUG — new pod should have fresh emptyDir)"
                 elif echo "$out" | grep -qiE "no such file|cannot open|not found"; then
@@ -1442,7 +1443,7 @@ if echo "$out" | grep -qiE "pvc-test|access|storage"; then pass "pvc: describe w
 sub "PVC volume mount in pod"
 if wait_pod_ready pvc-pod default 60; then
     pass "pvc: pvc-pod with persistentVolumeClaim volume is Running"
-    out=$(k exec pvc-pod -- df -h /mnt/storage 2>&1)
+    out=$(kexec pvc-pod -- df -h /mnt/storage 2>&1)
     if echo "$out" | grep -qiE "mnt|storage|filesystem"; then
         pass "pvc: volume mounted successfully at /mnt/storage"
     elif echo "$out" | grep -qiE "no such file|not found|permission"; then
@@ -1462,7 +1463,7 @@ section "16. Security context and isolation"
 
 # 11a. PID namespace isolation
 sub "PID namespace — container has its own PID 1"
-out=$(k exec alpine-pod -- ls -la /proc/1/exe 2>&1)
+out=$(kexec alpine-pod -- ls -la /proc/1/exe 2>&1)
 if echo "$out" | grep -qiE "systemd|lib/systemd"; then
     fail "PID isolation: /proc/1/exe points to host init"
 elif echo "$out" | grep -qiE "no such file|permission denied"; then
@@ -1496,7 +1497,7 @@ if wait_pod_ready security-pod default 60; then
     pass "security-pod: non-root pod ready (uid 12345)"
 
     # Try to access /etc/shadow (should fail)
-    out=$(k exec security-pod -- cat /etc/shadow 2>&1)
+    out=$(kexec security-pod -- cat /etc/shadow 2>&1)
     if echo "$out" | grep -qiE "permission denied|read-only file system"; then
         pass "security: non-root cannot read /etc/shadow"
     elif echo "$out" | grep -qiE "error|GLIBC|spawn"; then
@@ -1506,7 +1507,7 @@ if wait_pod_ready security-pod default 60; then
     fi
 
     # Try to write to /etc (should fail)
-    out=$(k exec security-pod -- touch /etc/root-test 2>&1)
+    out=$(kexec security-pod -- touch /etc/root-test 2>&1)
     if echo "$out" | grep -qiE "permission denied|read-only file system"; then
         pass "security: non-root cannot write to /etc"
     elif echo "$out" | grep -qiE "error|GLIBC|spawn"; then
@@ -1516,7 +1517,7 @@ if wait_pod_ready security-pod default 60; then
     fi
 
     # Try to read /proc/1/environ (should fail — different user)
-    out=$(k exec security-pod -- cat /proc/1/environ 2>&1) || true
+    out=$(kexec security-pod -- cat /proc/1/environ 2>&1) || true
     if echo "$out" | grep -qiE "permission denied"; then
         pass "security: non-root cannot read /proc/1/environ"
     elif echo "$out" | grep -qiE "error|spawn|not found|GLIBC"; then
@@ -1525,7 +1526,7 @@ if wait_pod_ready security-pod default 60; then
         pass "security: /proc/1/environ — $out"
     fi
 
-    out=$(k exec security-pod -- cat /proc/self/uid_map 2>&1) || true
+    out=$(kexec security-pod -- cat /proc/self/uid_map 2>&1) || true
     if echo "$out" | grep -q "12345"; then
         pass "security: uid_map shows user namespace mapping"
     elif echo "$out" | grep -qiE "error|spawn|not found|GLIBC"; then
@@ -1534,7 +1535,7 @@ if wait_pod_ready security-pod default 60; then
         pass "security: uid_map — $out"
     fi
 
-    out=$(k exec security-pod -- sh -c env 2>&1) || true
+    out=$(kexec security-pod -- sh -c env 2>&1) || true
     if echo "$out" | grep -q "USER=testuser"; then
         pass "security-pod: direct env var USER"
     elif echo "$out" | grep -qiE "error|spawn|not found|GLIBC"; then
@@ -1544,7 +1545,7 @@ if wait_pod_ready security-pod default 60; then
     fi
 
     # Check UID mapping
-    out=$(k exec security-pod -- cat /proc/self/uid_map 2>&1)
+    out=$(kexec security-pod -- cat /proc/self/uid_map 2>&1)
     if echo "$out" | grep -q "12345"; then
         pass "security: uid_map shows user namespace mapping"
     else
@@ -1552,7 +1553,7 @@ if wait_pod_ready security-pod default 60; then
     fi
 
     # Verify env var
-    out=$(k exec security-pod -- sh -c env 2>&1)
+    out=$(kexec security-pod -- sh -c env 2>&1)
     if echo "$out" | grep -q "USER=testuser"; then
         pass "security-pod: direct env var USER"
     else
@@ -1567,7 +1568,7 @@ k delete pod security-pod --ignore-not-found 2>/dev/null || true
 # 11c. Root inside userns still isolated from host
 sub "Root-in-userns isolation"
 # Alpine pod runs as root inside the user namespace
-out=$(k exec alpine-pod -- id 2>&1)
+out=$(kexec alpine-pod -- id 2>&1)
 if echo "$out" | grep -q "uid=0(root)"; then
     pass "isolation: root inside container (user namespace)"
 else
@@ -1575,7 +1576,7 @@ else
 fi
 
 # Check that /proc/sysrq-trigger is not accessible (should be restricted)
-    out=$(k exec alpine-pod -- cat /proc/sysrq-trigger 2>&1) || true
+    out=$(kexec alpine-pod -- cat /proc/sysrq-trigger 2>&1) || true
     if echo "$out" | grep -qiE "permission denied|no such file|operation not permitted|I/O error|input/output error"; then
         pass "isolation: root cannot access host /proc/sysrq-trigger"
     elif echo "$out" | grep -qiE "error|spawn|not found"; then
@@ -1584,7 +1585,7 @@ fi
         pass "isolation: /proc/sysrq-trigger — $out"
     fi
 
-    out=$(k exec alpine-pod -- sh -c 'echo "1" > /proc/sys/kernel/panic 2>&1' 2>&1) || true
+    out=$(kexec alpine-pod -- sh -c 'echo "1" > /proc/sys/kernel/panic 2>&1' 2>&1) || true
     if echo "$out" | grep -qiE "permission denied|read-only|operation not permitted|no such file|nonexistent"; then
         pass "isolation: root cannot modify host /proc/sys/kernel/panic"
     elif echo "$out" | grep -qiE "error|spawn|not found"; then
@@ -1594,7 +1595,7 @@ fi
     fi
 
 # Try to write to /proc (should fail or be restricted)
-out=$(k exec alpine-pod -- sh -c 'echo "1" > /proc/sys/kernel/panic 2>&1' 2>&1)
+out=$(kexec alpine-pod -- sh -c 'echo "1" > /proc/sys/kernel/panic 2>&1' 2>&1)
 if echo "$out" | grep -qiE "permission denied|read-only|operation not permitted|no such file"; then
     pass "isolation: root cannot modify host /proc/sys/kernel/panic"
 else
@@ -1606,7 +1607,7 @@ section "17. Multi-container exec (via alpine-deploy pods)"
 
 POD_NAME=$(k get pods -n default -l app=alpine -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
 if [[ -n "$POD_NAME" ]]; then
-    out=$(k exec "$POD_NAME" -- /bin/sh -c 'echo "multi-exec-test"' 2>&1)
+    out=$(kexec "$POD_NAME" -- /bin/sh -c 'echo "multi-exec-test"' 2>&1)
     if echo "$out" | grep -q "multi-exec-test"; then
         pass "exec: multi-container pod (deployment) exec works"
     else
@@ -1626,7 +1627,7 @@ validate_info_pod() {
         return
     fi
     for try in 1 2 3; do
-        out=$(k exec "$POD_NAME" -- wget -q -O- -T 3 "http://127.0.0.1:${port}/" 2>&1) || true
+        out=$(kexec "$POD_NAME" -- wget -q -O- -T 3 "http://127.0.0.1:${port}/" 2>&1) || true
         if echo "$out" | grep -qiE "$expected|html|body|http"; then
             pass "info: $deploy — content served (try $try)"
             return
