@@ -80,7 +80,7 @@ impl StoreBackend for MemoryBackend {
                     store.insert(uid, tracker);
                 }
                 StoreOp::UpsertWithState(resource, state_override) => {
-                    let uid = resource.uid();
+                    let uid = resource.uid().to_string();
                     let mut tracker = ResourceTracker::new(resource);
                     if let Some(state) = state_override {
                         tracker.state = state;

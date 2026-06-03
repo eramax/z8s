@@ -1,5 +1,6 @@
+use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use redb::{Database, ReadableTable, TableDefinition};
@@ -19,9 +20,15 @@ pub(crate) const JOIN_TOKENS: TableDefinition<&str, &[u8]> = TableDefinition::ne
 
 pub struct RedbBackend {
     pub(crate) db: Arc<Database>,
+    pub(crate) states: Arc<RwLock<HashMap<String, ResourceState>>>,
 }
 
 impl RedbBackend {
+    fn open_inner(db: Database) -> anyhow::Result<Self> {
+        let states = Arc::new(RwLock::new(HashMap::new()));
+        Ok(Self { db: Arc::new(db), states })
+    }
+
     pub fn open(path: impl AsRef<Path>) -> anyhow::Result<Self> {
         let path = path.as_ref();
         std::fs::create_dir_all(path)?;
@@ -41,7 +48,7 @@ impl RedbBackend {
             write_txn.open_table(JOIN_TOKENS)?;
             write_txn.commit()?;
         }
-        Ok(Self { db: Arc::new(db) })
+        Self::open_inner(db)
     }
 
     pub fn open_at(dir: impl AsRef<Path>, filename: &str) -> anyhow::Result<Self> {
@@ -63,7 +70,7 @@ impl RedbBackend {
             write_txn.open_table(JOIN_TOKENS)?;
             write_txn.commit()?;
         }
-        Ok(Self { db: Arc::new(db) })
+        Self::open_inner(db)
     }
 
     pub fn write_lease_epoch(lease: &mut crate::types::LeaseRecord, holder: &str) {
@@ -117,15 +124,21 @@ impl StoreBackend for RedbBackend {
 
     async fn get_all(&self) -> Vec<ResourceTracker> {
         let db = self.db.clone();
+        let states = self.states.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<ResourceTracker>, anyhow::Error> {
             let read_txn = db.begin_read()?;
             let table = read_txn.open_table(RESOURCES)?;
+            let st = states.read().unwrap();
             let mut result = Vec::new();
             for item in table.iter()? {
                 let (_key, value) = item?;
                 let bytes = value.value();
                 if let Ok(resource) = serde_json::from_slice::<AnyResource>(bytes) {
-                    result.push(ResourceTracker::new(resource));
+                    let mut tracker = ResourceTracker::new(resource);
+                    if let Some(state) = st.get(tracker.resource.uid().as_str()) {
+                        tracker.state = state.clone();
+                    }
+                    result.push(tracker);
                 }
             }
             Ok(result)
@@ -137,11 +150,13 @@ impl StoreBackend for RedbBackend {
 
     async fn get_by_kind(&self, kind: &str) -> Vec<ResourceTracker> {
         let db = self.db.clone();
+        let states = self.states.clone();
         let prefix = format!("{}/", kind);
         let kind = kind.to_string();
         tokio::task::spawn_blocking(move || -> Result<Vec<ResourceTracker>, anyhow::Error> {
             let read_txn = db.begin_read()?;
             let table = read_txn.open_table(RESOURCES)?;
+            let st = states.read().unwrap();
             let mut result = Vec::new();
             let mut total = 0u64;
             for item in table.iter()? {
@@ -150,7 +165,11 @@ impl StoreBackend for RedbBackend {
                 if key.value().starts_with(&prefix) {
                     let bytes = value.value();
                     if let Ok(resource) = serde_json::from_slice::<AnyResource>(bytes) {
-                        result.push(ResourceTracker::new(resource));
+                        let mut tracker = ResourceTracker::new(resource);
+                        if let Some(state) = st.get(tracker.resource.uid().as_str()) {
+                            tracker.state = state.clone();
+                        }
+                        result.push(tracker);
                     } else {
                         tracing::warn!("DB deserialize fail for key={}", key.value());
                     }
@@ -171,6 +190,7 @@ impl StoreBackend for RedbBackend {
 
     async fn get(&self, uid: &str) -> Option<ResourceTracker> {
         let db = self.db.clone();
+        let states = self.states.clone();
         let key = uid.to_string();
         tokio::task::spawn_blocking(move || -> Option<ResourceTracker> {
             let read_txn = db.begin_read().ok()?;
@@ -178,25 +198,35 @@ impl StoreBackend for RedbBackend {
             let value = table.get(key.as_str()).ok()??;
             let bytes = value.value();
             let resource = serde_json::from_slice::<AnyResource>(bytes).ok()?;
-            Some(ResourceTracker::new(resource))
+            let mut tracker = ResourceTracker::new(resource);
+            let st = states.read().unwrap();
+            if let Some(state) = st.get(key.as_str()) {
+                tracker.state = state.clone();
+            }
+            Some(tracker)
         })
         .await
         .unwrap_or(None)
     }
 
-    async fn update_state(&self, _uid: &str, _state: ResourceState) {
-        // State is ephemeral — rebuilt from process tracker on restart.
+    async fn update_state(&self, uid: &str, state: ResourceState) {
+        let states = self.states.clone();
+        let uid = uid.to_string();
+        tokio::task::spawn_blocking(move || {
+            states.write().unwrap().insert(uid, state);
+        })
+        .await
+        .ok();
     }
 
     async fn apply_batch(&self, ops: Vec<StoreOp>) -> anyhow::Result<()> {
-        if ops.is_empty() {
-            return Ok(());
-        }
         let db = self.db.clone();
+        let states = self.states.clone();
         tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
             let write_txn = db.begin_write()?;
             {
                 let mut table = write_txn.open_table(RESOURCES)?;
+                let mut st = states.write().unwrap();
                 for op in ops {
                     match op {
                         StoreOp::Upsert(resource) => {
@@ -204,14 +234,18 @@ impl StoreBackend for RedbBackend {
                             let bytes = serde_json::to_vec(&resource)?;
                             table.insert(key.as_str(), bytes.as_slice())?;
                         }
-                        StoreOp::UpsertWithState(resource, _state) => {
+                        StoreOp::UpsertWithState(resource, state_override) => {
                             let key = resource.uid();
                             let bytes = serde_json::to_vec(&resource)?;
                             table.insert(key.as_str(), bytes.as_slice())?;
+                            if let Some(state) = state_override {
+                                st.insert(key, state);
+                            }
                         }
                         StoreOp::Delete(resource) => {
                             let key = resource.uid();
                             table.remove(key.as_str()).ok();
+                            st.remove(&key);
                         }
                     }
                 }
