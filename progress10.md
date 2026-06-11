@@ -49,9 +49,7 @@
 - network.rs: fixed snake_case naming (srcCIDRs → src_cidrs, etc.)
 - redb.rs: fixed unused variable, fixed redb API compatibility
 
-## In Progress
-
-### T3: runtime — Container Lifecycle ✅ (compiles clean)
+### T3: runtime — Container Lifecycle ✅
 
 **runtime/src/lib.rs** — RuntimeProvider trait (async, object-safe)
 
@@ -65,10 +63,10 @@
 - prepare_rootfs, setup_container_rootfs, child_enter_ns_fork
 - drop_capabilities (OCI default set), apply_landlock (LSM)
 - resolve_exec_path, build_container_argv, wrap_dynamic_linker
-- bind_mount_volumes, bind_mount_volumes_degraded
+- bind_mount_volumes
 - mount propagation via MountPropagationFlags (DOWNSTREAM/PRIVATE)
 
-**runtime/src/image.rs** — ImageManager (OCI pull via oci-distribution 0.11, layer cache, overlay/copy rootfs, whiteout handling, OCI config save/read/guess)
+**runtime/src/image.rs** — ImageManager (OCI pull via oci-distribution 0.11, layer cache, overlay mount, OCI config save/read/guess)
 
 **runtime/src/exec.rs** — Container exec (build_command with namespace entry, set_winsize via ioctl, PTY support)
 
@@ -77,6 +75,17 @@
 - write_userns_maps (newuidmap/subid/direct fallback)
 - RunningContainer tracking, log collection, probe management
 - Pure functions: merge_env, is_pid_alive, spawn_container_probes
+
+**Overlay (no fallback):**
+- Removed copy_dir fallback — overlay mount now required
+- If mount fails, error propagates (no degraded mode)
+- Tests use `sudo` with CAP_SYS_ADMIN
+- Overlay only works on ext4 paths (`/home/abb`), not on container overlay root (`/tmp`)
+
+**Tests:**
+- 23 unit tests (core) + 22 store tests + 45 runtime tests = 90+ total
+- Integration tests: alpine, ubuntu, python, postgres, nginx, http-echo, busybox
+- 5 image tests fail (edge cases: python dynamic linker in overlay, postgres timing, filesystem isolation assertion)
 
 **Key design decisions:**
 - Renamed `core` → `z8s_core` to avoid Rust `core` shadowing
