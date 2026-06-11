@@ -41,7 +41,7 @@ const ACCEPTED_LAYER_TYPES: &[&str] = &[
     "application/vnd.oci.image.layer.v1.tar+zstd",
 ];
 
-const OCI_CONFIG_FILE: &str = ".z8s-oci-config.json";
+pub const OCI_CONFIG_FILE: &str = ".z8s-oci-config.json";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
