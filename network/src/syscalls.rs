@@ -84,6 +84,35 @@ const NFTA_COUNTER_PACKETS: u16 = 2;
 // NLA flags
 const NLA_F_NESTED: u16 = 0x8000;
 
+// Netlink message flags (for nlmsghdr.nlmsg_flags).
+// NLM_F_REQUEST is required for all netlink requests.
+// NLM_F_ACK requests an NLMSG_ERROR reply (errno 0 on success).
+// NLM_F_CREATE | NLM_F_EXCL means "create new, fail if exists" (atomic).
+// NLM_F_APPEND (0x800) appends rules to the end of a chain.
+const NLM_F_REQUEST: u16 = 0x01;
+const NLM_F_ACK: u16 = 0x04;
+const NLM_F_CREATE: u16 = 0x400;
+const NLM_F_EXCL: u16 = 0x200;
+const NLM_F_APPEND: u16 = 0x800;
+
+/// Compute the nlmsg_flags for a given op.
+pub fn nlmsg_flags_for(op: &NetlinkOp) -> u16 {
+    let base = NLM_F_REQUEST | NLM_F_ACK;
+    match op {
+        NetlinkOp::AddTable { .. }
+        | NetlinkOp::AddChain { .. }
+        | NetlinkOp::AddSet { .. }
+        | NetlinkOp::AddCounter { .. } => base | NLM_F_CREATE | NLM_F_EXCL,
+        NetlinkOp::AddRule { .. } => base | NLM_F_CREATE | NLM_F_EXCL | NLM_F_APPEND,
+        NetlinkOp::DelTable { .. }
+        | NetlinkOp::DelChain { .. }
+        | NetlinkOp::DelRule { .. }
+        | NetlinkOp::DelSet { .. }
+        | NetlinkOp::SetFlush { .. }
+        | NetlinkOp::DelCounter { .. } => base,
+    }
+}
+
 // Expression types
 const NFT_EXPR_META: u16 = 1;
 const NFT_EXPR_CMP: u16 = 6;
@@ -500,16 +529,20 @@ impl NlSocket {
     }
 
     /// Send a nftables message and return the raw reply bytes.
-    pub fn send(&self, msg_type: u16, body: &[u8]) -> std::io::Result<Vec<u8>> {
+    /// The op is used to compute the correct `nlmsg_flags`
+    /// (NLM_F_CREATE|NLM_F_EXCL for Add* ops, etc.) and to parse the ACK.
+    pub fn send(&self, op: &NetlinkOp) -> std::io::Result<Vec<u8>> {
+        let (msg_type, body) = encode_op(op);
+        let flags = nlmsg_flags_for(op);
         // Layout: nlmsghdr(16) + body (nfgenmsg(4) + attrs)
         let total_len = (16 + body.len()) as u32;
         let mut full = Vec::with_capacity(16 + body.len());
         full.extend_from_slice(&total_len.to_ne_bytes()); // nlmsg_len
         full.extend_from_slice(&nlmsg_type(msg_type).to_ne_bytes()); // nlmsg_type
-        full.extend_from_slice(&0u16.to_ne_bytes()); // nlmsg_flags
+        full.extend_from_slice(&flags.to_ne_bytes()); // nlmsg_flags
         full.extend_from_slice(&0u32.to_ne_bytes()); // nlmsg_seq
         full.extend_from_slice(&0u32.to_ne_bytes()); // nlmsg_pid
-        full.extend_from_slice(body);
+        full.extend_from_slice(&body);
         // Pad to 4-byte boundary
         let pad = (4 - (full.len() % 4)) % 4;
         if pad > 0 {
@@ -517,18 +550,31 @@ impl NlSocket {
         }
 
         // For NETLINK, the destination is always the kernel (pid 0).
-        // Use `send` rather than `sendto` since we don't need to specify
-        // a destination address.
+        // We use the `bind` + `send` pattern: the socket was already bound
+        // in `open()` to (pid=0, groups=0), so the kernel routes the message
+        // to the netfilter subsystem. Bare `send` on an unbound netlink socket
+        // causes the kernel to echo the message back instead of processing it.
         rustix::net::send(self.fd.as_fd(), &full, rustix::net::SendFlags::empty())
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("netlink send: {e}")))?;
 
+        // Read the ACK reply. With NLM_F_ACK, the kernel sends back an
+        // NLMSG_ERROR message; error == 0 means success.
         let mut reply = vec![0u8; 8192];
-        // rustix 1.1.4 recv returns (Buf::Output, usize); for &mut [u8] the
-        // first element is the count of bytes read.
         let (n, _flags) =
             rustix::net::recv(self.fd.as_fd(), &mut reply[..], rustix::net::RecvFlags::empty())
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("netlink recv: {e}")))?;
         reply.truncate(n);
+
+        // Parse NLMSG_ERROR: layout is nlmsghdr(16) + i32 error.
+        if reply.len() >= 20 {
+            let nlmsg_type = u16::from_ne_bytes([reply[4], reply[5]]);
+            if nlmsg_type == 2 {
+                let errno = i32::from_ne_bytes([reply[16], reply[17], reply[18], reply[19]]);
+                if errno != 0 {
+                    return Err(std::io::Error::from_raw_os_error(-errno));
+                }
+            }
+        }
         Ok(reply)
     }
 

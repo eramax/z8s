@@ -433,8 +433,7 @@ impl Netmux {
                     .sock
                     .as_ref()
                     .ok_or_else(|| anyhow!("netlink socket not connected"))?;
-                let (msg_type, body) = encode_op(op);
-                sock.send(msg_type, &body)
+                sock.send(op)
                     .with_context(|| format!("sending op: {:?}", op))?;
             }
             self.apply_one_to_state(op);
