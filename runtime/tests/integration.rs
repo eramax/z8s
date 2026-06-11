@@ -86,9 +86,18 @@ fn test_prepare_rootfs_creates_dirs() {
     let _ = std::fs::remove_dir_all(&rootfs_dir);
     std::fs::create_dir_all(&rootfs_dir).unwrap();
 
+    // Verify dir exists before calling prepare_rootfs
+    assert!(rootfs_dir.exists(), "rootfs_dir should exist before prepare_rootfs");
+
     let result = rootfs::prepare_rootfs(rootfs_dir.to_str().unwrap());
     if let Err(e) = &result {
         eprintln!("prepare_rootfs failed: {:?}", e);
+        // Debug: check what dirs were created
+        for entry in std::fs::read_dir(&rootfs_dir).unwrap() {
+            if let Ok(entry) = entry {
+                eprintln!("  created: {:?}", entry.file_name());
+            }
+        }
     }
     result.unwrap();
 

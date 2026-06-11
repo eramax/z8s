@@ -12,7 +12,7 @@ use runtime::rootfs;
 use runtime::supervisor;
 use runtime::spec;
 use runtime::cgroup::CgroupManager;
-use runtime::health::{HealthChecker, HealthStatus, ProbeAction, ProbeConfig, ExecProbe, HttpProbe, TcpProbe};
+use runtime::health::{HealthChecker, HealthStatus, ProbeAction, ProbeConfig, ExecProbe, TcpProbe};
 
 fn tmp(sub: &str) -> PathBuf { std::env::temp_dir().join(format!("z8s_test_{}", sub)) }
 fn cleanup(name: &str) { let _ = std::fs::remove_dir_all(tmp(name)); }
@@ -289,7 +289,7 @@ fn test_apply_limits() {
             .cpu_limit(50000, 100000)
             .build(),
     ];
-    cgroup::apply_limits(&c, "pod-1", &configs);
+    runtime::cgroup::apply_limits(&c, "pod-1", &configs);
     // no-op on stub, just verify it doesn't panic
 }
 
@@ -455,8 +455,8 @@ fn test_container_spec() {
 
 fn setup_oci_config(dir: &PathBuf, env: Vec<String>) {
     std::fs::create_dir_all(dir).unwrap();
-    let cfg = ImageSavedConfig { entrypoint: Some(vec!["/bin/sh".into()]), env: Some(env), ..Default::default() };
-    std::fs::write(dir.join(ImageManager::CONFIG_FILE), serde_json::to_string(&cfg).unwrap()).unwrap();
+    let cfg = ImageSavedConfig { entrypoint: Some(vec!["/bin/sh".into()]), env: Some(env), cmd: None, working_dir: None };
+    std::fs::write(dir.join(runtime::image::OCI_CONFIG_FILE), serde_json::to_string(&cfg).unwrap()).unwrap();
 }
 
 struct ImageSavedConfig { entrypoint: Option<Vec<String>>, env: Option<Vec<String>>, cmd: Option<Vec<String>>, working_dir: Option<String> }
@@ -591,12 +591,12 @@ use std::collections::HashMap;
 
 #[test]
 fn test_merge_exec_env_dedup() {
-    let stored = vec![("A".into(), "1".into()), ("B".into(), "2".into())];
+    let stored: Vec<(String, String)> = vec![("A".into(), "1".into()), ("B".into(), "2".into())];
     // We can't easily test the private merge_exec_env, but we can verify
     // the logic: container env overrides spec env for same key
     let mut result = stored.clone();
     let mut seen: HashMap<String, ()> = result.iter().map(|(k, _)| (k.clone(), ())).collect();
-    let container_env = vec![("B".into(), "99".into()), ("C".into(), "3".into())];
+    let container_env: Vec<(String, String)> = vec![("B".into(), "99".into()), ("C".into(), "3".into())];
     for (k, v) in &container_env {
         if seen.insert(k.clone(), ()).is_none() {
             result.push((k.clone(), v.clone()));
