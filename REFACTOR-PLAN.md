@@ -1206,33 +1206,52 @@ API is just a thin HTTP layer over the store. Controller is the brain that does 
 
 ---
 
-## 19. Remove `nix` Crate — Direct Kernel Syscalls
+## 19. Remove `nix` Crate — Direct Kernel Syscalls via rustix
 
 **Problem**: `nix` is a safe wrapper around Linux syscalls, but adds:
 - 1 extra dependency (and its transitive deps)
 - ~50μs overhead per call (wrapper + error conversion)
 - Unsafe blocks still needed for most operations
 
-**Fix**: Talk directly to the kernel via `libc` syscalls. Zero wrappers.
+**Fix**: Use `rustix` 1.1.4 for type-safe syscall wrappers. For syscalls not in rustix (`fork`), use inline assembly.
 
 ### Syscall Mapping
 
-| Current (nix) | Direct syscall | libc function |
-|---------------|---------------|---------------|
-| `mount(...)` | `mount(2)` | `libc::mount` |
-| `umount2(...)` | `umount2(2)` | `libc::umount2` |
-| `chroot(...)` | `chroot(2)` | `libc::chroot` |
-| `chdir(...)` | `chdir(2)` | `libc::chdir` |
-| `unshare(...)` | `unshare(2)` | `libc::unshare` |
-| `sethostname(...)` | `sethostname(2)` | `libc::sethostname` |
-| `kill(pid, sig)` | `kill(2)` | `libc::kill` |
-| `waitpid(...)` | `wait4(2)` | `libc::wait4` |
-| `pipe(...)` | `pipe2(2)` | `libc::pipe2` |
-| `mknod(...)` | `mknod(2)` | `libc::mknod` |
-| `setgroups(...)` | `setgroups(2)` | `libc::setgroups` |
-| `write(path, data)` | `write(2)` | `libc::write` |
-| `flock(fd, op)` | `flock(2)` | `libc::flock` |
-| `setns(fd, ...)` | `setns(2)` | `libc::setns` |
+| Current (nix) | rustix 1.1.4 | Module |
+|---------------|-------------|--------|
+| `mount(...)` | `rustix::mount::mount(...)` | `rustix::mount` |
+| `umount2(...)` | `rustix::mount::unmount(...)` | `rustix::mount` |
+| `chroot(...)` | `rustix::process::chroot(...)` | `rustix::process` |
+| `chdir(...)` | `rustix::process::chdir(...)` | `rustix::process` |
+| `unshare(...)` | `rustix::thread::unshare_unsafe(...)` | `rustix::thread` |
+| `sethostname(...)` | `rustix::system::sethostname(...)` | `rustix::system` |
+| `setns(...)` | `rustix::thread::move_into_link_name_space(...)` | `rustix::thread` |
+| `kill(pid, sig)` | `rustix::process::kill_process(...)` | `rustix::process` |
+| `pipe(...)` | `rustix::pipe::pipe_with(...)` | `rustix::pipe` |
+| `dup2(...)` | `rustix::io::dup2(...)` | `rustix::io` |
+| `write(...)` | `rustix::io::write(...)` | `rustix::io` |
+| `read(...)` | `rustix::io::read(...)` | `rustix::io` |
+| `flock(...)` | `rustix::fs::flock(...)` | `rustix::fs` |
+| `open(...)` | `rustix::fs::open(...)` | `rustix::fs` |
+| `fork(...)` | **inline asm** (SYS_fork=57 on x86_64, 220 on aarch64) | `core/syscall.rs` |
+
+### rustix Features Required
+
+```toml
+rustix = { version = "1.1.4", features = ["process", "fs", "mount", "thread", "pipe", "net", "system"] }
+```
+
+### Cargo.toml change
+
+```toml
+# Before
+[dependencies]
+nix = { version = "0.31", features = ["fs", "signal", "sched", "mount", "process", "term", "ioctl", "user", "resource", "hostname", "socket"] }
+
+# After
+[dependencies]
+rustix = { version = "1.1.4", features = ["process", "fs", "mount", "thread", "pipe", "net", "system"] }
+```
 
 ### Raw Syscall Helpers
 
