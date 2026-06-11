@@ -210,3 +210,18 @@ pub fn write_setgroups(pid: i32, value: &str) -> Result<(), Errno> {
     drop(fd);
     Ok(())
 }
+
+// ── Process Reaping ───────────────────────────────────────────────────────
+
+/// Wait for a child process. Returns (pid, exit_code).
+pub fn waitpid(pid: i32) -> Option<(u32, i32)> {
+    let target = if pid == -1 { None } else { rustix::process::Pid::from_raw(pid) };
+    let opts = rustix::process::WaitOptions::UNTRACED;
+    match rustix::process::waitpid(target, opts) {
+        Ok(Some((p, status))) => {
+            let code = status.exit_status().unwrap_or(-1);
+            Some((p.as_raw_pid() as u32, code))
+        }
+        _ => None,
+    }
+}

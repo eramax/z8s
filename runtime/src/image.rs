@@ -445,6 +445,13 @@ fn unpack_layer(layer: &ImageLayer, target: &str, index: usize) -> Result<()> {
             if real.is_dir() { std::fs::remove_dir_all(&real).ok(); }
             else { std::fs::remove_file(&real).ok(); }
         } else {
+            // Handle hardlinks: remove target if it exists to avoid "File exists" error
+            if entry.header().entry_type().is_hard_link() {
+                let dst = target_path.join(&path);
+                if dst.exists() {
+                    let _ = std::fs::remove_file(&dst);
+                }
+            }
             entry.unpack_in(target)
                 .with_context(|| format!("Failed to unpack {:?} in layer {}", path, index))?;
         }
