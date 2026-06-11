@@ -494,6 +494,955 @@ fn on_file_change(path) {
 
 ---
 
+## 7. Netmux Networking Subsystem (Critical — affects every pod, service, NSG, NetworkPolicy)
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                            NetMux (mod.rs)                              │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌─────────────┐ │
+│  │   IpPool     │  │  NftEngine   │  │  DNS Server  │  │   Ingress   │ │
+│  │  (pool.rs)   │  │ (nftables.rs)│  │   (dns.rs)   │  │ (ingress.rs)│ │
+│  └──────────────┘  └──────────────┘  └──────────────┘  └─────────────┘ │
+│         ▲                  ▲                 ▲                ▲         │
+│         │                  │                 │                │         │
+│  ┌──────┴──────────────────┴─────────────────┴────────────────┴─────┐  │
+│  │              NetworkPlanner (planner.rs, pure)                    │  │
+│  │   StoreSnapshot → PlannedNetwork { dnat, dns, nsg, np, routes }  │  │
+│  └───────────────────────────────────────────────────────────────────┘  │
+│         ▲                                                                │
+│         │ store events                                                   │
+│  ┌──────┴──────────┐                                                    │
+│  │  StoreSnapshot  │  ← incremental index (see §12)                    │
+│  └─────────────────┘                                                    │
+└─────────────────────────────────────────────────────────────────────────┘
+         │                                          ▲
+         │ attach_pod / detach_pod /                │ planner output
+         │ apply_rule / apply_dnat                   │
+         ▼                                          │
+┌─────────────────────────────────────────────────────────────────────────┐
+│              Netlink / nftables (NETLINK_ROUTE + NETLINK_NETFILTER)     │
+│  create_veth_pair · set_link_up · add_addr · add_route · move_peer      │
+│  NftEngine.send(Batch) → spawn_blocking → Batch.send() → netlink        │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Data flow per reconcile tick** (every 3s):
+1. `StoreSnapshot` captured (all resources)
+2. `NetworkPlanner::plan()` → `PlannedNetwork` (pure, no IO)
+3. Reconciler diffs `PlannedNetwork` vs applied state
+4. For each diff: NftEngine adds rules + NetMux creates veths/addresses
+5. DNS server receives updated records
+6. NetworkPolicy controller updates nft sets
+
+### Current timing breakdown
+
+```
+Per-pod attach (attach_pod → configure_pod_netns):
+  ├─ allocate_ip                     <1ms
+  ├─ create_veth_pair (host)          5-20ms   ← netlink round trip #1
+  ├─ set_link_up (host)              2-5ms    ← netlink round trip #2
+  ├─ add_pod_host_route              2-5ms    ← netlink round trip #3
+  ├─ assign_gateway (add_addr)       2-5ms    ← netlink round trip #4
+  ├─ move_peer_to_netns              5-15ms   ← netlink + 1 setns
+  ├─ open host netns fd              <1ms     ← syscall
+  ├─ resolve peer ifindex in pod     2-5ms    ← netlink + 1 setns (back)
+  ├─ open pod netns fd               <1ms     ← syscall
+  ├─ setns into pod netns            1-3ms    ← syscall
+  ├─ assign_ip (peer)                2-5ms    ← netlink round trip #5
+  ├─ set_link_up (peer)              2-5ms    ← netlink round trip #6
+  ├─ add_default_route (peer)        2-5ms    ← netlink round trip #7
+  └─ setns back to host              1-3ms    ← NetNsGuard drop
+                                   TOTAL: 25-80ms (8 netlink RT + 4 setns)
+
+Per-Service (ClusterIP DNAT, add_dnat):
+  ├─ update_dnat_chain (chain create) 5-10ms  ← 1 netlink batch
+  ├─ add_dnat_rule per backend        5-10ms each ← N netlink batches
+  ├─ add_jump_rules                   10-20ms  ← 2 netlink batches
+  └─ (jump_track linear search)       <1ms
+                                     TOTAL: 20-50ms (3+N batches)
+
+Per-NSG apply_nsg:
+  └─ apply_nsg_rules → apply_rule loop
+     └─ for each rule: add_forward_allow OR add_forward_deny
+        └─ 1 netlink batch per rule
+                                     TOTAL: 5-100ms (M rules)
+
+Reconcile tick (100 services + 50 NSG + 200 pods):
+  ├─ StoreSnapshot capture            10-50ms
+  ├─ planner::plan (full iteration)   5-20ms
+  ├─ NftEngine diff + apply           200-800ms (bottleneck!)
+  ├─ DNS records rebuild              5-20ms
+  ├─ NetworkPolicy controller update  20-100ms
+  └─ Store events fan-out             5-20ms
+                                     TOTAL: 250-1000ms
+```
+
+### Bottleneck 7a: attach_pod does 8 netlink round trips (mod.rs:151-250)
+
+```rust
+// CURRENT — every pod triggers 8 separate netlink send/recv pairs
+pub fn attach_pod(&self, pod_uid: &str, container_pid: Option<u32>, subnet: Option<&str>)
+    -> Result<(Ipv4Addr, u32, u32)>
+{
+    // 4 netlink RT on host side
+    let (host_name, _, host_idx, peer_idx) = create_pod_veth(pod_uid, container_pid)?;
+    bring_up_veth(host_idx)?;                    // RT 1
+    add_pod_host_route(&pod_ip, host_idx)?;      // RT 2
+    assign_gateway(&self.gateway, host_idx)?;    // RT 3
+    // ... 4 more netlink RT inside configure_pod_netns
+    Ok((pod_ip, host_idx, peer_idx))
+}
+```
+
+**Problem**: 8 separate netlink send/recv operations per pod. Each RT = open netlink socket, serialize, send, recv, parse NLMSG_ERROR. For a burst of 10 pods = 80 RTs = 200-800ms serialized.
+
+**Fix**: Combine host-side ops into one netlink batch, then enter pod netns and combine pod-side ops into another batch:
+
+```rust
+// OPTIMAL: 2 netlink batches per pod (host + pod) instead of 8
+pub fn attach_pod_fast(&self, pod_uid: &str, pod_ip: Ipv4Addr, container_pid: u32)
+    -> Result<VethHandle>
+{
+    // Batch 1: host-side (create_veth + set_link_up + add_addr + add_route)
+    let host_name = veth_name_from_uid(pod_uid);
+    let peer_name = format!("zeth-{}", last8hex(pod_uid));
+    let mut host_batch = NetlinkBatch::new();
+    host_batch.create_veth_pair(&host_name, &peer_name, Some(container_pid));
+    let (host_idx, _) = host_batch.submit_sync()?;  // 1 netlink RT
+
+    host_batch.reset();
+    host_batch.set_link_up(host_idx);
+    host_batch.add_addr(host_idx, &self.gateway, 32);
+    host_batch.add_route(pod_ip, 32, None, Some(host_idx));
+    host_batch.submit_sync()?;  // 1 netlink RT
+
+    // Batch 2: pod-side (set_link_up + add_addr + add_route)
+    let _guard = NetNsGuard::enter(&format!("/proc/{}/ns/net", container_pid))?;
+    let peer_idx = resolve_ifindex(&peer_name)?;
+    let mut pod_batch = NetlinkBatch::new();
+    pod_batch.set_link_up(peer_idx);
+    pod_batch.add_addr(peer_idx, &pod_ip, 32);
+    pod_batch.add_route(Ipv4Addr::UNSPECIFIED, 0, Some(self.gateway), Some(peer_idx));
+    pod_batch.submit_sync()?;  // 1 netlink RT
+    // _guard drops → setns back to host (1 syscall)
+    Ok(VethHandle { host_idx, peer_idx, pod_ip })
+}
+```
+
+**Savings**: 25-80ms → 8-20ms per pod (3-4x faster). Burst of 10 pods: 250-800ms → 80-200ms.
+
+### Bottleneck 7b: add_dnat does N+2 netlink batches (nftables.rs:103-148)
+
+```rust
+// CURRENT — 1 chain + 1 batch per backend + 1 jump batch = N+2 round trips
+async fn update_dnat_chain(&self, svc: &str, backends: &[(Ipv4Addr, u16)], matches: &[(...)])
+    -> Result<()>
+{
+    let mut b = Batch::new();
+    b.add(&Chain::new(&nat).with_name(svc), rustables::MsgType::Add);
+    self.send(b).await?;  // RT 1: chain create
+    for (ip, port) in backends {                    // ← 1 RT per backend
+        let mut b = Batch::new();
+        Self::add_dnat_rule(&mut b, &Chain::new(&nat).with_name(svc), matches, *ip, *port)?;
+        self.send(b).await?;                        // RT 2..N+1
+    }
+    Ok(())
+}
+async fn add_jump_rules(&self, svc: &str, hooks: &[&str]) -> Result<()> {
+    for h in hooks {                                // ← 1 RT per hook
+        let mut b = Batch::new();
+        let mut r = Rule::new(&Chain::new(&nat).with_name(*h))?;
+        r.add_expr(Immediate::new_verdict(VerdictKind::Jump { chain: svc.to_string() }));
+        b.add(&r, rustables::MsgType::Add);
+        self.send(b).await?;                        // RT N+2
+    }
+    Ok(())
+}
+```
+
+**Problem**: Service with 5 backends = 8 netlink round trips. 50 services × 5 backends = 400 RTs = 2-4 seconds per reconcile tick.
+
+**Fix**: Single Batch for the entire service (chain + all rules + jump):
+
+```rust
+// OPTIMAL: 1 netlink batch per service, regardless of backend count
+async fn add_dnat_batched(&self, cluster_ip: Ipv4Addr, port: u16,
+                           backends: &[(Ipv4Addr, u16)]) -> Result<()>
+{
+    let svc = chain_name(cluster_ip, port);
+    let nat = Table::new(ProtocolFamily::Ipv4).with_name(&self.nat_table);
+    let mut b = Batch::new();
+
+    // Chain + all backend rules in one transaction
+    b.add(&Chain::new(&nat).with_name(&svc), rustables::MsgType::Add);
+    let chain = Chain::new(&nat).with_name(&svc);
+    for (ip, port_b) in backends {
+        Self::add_dnat_rule(&mut b, &chain, &matches, *ip, *port_b)?;
+    }
+    // Jump from prerouting + output
+    for hook in &["prerouting", "output"] {
+        let mut r = Rule::new(&Chain::new(&nat).with_name(*hook))?;
+        r.add_expr(Immediate::new_verdict(VerdictKind::Jump { chain: svc.clone() }));
+        b.add(&r, rustables::MsgType::Add);
+    }
+    self.send(b).await?;  // ONE netlink batch
+    Ok(())
+}
+```
+
+**Savings**: 50 services × 8 RTs → 50 RTs. Reconcile tick: 2-4s → 250-500ms (5-8x faster).
+
+### Bottleneck 7c: apply_rules loops per-rule netlink batches (mod.rs:230-265)
+
+```rust
+// CURRENT — one netlink batch per NftRule
+pub async fn apply_rule(&self, rule: &NftRule) -> Result<()> {
+    match &rule.action {
+        NftAction::Accept => { self.nft.add_forward_allow(src, dst).await?; }  // 1 batch
+        NftAction::Drop => { self.nft.add_forward_deny(src, dst).await?; }    // 1 batch
+        NftAction::SNAT { .. } => { self.nft.add_snat(name, cidr).await?; }   // 1 batch
+        NftAction::DNAT { .. } => { /* no-op! see 7d */ }
+        NftAction::Jump(_) => { /* no-op! */ }
+        NftAction::Masquerade => { /* also no-op */ }
+        NftAction::Reject => { self.nft.add_forward_deny(src, dst).await?; }
+    }
+    Ok(())
+}
+pub async fn apply_rules(&self, rules: &[NftRule]) -> Result<()> {
+    for rule in rules { self.apply_rule(rule).await?; }  // ← N batches
+}
+```
+
+**Problem**: 50 NSG rules = 50 separate netlink batches. Plus `apply_nsg_rules` calls `reset_nsg_rules` first = 2 more batches.
+
+**Fix**: Collect all rules into one `Batch`:
+
+```rust
+// OPTIMAL: one Batch for entire NSG apply
+pub async fn apply_nsg_rules_batched(&self, rules: &[NftRule]) -> Result<()> {
+    let mut b = Batch::new();
+    let nsg = Chain::new(&Table::new(ProtocolFamily::Ipv4).with_name(&self.filter_table))
+        .with_name("nsg-rules");
+    b.add(&nsg, rustables::MsgType::Replace);  // atomic: del + add
+    for rule in rules {
+        match &rule.action {
+            NftAction::Accept => b.add(&Rule::new(&nsg)?
+                .snetwork(rule.source.as_deref().unwrap_or("0.0.0.0/0").parse()?)?
+                .dnetwork(rule.dest.as_deref().unwrap_or("0.0.0.0/0").parse()?)?
+                .accept(), rustables::MsgType::Add),
+            NftAction::Drop => b.add(&Rule::new(&nsg)?
+                .snetwork(rule.source.as_deref().unwrap_or("0.0.0.0/0").parse()?)?
+                .dnetwork(rule.dest.as_deref().unwrap_or("0.0.0.0/0").parse()?)?
+                .drop(), rustables::MsgType::Add),
+            _ => {}  // DNAT/SNAT/Masquerade handled elsewhere
+        }
+    }
+    // Default deny
+    b.add(&Rule::new(&nsg)?.drop(), rustables::MsgType::Add);
+    self.send(b).await?;  // ONE batch
+    Ok(())
+}
+```
+
+**Savings**: 50 rules → 1 batch. NSG apply: 250-500ms → 5-10ms (25-50x faster).
+
+### Bottleneck 7d: NftAction::DNAT, Jump, Masquerade are no-ops (mod.rs:232-256)
+
+```rust
+// CURRENT — these actions just log and return Ok(())
+NftAction::DNAT { dest_ip, dest_port } => {
+    debug!("DNAT rule {}: ...", rule.chain, ...);
+    // ← nothing actually applied!
+}
+NftAction::Jump(target) => {
+    debug!("Jump rule to {} in {}", target, rule.chain);
+    // ← nothing!
+}
+NftAction::Masquerade => {
+    // Falls through to SNAT but never called
+}
+```
+
+**Problem**: The declarative `apply_rule` facade silently drops DNAT/Jump/Masquerade rules. Only `add_dnat`/`add_nodeport_dnat` actually work, bypassing the planner. The planner output is not fully applied.
+
+**Fix**: Make `apply_rule` actually call the nftables backend for all action types, and route DNAT/SNAT/Jump through the same `Batch` builder:
+
+```rust
+// FIXED: all actions are applied
+pub async fn apply_rule(&self, rule: &NftRule) -> Result<()> {
+    let mut b = Batch::new();
+    match &rule.action {
+        NftAction::Accept => { /* as in 7c */ }
+        NftAction::Drop => { /* as in 7c */ }
+        NftAction::DNAT { dest_ip, dest_port } => {
+            // Resolve backends from service
+            let backends = self.resolve_backends(rule).await?;
+            Self::add_dnat_rule_to_batch(&mut b, &chain, &matches, *dest_ip, *dest_port, &backends)?;
+        }
+        NftAction::SNAT { source_ip } => {
+            b.add(&Rule::new(&chain)?.snetwork(rule.source.as_deref().unwrap_or("0.0.0.0/0").parse()?)?
+                .masquerade(), rustables::MsgType::Add);
+        }
+        NftAction::Masquerade => { /* same as SNAT with MASQUERADE expr */ }
+        NftAction::Jump(target) => {
+            b.add(&Rule::new(&chain)?.goto(target), rustables::MsgType::Add);
+        }
+        NftAction::Reject => { /* reject expr instead of drop */ }
+    }
+    self.send(b).await
+}
+```
+
+### Bottleneck 7e: NftEngine uses rustables high-level API (nftables.rs:1-15)
+
+```rust
+// CURRENT — every Batch goes through rustables' slow high-level API
+use rustables::Batch;  // ~100μs overhead per Batch construction
+let mut b = Batch::new();
+b.add(&Rule::new(&chain)?.snetwork(cidr)?.accept(), rustables::MsgType::Add);
+self.send(b).await?;  // spawn_blocking + Batch.send() (serializes manually)
+```
+
+**Problem**: `rustables` constructs `Batch` objects in user-space, then serializes to netlink format, then sends. We're migrating to raw netlink in `network/src/syscalls.rs` (rustix + neli), which is 5-10x faster.
+
+**Fix**: Switch NftEngine to the raw netlink path. The new `NlSocket` in `network/src/syscalls.rs` already handles open/bind/send/recv. Add a `Batch` builder that emits raw nlmsghdr + NLA bytes:
+
+```rust
+// OPTIMAL: raw netlink batch (no rustables dependency)
+pub struct NftBatch {
+    msgs: Vec<u8>,  // concatenated nlmsghdr + attrs
+    n_msgs: u32,
+}
+
+impl NftBatch {
+    pub fn add(&mut self, msg_type: u16, attrs: Vec<(u16, Vec<u8>)>) {
+        let body = encode_attrs(&attrs);
+        let total = 16 + body.len();
+        self.msgs.extend_from_slice(&total.to_ne_bytes());
+        self.msgs.extend_from_slice(&msg_type.to_ne_bytes());
+        // ... build the nlmsghdr
+        self.msgs.extend_from_slice(&body);
+        self.n_msgs += 1;
+    }
+    pub async fn send(self, sock: &NlSocket) -> Result<()> {
+        sock.send_batch(&self.msgs).await  // ONE netlink RT
+    }
+}
+```
+
+**Savings**: ~50μs per Batch construction × 100 batches/tick = 5ms saved. Plus the netlink send itself is 2-3x faster (no rustables wrapping).
+
+### Bottleneck 7f: planner iterates all resources 4 times (planner.rs:80-130)
+
+```rust
+// CURRENT — full snapshot scan for each concern
+pub fn plan(&self, snap: &StoreSnapshot) -> PlannedNetwork {
+    let local_pods = local_assigned_pods(snap, &self.node_name);     // scan 1
+    out.service_count = services.len();
+    plan_services(&mut out, &services, &local_pods);                 // scan 2
+    plan_dns_from_services(&mut out, &services, &self.cluster_domain);  // scan 3
+    plan_dns_in_cluster_api(&mut out, &self.cluster_domain);
+    plan_dns_from_ingress(&mut out, snap, self.gateway);
+    out.nsg_rules = plan_nsg_rules(snap);                             // scan 4
+    out.network_policies = plan_network_policies(snap);               // scan 5
+    out.remote_routes = plan_remote_pod_routes(snap, &self.node_name, &self.peers);  // scan 6
+    out
+}
+```
+
+**Problem**: For 1000 resources, `snap.by_kind("Pod")` runs 4 times (services filter, dns filter, nsg filter, np filter, remote routes). Each call iterates the full snapshot vec.
+
+**Fix**: Single pass that buckets by kind, then iterates each bucket exactly once:
+
+```rust
+// OPTIMAL: single pass, bucketed
+pub fn plan(&self, snap: &StoreSnapshot) -> PlannedNetwork {
+    let mut buckets: HashMap<&str, Vec<&ResourceTracker>> = HashMap::new();
+    for t in snap.iter() {
+        buckets.entry(t.kind()).or_default().push(t);
+    }
+    let pods = buckets.get("Pod").map(|v| v.as_slice()).unwrap_or(&[]);
+    let services = buckets.get("Service").map(|v| v.as_slice()).unwrap_or(&[]);
+    let nsgs = buckets.get("NSG").map(|v| v.as_slice()).unwrap_or(&[]);
+    let policies = buckets.get("NetworkPolicy").map(|v| v.as_slice()).unwrap_or(&[]);
+    let ingresses = buckets.get("Ingress").map(|v| v.as_slice()).unwrap_or(&[]);
+
+    let mut out = PlannedNetwork::default();
+    for svc in services { plan_one_service(&mut out, svc, pods); }     // 1 pass
+    for nsg in nsgs { plan_one_nsg(&mut out, nsg); }                   // 1 pass
+    for np in policies { plan_one_np(&mut out, np); }                 // 1 pass
+    for pod in pods { plan_one_pod(&mut out, pod, &peers); }           // 1 pass
+    out
+}
+```
+
+**Savings**: 6 full scans → 1. Planner: 5-20ms → 1-3ms (5-10x faster).
+
+### Bottleneck 7g: DNS resolve_service does full store scan (dns.rs:215-260)
+
+```rust
+// CURRENT — every DNS query triggers a full Service store scan
+async fn handle_query(query: &[u8], store: &dyn StoreBackend, ...) -> Option<Vec<u8>> {
+    // ...
+    match resolve_service(&name, store).await {
+        ServiceResolution::ClusterIP(cluster_ip) => { ... }
+    }
+}
+async fn resolve_service(name: &str, store: &dyn StoreBackend) -> ServiceResolution {
+    let trackers = store.get_by_kind("Service").await;  // ← FULL STORE SCAN
+    for t in &trackers { ... }
+}
+```
+
+**Problem**: Every DNS query reads ALL services from the store. 100 services × 1000 QPS = 100K store reads/sec. With §12 in-memory index, this drops to 100K in-memory lookups (still slow).
+
+**Fix**: DNS cache that subscribes to store events (see §13 for pattern). Resolution is O(1) HashMap lookup:
+
+```rust
+// OPTIMAL: in-memory DNS cache, O(1) lookup
+pub struct DnsCache {
+    cluster_ips: RwLock<HashMap<String, Ipv4Addr>>,  // "web.default" → 10.96.0.10
+    externals: RwLock<HashMap<String, String>>,       // "ext.default" → "api.example.com"
+    ingress_hosts: RwLock<HashMap<String, Ipv4Addr>>, // "app.example.com" → gateway
+}
+impl DnsCache {
+    pub fn resolve(&self, name: &str) -> Option<Ipv4Addr> {
+        self.cluster_ips.read().get(name).copied()        // <1μs
+            .or_else(|| self.ingress_hosts.read().get(name).copied())
+    }
+}
+```
+
+**Savings**: DNS query: 1-5ms (store read) → <1μs (hashmap). At 1000 QPS: 1-5s → 1ms.
+
+### Bottleneck 7h: Mutex contention on IpPool (mod.rs:118-132, pool.rs)
+
+```rust
+// CURRENT — single std::sync::Mutex for ALL IP allocation
+pub fn allocate_ip(&self) -> Option<Ipv4Addr> {
+    self.pool.lock().unwrap_or_else(|e| e.into_inner()).allocate()
+}
+pub fn release_ip(&self, ip: Ipv4Addr) {
+    self.pool.lock().unwrap_or_else(|e| e.into_inner()).release(ip);
+    // ... also locks subnet_pools
+}
+```
+
+**Problem**: Every IP alloc/release takes the same mutex. For bursty pod creation (10 pods in 100ms), requests serialize. Also locks `subnet_pools` on every release.
+
+**Fix**: Use sharded allocation or lock-free bitmap:
+
+```rust
+// OPTIMAL: atomic bitmap (no mutex)
+pub struct IpPool {
+    cidr: Ipv4Cidr,
+    /// One AtomicU64 per 64 addresses. bit n = address n is allocated.
+    bitmap: Vec<AtomicU64>,
+    first: u32,  // first usable IP as u32
+    count: u32,  // number of usable IPs
+}
+impl IpPool {
+    pub fn allocate(&self) -> Option<Ipv4Addr> {
+        for (word_idx, word) in self.bitmap.iter().enumerate() {
+            let mut current = word.load(Relaxed);
+            loop {
+                let free = !current;
+                if free == 0 { break; }
+                let bit = free.trailing_zeros();
+                let mask = 1u64 << bit;
+                match word.compare_exchange_weak(current, current | mask, AcqRel, Relaxed) {
+                    Ok(_) => {
+                        let offset = (word_idx * 64 + bit as usize) as u32;
+                        return Some(Ipv4Addr::from(self.first + offset));
+                    }
+                    Err(c) => current = c,
+                }
+            }
+        }
+        None
+    }
+}
+```
+
+**Savings**: Lock-free alloc = 10x throughput under contention. Burst of 10 pods: 10ms → 1ms.
+
+### Bottleneck 7i: Orphan veth cleanup is sequential (mod.rs:343-360)
+
+```rust
+// CURRENT — readdir + per-entry stat
+pub fn clean_orphan_veths(active_uids: &[String]) -> Result<()> {
+    let veths = list_veth_interfaces()?;  // sequential readdir
+    let active_names: Vec<String> = active_uids.iter().map(...).collect();
+    for (name, idx) in &veths {            // sequential del_link
+        if !active_names.contains(name) {
+            netlink::del_link(*idx)?;
+        }
+    }
+}
+```
+
+**Problem**: At startup, iterates all `/sys/class/net/veth-*` entries, then sequentially deletes each orphan. With 100 stale veths = 100 sequential syscalls.
+
+**Fix**: Parallel deletion with `rayon` or batch into one netlink call:
+
+```rust
+// OPTIMAL: parallel deletion
+pub fn clean_orphan_veths_par(active_uids: &[String]) -> Result<()> {
+    let veths = list_veth_interfaces()?;
+    let active: HashSet<&str> = active_uids.iter().map(|u| veth_name_from_uid(u).leak()).collect();
+    let mut batch = NetlinkBatch::new();
+    for (name, idx) in &veths {
+        if !active.contains(name.as_str()) {
+            batch.del_link(*idx);  // queued, not sent yet
+        }
+    }
+    if batch.is_empty() { return Ok(()); }
+    batch.submit_sync()?  // ONE netlink batch for all orphans
+}
+```
+
+**Savings**: 100 stale veths: 500ms → 10ms (50x faster).
+
+### Bottleneck 7j: NftEngine.jump_track is a linear scan (nftables.rs:103-140)
+
+```rust
+// CURRENT — Vec<(Ipv4Addr, u16)> linear search on every add_dnat
+async fn add_dnat(&self, cluster_ip: Ipv4Addr, port: u16, backends: &[(Ipv4Addr, u16)]) -> Result<()> {
+    // ...
+    let mut track = self.jump_track.lock().await;
+    if !track.iter().any(|(ip, p)| *ip == cluster_ip && *p == port) {  // ← O(n) scan
+        track.push((cluster_ip, port));
+        self.add_jump_rules(&svc, &["prerouting", "output"]).await?;
+    }
+}
+```
+
+**Problem**: For 1000 services, every add_dnat scans 1000 entries. Also `Vec` iteration is cache-unfriendly.
+
+**Fix**: Use `HashSet<(Ipv4Addr, u16)>`:
+
+```rust
+// OPTIMAL: HashSet for O(1) lookup
+jump_track: tokio::sync::Mutex<HashSet<(Ipv4Addr, u16)>>,
+nodeport_jump_track: tokio::sync::Mutex<HashSet<u16>>,
+// ...
+if !track.contains(&(cluster_ip, port)) {  // O(1)
+    track.insert((cluster_ip, port));
+    self.add_jump_rules(&svc, &["prerouting", "output"]).await?;
+}
+```
+
+**Savings**: 1000 services: O(1000) → O(1) per lookup. Minor (μs) but adds up under load.
+
+### Bottleneck 7k: setns + open netns fd twice in configure_pod_netns (mod.rs:217-249)
+
+```rust
+// CURRENT — opens /proc/1/ns/net and /proc/<pid>/ns/net multiple times
+pub fn configure_pod_netns(&self, pod_uid: &str, pod_ip: &Ipv4Addr, container_pid: u32, peer_ifindex: u32) -> Result<()> {
+    let netns_path = format!("/proc/{}/ns/net", container_pid);
+    if peer_ifindex != 0 {
+        move_peer_to_netns(peer_ifindex, container_pid)?;  // opens netns fd
+    }
+    let _guard = NetNsGuard::new()?;  // opens /proc/1/ns/net fd
+    let target_ifindex = if peer_ifindex == 0 {
+        // ... opens /proc/1/ns/net AGAIN, then /proc/<pid>/ns/net
+    } else { peer_ifindex };
+    let netns_fd = unsafe { nix::fcntl::open(...) }?;  // opens pod netns AGAIN
+    nix::sched::setns(&netns_fd, nix::sched::CloneFlags::CLONE_NEWNET)?;
+    // ...
+}
+```
+
+**Problem**: For peer_ifindex == 0, we open host netns twice and pod netns once. Each open is a syscall.
+
+**Fix**: Cache host netns fd at NetMux construction. Open pod netns once, reuse for all operations:
+
+```rust
+// OPTIMAL: cache host netns fd, single pod netns open
+pub struct NetMux {
+    host_netns_fd: std::os::fd::OwnedFd,  // opened once at init
+    // ... rest
+}
+impl NetMux {
+    pub fn new(pod_cidr: &str, node_name: &str) -> Result<Self> {
+        let host_netns_fd = unsafe { nix::fcntl::open("/proc/1/ns/net", ...) }?;
+        // ...
+    }
+    pub fn configure_pod_netns_fast(&self, pod_uid: &str, pod_ip: &Ipv4Addr, container_pid: u32, peer_ifindex: u32) -> Result<()> {
+        let netns_fd = unsafe { nix::fcntl::open(format!("/proc/{}/ns/net", container_pid).as_str(), ...) }?;
+        let _guard = NetnsSwitchGuard::enter(&netns_fd, &self.host_netns_fd)?;  // single switch
+        // ... all pod-side ops while in pod netns
+        // _guard drops → single setns back to host
+        Ok(())
+    }
+}
+```
+
+**Savings**: 2-3 fewer open syscalls per pod. ~50μs saved per pod.
+
+### Bottleneck 7l: DNS forward creates new socket per query (dns.rs:300-315)
+
+```rust
+// CURRENT — UdpSocket::bind("0.0.0.0:0") for every forwarded query
+async fn forward(query: &[u8], upstream: &[String]) -> Option<Vec<u8>> {
+    for addr in upstream {
+        if let Ok(sock) = UdpSocket::bind("0.0.0.0:0").await {  // ← new socket each time
+            if sock.send_to(query, addr).await.is_ok() { ... }
+        }
+    }
+}
+```
+
+**Problem**: Every forwarded DNS query creates a new UDP socket. 1000 QPS = 1000 socket creates/sec = 10-50ms overhead.
+
+**Fix**: Pool of pre-bound UDP sockets:
+
+```rust
+// OPTIMAL: shared socket pool
+pub struct DnsForwarder {
+    sockets: tokio::sync::Mutex<Vec<UdpSocket>>,  // pool of pre-bound sockets
+    max_pool: usize,
+}
+impl DnsForwarder {
+    pub async fn forward(&self, query: &[u8], upstream: &str) -> Option<Vec<u8>> {
+        let sock = self.acquire().await;  // reuse or create
+        sock.send_to(query, upstream).await.ok()?;
+        let mut buf = [0u8; 4096];
+        tokio::time::timeout(Duration::from_secs(3), sock.recv(&mut buf)).await.ok()?.ok()
+    }
+}
+```
+
+**Savings**: 1000 QPS: 10-50ms → <1ms socket overhead.
+
+### Bottleneck 7m: DNS handle_query spawns unbounded tasks (dns.rs:81-90)
+
+```rust
+// CURRENT — every query spawns a new tokio task
+loop {
+    match sock.recv_from(&mut buf).await {
+        Ok((n, src)) => {
+            tokio::spawn(async move {                     // ← unbounded spawn
+                if let Some(resp) = handle_query(...).await { ... }
+            });
+        }
+    }
+}
+```
+
+**Problem**: Under DNS flood, unbounded task spawn causes OOM or scheduler thrash.
+
+**Fix**: Semaphore-bounded concurrency:
+
+```rust
+// OPTIMAL: bounded concurrency
+let sem = Arc::new(tokio::sync::Semaphore::new(64));  // max 64 concurrent queries
+loop {
+    match sock.recv_from(&mut buf).await {
+        Ok((n, src)) => {
+            let permit = sem.clone().acquire_owned().await.unwrap();
+            tokio::spawn(async move {
+                let _permit = permit;
+                // ... handle query
+            });
+        }
+    }
+}
+```
+
+**Savings**: Prevents OOM under load, no throughput change at normal load.
+
+### Bottleneck 7n: NetworkPolicy controller does double-lock (np_controller.rs:127-156)
+
+```rust
+// CURRENT — lock, release, lock again
+pub async fn update_pod(&self, pod_ip: Ipv4Addr, labels: &BTreeMap<String, String>, _ns: &str) -> Result<()> {
+    let to_update: Vec<String> = {
+        let mut sets = self.sets.lock().unwrap_or_else(|e| e.into_inner());
+        sets.iter_mut().filter_map(|(n, ps)| { ... }).collect()  // LOCK 1
+    };  // ← released here
+    for name in &to_update {
+        let ips = {
+            let s = self.sets.lock().unwrap_or_else(|e| e.into_inner());  // LOCK 2
+            s.get(name).map(|ps| ps.ip_addrs.clone()).unwrap_or_default()
+        };  // ← released
+        self.netmux.replace_nft_set(name, &ips).await?;
+    }
+}
+```
+
+**Problem**: Lock acquired twice per pod update. Other threads may modify the set between the two locks (race condition + extra lock overhead).
+
+**Fix**: Hold the lock through the entire update, or use a per-set lock:
+
+```rust
+// OPTIMAL: hold lock through the loop, collect updates first
+pub async fn update_pod(&self, pod_ip: Ipv4Addr, labels: &BTreeMap<String, String>, _ns: &str) -> Result<()> {
+    let updates: Vec<(String, Vec<Ipv4Addr>)> = {
+        let mut sets = self.sets.lock().unwrap_or_else(|e| e.into_inner());
+        sets.iter_mut()
+            .filter_map(|(n, ps)| {
+                if labels_match_selector(labels, ps.pod_selector.as_ref()?) && !ps.ip_addrs.contains(&pod_ip) {
+                    ps.ip_addrs.push(pod_ip);
+                    Some((n.clone(), ps.ip_addrs.clone()))
+                } else { None }
+            })
+            .collect()
+    };  // single lock
+    for (name, ips) in updates {
+        self.netmux.replace_nft_set(&name, &ips).await?;
+    }
+    Ok(())
+}
+```
+
+**Savings**: 2 lock acquisitions → 1. Eliminates race condition. Minor (μs) but correct.
+
+### Bottleneck 7o: NftEngine init does 2 netlink sends per table (nftables.rs:73-80)
+
+```rust
+// CURRENT — Del then Add for each table (2 round trips)
+for tbl in [&self.nat_table, &self.filter_table] {
+    let t = Table::new(ProtocolFamily::Ipv4).with_name(tbl);
+    let mut d = Batch::new();
+    d.add(&t, rustables::MsgType::Del);
+    self.send(d).await.ok();  // RT 1
+    let mut a = Batch::new();
+    a.add(&t, rustables::MsgType::Add);
+    self.send(a).await?;       // RT 2
+}
+```
+
+**Problem**: 2 netlink round trips per table to delete + recreate. 2 tables = 4 RTs = 20-40ms at startup.
+
+**Fix**: Use `MsgType::Replace` (atomic del+add), or include both in one Batch:
+
+```rust
+// OPTIMAL: single Batch with del+add (or Replace)
+let mut b = Batch::new();
+for tbl in [&self.nat_table, &self.filter_table] {
+    b.add(&Table::new(ProtocolFamily::Ipv4).with_name(tbl), rustables::MsgType::Add);
+}
+self.send(b).await?;  // ONE batch
+```
+
+**Savings**: 4 RTs → 1. Init: 20-40ms → 5-10ms.
+
+### Bottleneck 7p: NftEngine writer mutex serializes all sends (nftables.rs:50-60)
+
+```rust
+// CURRENT — single tokio::sync::Mutex held during spawn_blocking
+async fn send(&self, batch: Batch) -> Result<()> {
+    let _lock = self.writer.lock().await;  // ← held during spawn_blocking!
+    tokio::task::spawn_blocking(move || batch.send()).await?
+}
+```
+
+**Problem**: The mutex is held across the await on `spawn_blocking`. All nftable operations serialize. For bursty reconcile, ops queue up.
+
+**Fix**: Release the lock before spawn_blocking. The kernel serializes netlink sends per-socket anyway:
+
+```rust
+// OPTIMAL: release lock before spawn_blocking
+async fn send(&self, batch: Batch) -> Result<()> {
+    self.writer.lock().await;  // acquire + immediately drop
+    tokio::task::spawn_blocking(move || batch.send()).await?
+    // Or: just rely on netlink socket serialization (single socket = atomic)
+}
+```
+
+**Savings**: Allows concurrent nft operations on different netlink sockets. Minor under low load, significant under burst.
+
+### Bottleneck 7q: NftEngine uses rustables (not raw netlink) (nftables.rs:1-7)
+
+```rust
+// CURRENT — rustables is a high-level wrapper with significant overhead
+use rustables::{Batch, Chain, Rule, ...};
+```
+
+**Problem**: rustables allocates `Batch` objects in user-space, serializes to netlink format, then sends. The new `network/src/syscalls.rs` uses raw netlink via rustix+neli (5-10x faster).
+
+**Fix**: Migrate NftEngine to use the raw netlink `NlSocket` from `network/src/syscalls.rs`. The Batch builder emits raw nlmsghdr + NLA bytes.
+
+**Savings**: ~50-100μs per Batch construction × 100 batches/tick = 5-10ms saved. Plus the netlink send itself is 2-3x faster.
+
+### Bottleneck 7r: NetworkEngine trait is mostly empty (network.rs)
+
+```rust
+// CURRENT — trait methods return default/empty
+#[async_trait]
+pub trait NetworkEngine: Send + Sync {
+    async fn sync_service(&self, svc: &Service) -> anyhow::Result<()>;
+    async fn remove_service(&self, ns: &str, name: &str) -> anyhow::Result<()>;
+    async fn compute_endpoints(&self, _svc: &Service) -> crate::types::Endpoints {
+        crate::types::Endpoints::default()  // ← always empty
+    }
+    async fn compute_endpointslices(&self, _svc: &Service) -> Vec<crate::types::EndpointSlice> {
+        vec![]  // ← always empty
+    }
+}
+```
+
+**Problem**: EndpointSlice computation is a no-op. Kubernetes clients that watch EndpointSlices see nothing. Service → Pod routing is incomplete.
+
+**Fix**: Implement endpoint computation from the planner output:
+
+```rust
+async fn compute_endpointslices(&self, svc: &Service) -> Vec<crate::types::EndpointSlice> {
+    let plan = self.planner.plan(&self.snapshot);
+    let backends: Vec<EndpointAddress> = plan.dnat_rules.iter()
+        .filter(|r| r.service_ns == svc.metadata.namespace.as_deref().unwrap_or("default")
+                 && r.service_name == svc.metadata.name.as_deref().unwrap_or(""))
+        .flat_map(|r| self.resolve_backends(r))
+        .collect();
+    vec![EndpointSlice { addresses: backends, ports: svc.spec.ports.clone() }]
+}
+```
+
+### Bottleneck 7s: nix dependency for setns/open (mod.rs:90-105, 217-250)
+
+```rust
+// CURRENT — uses nix crate for fd open + setns
+use nix::fcntl::{open, OFlag};
+use nix::sched::{setns, CloneFlags};
+let host_fd = unsafe { open("/proc/1/ns/net", OFlag::O_RDONLY | OFlag::O_CLOEXEC, Mode::empty()) }?;
+nix::sched::setns(fd, CloneFlags::CLONE_NEWNET)?;
+```
+
+**Problem**: nix is a thin wrapper over libc. We're moving to rustix for everything else. Mixed deps = more binary size + inconsistent error handling.
+
+**Fix**: Use rustix for fd open + setns:
+
+```rust
+// OPTIMAL: rustix (already a dep)
+use rustix::fs::open;
+use rustix::thread::UnshareFlags;
+let host_fd = open("/proc/1/ns/net", rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC, rustix::fs::Mode::empty())?;
+rustix::thread::unshare_into(...)?;  // or raw syscall
+```
+
+### Bottleneck 7t: No IPv6 support despite ipv6.rs existing (nftables.rs:30-100)
+
+```rust
+// CURRENT — all nftables ops are ProtocolFamily::Ipv4
+let nat = Table::new(ProtocolFamily::Ipv4).with_name(&self.nat_table);
+```
+
+**Problem**: `ipv6.rs` exists in the module tree but nftables engine has zero IPv6 support. Dual-stack clusters can't use z8s networking for IPv6.
+
+**Fix**: Parameterize nftables engine with address family, add `Ipv6` variants for all chains/tables:
+
+```rust
+// OPTIMAL: address-family parameterized
+pub struct NftEngine {
+    nat_v4: String,  // "z8s_nat_{node}"
+    nat_v6: String,  // "z8s_nat6_{node}"
+    filter_v4: String,
+    filter_v6: String,
+}
+impl NftEngine {
+    pub async fn add_dnat_v6(&self, cluster_ip: Ipv6Addr, port: u16, backends: &[(Ipv6Addr, u16)]) -> Result<()> {
+        // build nat_v6 table + chains
+    }
+}
+```
+
+---
+
+### Netmux Optimization Priority
+
+| Priority | What | Speedup | Difficulty | Section |
+|----------|------|---------|------------|---------|
+| **P0** | Batch attach_pod netlink ops (7a) | 3-4x per pod | Medium | 7a |
+| **P0** | Batch add_dnat into one Batch (7b) | 5-8x per service | Medium | 7b |
+| **P0** | Batch apply_nsg_rules into one Batch (7c) | 25-50x per NSG | Low | 7c |
+| **P0** | DNS cache + in-memory lookup (7g) | 1000x DNS QPS | Medium | 7g |
+| **P0** | Lock-free IP pool (7h) | 10x burst throughput | Low | 7h |
+| **P1** | Fix NftAction::DNAT/Jump/Masquerade no-ops (7d) | Correctness | Low | 7d |
+| **P1** | Migrate NftEngine to raw netlink (7e, 7q) | 5-10x per batch | Medium | 7e,7q |
+| **P1** | Parallel orphan veth cleanup (7i) | 50x startup | Low | 7i |
+| **P1** | Single-pass planner (7f) | 5-10x planner | Low | 7f |
+| **P1** | HashSet jump_track (7j) | O(1) vs O(n) | Trivial | 7j |
+| **P1** | Cache host netns fd (7k) | ~50μs per pod | Trivial | 7k |
+| **P1** | Bounded DNS concurrency (7m) | DoS prevention | Low | 7m |
+| **P2** | DNS forward socket pool (7l) | 10-50x at high QPS | Low | 7l |
+| **P2** | Single-lock NetworkPolicy update (7n) | Correctness + speed | Trivial | 7n |
+| **P2** | MsgType::Replace in init (7o) | 2x init | Trivial | 7o |
+| **P2** | Release writer lock before spawn_blocking (7p) | Burst throughput | Trivial | 7p |
+| **P2** | Migrate nix→rustix for setns (7s) | Dep consolidation | Low | 7s |
+| **P2** | Implement compute_endpointslices (7r) | Correctness | Medium | 7r |
+| **P2** | Add IPv6 nftables support (7t) | Feature parity | High | 7t |
+| **P3** | Incremental planner (diff vs last plan) | 10x for small changes | High | — |
+
+---
+
+### Netmux Implementation Order
+
+| Step | What | LOC | Expected Improvement |
+|------|------|-----|---------------------|
+| 1 | HashSet jump_track (7j) | ~10 | O(1) lookup |
+| 2 | Single-lock NetworkPolicy update (7n) | ~20 | Correctness |
+| 3 | MsgType::Replace in init (7o) | ~10 | 2x init speed |
+| 4 | Fix NftAction no-ops (7d) | ~50 | Correctness |
+| 5 | Lock-free IP pool (7h) | ~80 | 10x burst |
+| 6 | Bounded DNS concurrency (7m) | ~20 | DoS prevention |
+| 7 | DNS forward socket pool (7l) | ~50 | 10x at high QPS |
+| 8 | DNS cache (7g) | ~150 | 1000x DNS QPS |
+| 9 | Single-pass planner (7f) | ~80 | 5-10x planner |
+| 10 | Batch apply_nsg_rules (7c) | ~60 | 25-50x per NSG |
+| 11 | Parallel orphan veth cleanup (7i) | ~30 | 50x startup |
+| 12 | Cache host netns fd (7k) | ~30 | ~50μs per pod |
+| 13 | Batch add_dnat (7b) | ~60 | 5-8x per service |
+| 14 | Batch attach_pod netlink (7a) | ~100 | 3-4x per pod |
+| 15 | Release writer lock before spawn_blocking (7p) | ~5 | Burst throughput |
+| 16 | Migrate NftEngine to raw netlink (7e, 7q) | ~300 | 5-10x per batch |
+| 17 | Migrate nix→rustix for setns (7s) | ~50 | Dep consolidation |
+| 18 | Implement compute_endpointslices (7r) | ~80 | Correctness |
+| 19 | Add IPv6 nftables support (7t) | ~300 | Feature parity |
+| 20 | Incremental planner (P3) | ~200 | 10x for small changes |
+
+---
+
+### Netmux Final Target
+
+```
+Per-pod attach (current → optimized):
+  create_veth + set_link_up + add_addr + add_route:  20-40ms → 5-10ms (one netlink batch)
+  configure_pod_netns (set_link_up + add_addr + add_route):  10-20ms → 3-5ms (one batch)
+  setns overhead:  2-3 syscalls → 1 syscall (cached host fd)
+                                              TOTAL: 25-80ms → 8-15ms (3-4x faster)
+
+Per-Service DNAT (5 backends, current → optimized):
+  chain create + 5 rules + 2 jumps:  40-80ms → 5-10ms (one Batch)
+                                              TOTAL: 8 batches → 1 batch (5-8x faster)
+
+Per-NSG apply (50 rules, current → optimized):
+  reset + 50 add_forward:  250-500ms → 5-10ms (one Batch)
+                                              TOTAL: 52 batches → 1 batch (25-50x faster)
+
+Reconcile tick (100 svc + 50 nsg + 200 pods, current → optimized):
+  StoreSnapshot:           10-50ms → 1-5ms (in-mem index, §12)
+  Planner:                 5-20ms → 1-3ms (single-pass, 7f)
+  NftEngine apply:         200-800ms → 30-80ms (batched, 7b/7c/7e)
+  DNS records:             5-20ms → <1ms (cache, 7g)
+  NetworkPolicy update:    20-100ms → 5-20ms (single-lock, 7n)
+  Store events:            5-20ms → 1-5ms (batched, §3b/4a)
+                                              TOTAL: 250-1000ms → 40-120ms (5-10x faster)
+
+DNS query (current → optimized):
+  resolve_service (store scan):  1-5ms → <1μs (HashMap lookup)
+                                              TOTAL: 1-5ms → <1μs (1000-5000x faster)
+
+Pod attach burst (10 pods, current → optimized):
+  10 × 8 netlink RT:       200-800ms → 10-20ms (batched + raw netlink)
+  10 × IP alloc:           10ms → 1ms (lock-free)
+                                              TOTAL: 210-810ms → 11-21ms (20-40x faster)
+```
+
+---
+
 ## Optimization Priority
 
 | Priority | What | Speedup | Difficulty |
