@@ -867,7 +867,7 @@ mod tests {
             (NftFamily::Ip, "stale".to_string()),
             NftTable::new("stale", NftFamily::Ip),
         );
-        let desired = NetmuxState::new();
+        let mut desired = NetmuxState::new();
         let ops = reconcile(&desired, &current);
         assert!(ops.iter().any(|op| matches!(
             op,

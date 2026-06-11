@@ -153,7 +153,8 @@ const NLM_F_APPEND: u16 = 0x800;
 
 // Batch envelope constants (nf_tables requires every op to be wrapped in
 // a batch on modern kernels; individual messages get EINVAL).
-const NFNL_SUBSYS_NFTNL: u16 = 0;
+// The BATCH_BEGIN/END nlmsg_type is just NFNL_MSG_BATCH_BEGIN/END (the
+// nfnetlink subsys for batch control is 0, so no shift is needed).
 const NFNL_MSG_BATCH_BEGIN: u16 = 1;
 const NFNL_MSG_BATCH_END: u16 = 2;
 
@@ -224,12 +225,14 @@ impl NlaBuf {
     }
 
     /// Append a C-string in NLA format (NUL-terminated, padded).
+    /// The `nla_len` field is the logical length (header + payload, NUL-included),
+    /// NOT the padded total — the kernel reads `nla_len - 4` bytes of payload
+    /// then seeks to the next attr at `nla_len` rounded up to 4 bytes.
     pub fn put_str(&mut self, kind: u16, s: &str) {
         let bytes = s.as_bytes();
-        let mut padded_len = 4 + bytes.len() + 1; // include NUL
-        let pad = (4 - (padded_len % 4)) % 4;
-        padded_len += pad;
-        self.bytes.extend_from_slice(&(padded_len as u16).to_ne_bytes());
+        let nla_len = 4 + bytes.len() + 1; // include NUL
+        let pad = (4 - (nla_len % 4)) % 4;
+        self.bytes.extend_from_slice(&(nla_len as u16).to_ne_bytes());
         self.bytes.extend_from_slice(&kind.to_ne_bytes());
         self.bytes.extend_from_slice(bytes);
         self.bytes.push(0); // NUL terminator
@@ -239,11 +242,11 @@ impl NlaBuf {
     }
 
     /// Append raw bytes in NLA format (padded to 4-byte boundary).
+    /// `nla_len` is the logical length (header + payload), not the padded total.
     pub fn put_slice(&mut self, kind: u16, data: &[u8]) {
-        let mut padded_len = 4 + data.len();
-        let pad = (4 - (padded_len % 4)) % 4;
-        padded_len += pad;
-        self.bytes.extend_from_slice(&(padded_len as u16).to_ne_bytes());
+        let nla_len = 4 + data.len();
+        let pad = (4 - (nla_len % 4)) % 4;
+        self.bytes.extend_from_slice(&(nla_len as u16).to_ne_bytes());
         self.bytes.extend_from_slice(&kind.to_ne_bytes());
         self.bytes.extend_from_slice(data);
         if pad > 0 {
@@ -252,6 +255,7 @@ impl NlaBuf {
     }
 
     /// Append a nested attribute (`NLA_F_NESTED`). Padded to 4 bytes.
+    /// `nla_len` is the logical length (header + payload, NOT padded total).
     pub fn put_nested<F>(&mut self, kind: u16, f: F)
     where
         F: FnOnce(&mut NlaBuf),
@@ -263,14 +267,12 @@ impl NlaBuf {
         let payload_start = self.bytes.len();
         f(self);
         let payload_len = self.bytes.len() - payload_start;
-        let total = 4 + payload_len;
-        let padded = (total + 3) & !3;
-        if padded > total {
-            self.bytes.resize(self.bytes.len() + (padded - total), 0);
+        let nla_len = 4 + payload_len; // logical length, not padded
+        let pad = (4 - (nla_len % 4)) % 4;
+        if pad > 0 {
+            self.bytes.resize(self.bytes.len() + pad, 0);
         }
-        // Length field is just the length (no flags).
-        let len = padded as u16;
-        self.bytes[header_pos..header_pos + 2].copy_from_slice(&len.to_ne_bytes());
+        self.bytes[header_pos..header_pos + 2].copy_from_slice(&(nla_len as u16).to_ne_bytes());
     }
 
     /// Consume the buffer into raw bytes.
@@ -593,58 +595,87 @@ impl NlSocket {
         let (msg_type, body) = encode_op(op);
         let flags = nlmsg_flags_for(op);
 
-        // The socket's bound pid must be used as nlmsg_pid so the kernel
-        // can route replies back to this socket.
-        let pid = self.sock.pid()?;
+        // ── Wire format note ──────────────────────────────────────────
+        // nft CLI uses nlmsg_pid=0 in every message of the batch. The
+        // kernel uses the *bound* pid (set by `bind()`) internally to
+        // route replies, not the nlmsg_pid in the message body. The body
+        // field is the source pid and should be 0 for userspace-originated
+        // messages.
+        //
+        // BATCH_BEGIN and BATCH_END also carry a 4-byte nfgenmsg after the
+        // nlmsghdr, with `res_id` set to the nftables subsys number (10).
+        // nlmsg_seq is sequential: 0, 1, 2 for the three messages.
+        //
+        // The op's flags are NLM_F_REQUEST only (NLM_F_ACK, NLM_F_CREATE,
+        // and NLM_F_EXCL are all stripped) — matching nft CLI exactly.
+        // The kernel sends one NLMSG_ERROR after the batch commits,
+        // regardless of NLM_F_ACK, because the batch is a transaction.
 
-        // Build BATCH_BEGIN (empty, no nfgenmsg, just 16-byte nlmsghdr).
-        let begin_type = (NFNL_SUBSYS_NFTNL << 8) | NFNL_MSG_BATCH_BEGIN;
-        let mut begin = Vec::with_capacity(16);
-        begin.extend_from_slice(&16u32.to_ne_bytes()); // nlmsg_len = 16
+        // Build BATCH_BEGIN: nlmsghdr(16) + nfgenmsg(4) = 20 bytes.
+        let begin_type = NFNL_MSG_BATCH_BEGIN;
+        let mut begin = Vec::with_capacity(20);
+        begin.extend_from_slice(&20u32.to_ne_bytes()); // nlmsg_len = 20
         begin.extend_from_slice(&begin_type.to_ne_bytes());
         begin.extend_from_slice(&NLM_F_REQUEST.to_ne_bytes());
-        begin.extend_from_slice(&0u32.to_ne_bytes()); // nlmsg_seq
-        begin.extend_from_slice(&pid.to_ne_bytes());
+        begin.extend_from_slice(&0u32.to_ne_bytes()); // nlmsg_seq = 0
+        begin.extend_from_slice(&0u32.to_ne_bytes()); // nlmsg_pid = 0
+        // nfgenmsg: family=AF_UNSPEC(0), version=0, res_id=10 (network byte order)
+        begin.extend_from_slice(&[0u8, 0, 0, 10]);
 
         // Build the actual op message: nlmsghdr(16) + body.
-        // Keep NLM_F_ACK on the op — the kernel sends an ACK per NLM_F_ACK
-        // message, and the op should be acknowledged too.
+        // Strip NLM_F_ACK, NLM_F_CREATE, and NLM_F_EXCL — match nft CLI.
+        let op_flags = NLM_F_REQUEST;
         let total_len = (16 + body.len()) as u32;
         let mut msg = Vec::with_capacity(16 + body.len());
         msg.extend_from_slice(&total_len.to_ne_bytes());
         msg.extend_from_slice(&nlmsg_type(msg_type).to_ne_bytes());
-        msg.extend_from_slice(&flags.to_ne_bytes());
-        msg.extend_from_slice(&0u32.to_ne_bytes()); // nlmsg_seq
-        msg.extend_from_slice(&pid.to_ne_bytes());
+        msg.extend_from_slice(&op_flags.to_ne_bytes());
+        msg.extend_from_slice(&1u32.to_ne_bytes()); // nlmsg_seq = 1
+        msg.extend_from_slice(&0u32.to_ne_bytes()); // nlmsg_pid = 0
         msg.extend_from_slice(&body);
         let pad = (4 - (msg.len() % 4)) % 4;
         if pad > 0 {
             msg.resize(msg.len() + pad, 0);
         }
 
-        // Build BATCH_END (empty, with NLM_F_ACK to get the commit reply).
-        let end_type = (NFNL_SUBSYS_NFTNL << 8) | NFNL_MSG_BATCH_END;
-        let mut end = Vec::with_capacity(16);
-        end.extend_from_slice(&16u32.to_ne_bytes()); // nlmsg_len = 16
+        // Build BATCH_END: nlmsghdr(16) + nfgenmsg(4) = 20 bytes.
+        // nft CLI uses NLM_F_REQUEST only (no NLM_F_ACK) on BATCH_END; the
+        // kernel still sends a single NLMSG_ERROR reply after the batch is
+        // committed (because the batch is a transaction).
+        let end_type = NFNL_MSG_BATCH_END;
+        let mut end = Vec::with_capacity(20);
+        end.extend_from_slice(&20u32.to_ne_bytes()); // nlmsg_len = 20
         end.extend_from_slice(&end_type.to_ne_bytes());
-        end.extend_from_slice(&(NLM_F_REQUEST | NLM_F_ACK).to_ne_bytes());
-        end.extend_from_slice(&0u32.to_ne_bytes());
-        end.extend_from_slice(&pid.to_ne_bytes());
+        end.extend_from_slice(&NLM_F_REQUEST.to_ne_bytes());
+        end.extend_from_slice(&2u32.to_ne_bytes()); // nlmsg_seq = 2
+        end.extend_from_slice(&0u32.to_ne_bytes()); // nlmsg_pid = 0
+        // nfgenmsg: family=AF_UNSPEC, version=0, res_id=10 (network byte order)
+        end.extend_from_slice(&[0u8, 0, 0, 10]);
+
+        // ── Critical: send all three messages in ONE sendmsg call ──────
+        // The kernel's nfnetlink_rcv processes messages one at a time.
+        // Three separate send() calls would be seen as three standalone
+        // ops outside any batch — exactly the EINVAL case. nft CLI uses
+        // a single sendmsg with one iovec containing all three messages
+        // concatenated. We do the same: combine into one Vec and send once.
+        let mut combined = Vec::with_capacity(begin.len() + msg.len() + end.len());
+        combined.extend_from_slice(&begin);
+        combined.extend_from_slice(&msg);
+        combined.extend_from_slice(&end);
 
         let raw_fd = self.sock.as_raw_fd();
         // SAFETY: the socket is valid for the lifetime of `self`, and all
         // send/recv calls complete before this method returns.
         let fd = unsafe { BorrowedFd::borrow_raw(raw_fd) };
 
-        // Send the three messages in sequence.
-        rustix::net::send(fd, &begin, rustix::net::SendFlags::empty())?;
-        rustix::net::send(fd, &msg, rustix::net::SendFlags::empty())?;
-        rustix::net::send(fd, &end, rustix::net::SendFlags::empty())?;
+        // Send the entire batch envelope in one call.
+        rustix::net::send(fd, &combined, rustix::net::SendFlags::empty())?;
 
-        // Drain ACKs: one per NLM_F_ACK message (op + BATCH_END = 2).
-        // The last ACK is the BATCH_END commit reply.
+        // Drain ACKs: the kernel sends a single NLMSG_ERROR reply after
+        // BATCH_END (because BATCH_END has NLM_F_ACK). We loop in case the
+        // kernel sends a multipart ACK or notification.
         let mut last_reply = Vec::new();
-        for _ in 0..2 {
+        loop {
             let mut reply = vec![0u8; 8192];
             let (_data, n) =
                 rustix::net::recv(fd, &mut reply, rustix::net::RecvFlags::empty())?;
@@ -656,6 +687,11 @@ impl NlSocket {
                 }
             }
             last_reply = reply;
+            // If the reply is shorter than the kernel's max message size
+            // (8KiB), the batch is complete (atomic message).
+            if last_reply.len() < 8192 {
+                break;
+            }
         }
         Ok(last_reply)
     }
