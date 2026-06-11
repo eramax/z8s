@@ -1,51 +1,12 @@
-[package]
-name = "z8s"
-version = "0.1.0"
-edition = "2024"
-description = "A minimal, fast init process and Kubernetes-compatible orchestrator"
-
-[dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "signal", "sync", "io-util", "process"] }
-serde = { version = "1", features = ["derive"] }
-base64 = "0.22"
-serde_yaml = "0.9"
-serde_json = "1"
-nix = { version = "0.31", features = ["fs", "signal", "sched", "mount", "process", "term", "ioctl", "user", "resource", "hostname", "socket"] }
-caps = "0.5"
-landlock = "0.4"
-oci-distribution = "0.11"
-flate2 = "1"
-tar = "0.4"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt"] }
-notify = "8"
-anyhow = { version = "1", features = ["backtrace"] }
-getrandom = "0.2"
-sha2 = "0.10"
-axum = { version = "0.8", default-features = false, features = ["json", "tokio", "http1", "ws", "query"] }
-futures-util = { version = "0.3", default-features = false, features = ["sink"] }
-tokio-stream = { version = "0.1", features = ["sync"] }
-tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
-native-tls = "0.2"
-async-trait = "0.1"
-rustables = "0.8"
-ipnetwork = "0.21"
-redb = "2"
-tokio-rustls = "0.26.4"
-rustls-pemfile = "2.2.0"
-hyper-util = { version = "0.1.20", features = ["tokio", "server-auto"] }
-rcgen = "0.14.8"
-dirs = "6.0.0"
-
-[dev-dependencies]
-tower = { version = "0.5", features = ["util"] }
-
-[profile.release]
-opt-level = "z"
-lto = true
-strip = true
-codegen-units = 1
-panic = "abort"
-
-[patch.crates-io]
-rustables = { path = ".cargo-patches/rustables-0.8.7" }
+[workspace]
+members = [
+    "core",
+    "runtime",
+    "network",
+    "sync",
+    "controller",
+    "api",
+    "z8s",
+    "z8s-node",
+]
+resolver = "2"
