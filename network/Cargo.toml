@@ -2,7 +2,7 @@
 name = "network"
 version = "0.1.0"
 edition = "2024"
-description = "Networking: veth pairs, nftables, DNS, IPAM, ingress, network policies"
+description = "Networking: veth, nftables (raw netlink), DNS, IPAM, ingress, network policy"
 
 [dependencies]
 z8s_core = { path = "../core" }
@@ -13,8 +13,3 @@ anyhow = "1.0.102"
 rustix = { version = "1.1.4", features = ["process", "fs", "mount", "thread", "pipe", "net", "system", "runtime", "stdio", "termios"] }
 async-trait = "0.1.89"
 tracing = "0.1.44"
-ipnetwork = "0.21"
-rustables = { path = "../.cargo-patches/rustables-0.8.7" }
-
-[dev-dependencies]
-tempfile = "3.13"

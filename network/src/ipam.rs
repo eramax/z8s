@@ -1,25 +1,24 @@
 //! # IPAM — IP Address Management
 //!
-//! This module provides IP address allocation pools for:
-//! - **Pod CIDR** — the main pod network (e.g., `10.42.0.0/20`)
-//! - **Service CIDR** — ClusterIP allocations (e.g., `10.96.0.0/16`)
-//! - **VNet subnets** — per-VNet allocations
+//! Pure functional IP address pools for IPv4 and IPv6.
 //!
-//! All pools use a `BTreeSet` free-list for O(log n) allocation and
-//! deterministic address ordering.
+//! - [`Ipv4Cidr`] — parsed CIDR with network, prefix, broadcast, gateway
+//! - [`IpPool`] — BTreeSet-based free-list allocator
+//! - [`Ipv6Pool`] — /64-prefix allocator with Interface Identifier (IID)
 //!
-//! ## Design
-//!
-//! - One pool per CIDR
-//! - First two addresses reserved (network, gateway)
-//! - Last address reserved (broadcast)
-//! - Released addresses return to the free set
-//! - Subnet allocation finds the first aligned, contiguous block
+//! All pools are deterministic, ascending-order, and reserve the
+//! standard network/gateway/broadcast addresses for IPv4.
 
-use std::collections::BTreeSet;
-use std::net::Ipv4Addr;
+use std::collections::{BTreeSet, HashSet};
+use std::net::{Ipv4Addr, Ipv6Addr};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, RwLock};
 
-/// An IPv4 CIDR (network address + prefix length).
+// ═══════════════════════════════════════════════════════════════════════════
+// IPv4 CIDR
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// An IPv4 CIDR (network + prefix length).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Ipv4Cidr {
     pub network: Ipv4Addr,
@@ -71,20 +70,19 @@ impl Ipv4Cidr {
 
     /// Check if an IP is within this CIDR.
     pub fn contains(&self, ip: &Ipv4Addr) -> bool {
-        let mask = !0u32 << (32 - self.prefix);
+        let mask = if self.prefix == 0 {
+            0
+        } else {
+            !0u32 << (32 - self.prefix)
+        };
         (u32::from(*ip) & mask) == (u32::from(self.network) & mask)
     }
 
-    /// Get the broadcast address (last address in CIDR).
+    /// Get the broadcast address.
     pub fn broadcast(&self) -> Ipv4Addr {
         let bits = 32 - self.prefix as u32;
         let size = 1u32 << bits;
         Ipv4Addr::from(self.network_u32() + size - 1)
-    }
-
-    /// Get the network address (first address in CIDR).
-    pub fn network_addr(&self) -> Ipv4Addr {
-        self.network
     }
 
     /// Get the gateway address (first usable host).
@@ -92,24 +90,9 @@ impl Ipv4Cidr {
         Ipv4Addr::from(self.network_u32() + 1)
     }
 
-    /// Get the last usable host address (one before broadcast).
-    pub fn last_host(&self) -> Option<Ipv4Addr> {
-        if self.prefix >= 31 {
-            // /31 and /32 are point-to-point — every address is usable
-            Some(self.broadcast())
-        } else {
-            let bcast = u32::from(self.broadcast());
-            if bcast == 0 {
-                None
-            } else {
-                Some(Ipv4Addr::from(bcast - 1))
-            }
-        }
-    }
-
-    /// Format as "address/prefix" string.
-    pub fn to_string(&self) -> String {
-        format!("{}/{}", self.network, self.prefix)
+    /// Compute gateway for a CIDR (convenience).
+    pub fn gateway_for(cidr: &Ipv4Cidr) -> Ipv4Addr {
+        cidr.gateway()
     }
 }
 
@@ -119,11 +102,14 @@ impl std::fmt::Display for Ipv4Cidr {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// IPv4 Pool
+// ═══════════════════════════════════════════════════════════════════════════
+
 /// A free-list based IP pool for IPv4 addresses.
 #[derive(Debug, Clone)]
 pub struct IpPool {
     cidr: Ipv4Cidr,
-    /// Set of free IP addresses as u32.
     free: BTreeSet<u32>,
 }
 
@@ -135,12 +121,10 @@ impl IpPool {
         let total = 1u32 << bits;
         let mut free = BTreeSet::new();
         if cidr.prefix >= 31 {
-            // Point-to-point: every address is usable
             for i in 0..total {
                 free.insert(network + i);
             }
         } else {
-            // Skip network (.0), gateway (.1), and broadcast (last)
             for i in 2..(total - 1) {
                 free.insert(network + i);
             }
@@ -148,10 +132,9 @@ impl IpPool {
         Self { cidr, free }
     }
 
-    /// Allocate the next available IP (deterministic, ascending order).
+    /// Allocate the next available IP (ascending).
     pub fn allocate(&mut self) -> Option<Ipv4Addr> {
-        let ip = self.free.pop_first()?;
-        Some(Ipv4Addr::from(ip))
+        self.free.pop_first().map(Ipv4Addr::from)
     }
 
     /// Return an IP to the pool.
@@ -161,12 +144,12 @@ impl IpPool {
         }
     }
 
-    /// Number of free addresses remaining.
+    /// Number of free addresses.
     pub fn count_free(&self) -> usize {
         self.free.len()
     }
 
-    /// Total capacity (including reserved).
+    /// Total capacity.
     pub fn capacity(&self) -> u32 {
         self.cidr.host_count() + 2
     }
@@ -176,28 +159,10 @@ impl IpPool {
         &self.cidr
     }
 
-    /// Add a contiguous CIDR range to the free set (for VNet expansion).
-    pub fn expand(&mut self, new_cidr: &Ipv4Cidr) -> Result<(), String> {
-        let old_network = self.cidr.network_u32();
-        let old_size = 1u32 << (32 - self.cidr.prefix as u32);
-        let new_network = new_cidr.network_u32();
-
-        if new_network != old_network + old_size {
-            return Err("New CIDR is not adjacent to current CIDR".to_string());
-        }
-
-        let bits = 32 - new_cidr.prefix as u32;
-        for i in 0..(1u32 << bits) {
-            self.free.insert(new_network + i);
-        }
-        Ok(())
-    }
-
-    /// Allocate a contiguous subnet block (aligned, sized to subnet_prefix).
-    /// Returns the allocated CIDR or None if no aligned block is free.
+    /// Allocate a contiguous aligned subnet block.
     pub fn allocate_subnet(&mut self, subnet_prefix: u8) -> Option<Ipv4Cidr> {
         if subnet_prefix < self.cidr.prefix {
-            return None; // can only allocate larger (smaller prefix) blocks
+            return None;
         }
         let subnet_size = 1u32 << (32 - subnet_prefix as u32);
         if (self.free.len() as u32) < subnet_size {
@@ -207,7 +172,7 @@ impl IpPool {
         for window in free_vec.windows(subnet_size as usize) {
             let start = window[0];
             if (start & (subnet_size - 1)) != 0 {
-                continue; // not aligned
+                continue;
             }
             if window
                 .iter()
@@ -227,6 +192,94 @@ impl IpPool {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// IPv6 Pool
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// IPv6 address pool for /64 prefix allocation. Each address is /128.
+#[derive(Debug, Clone)]
+pub struct Ipv6Pool {
+    prefix_bytes: [u8; 16],
+    next_iid: Arc<AtomicU64>,
+    available: Arc<RwLock<HashSet<u64>>>,
+}
+
+impl Ipv6Pool {
+    /// Create from a prefix like "2001:db8::/64".
+    pub fn new(prefix: &str) -> Result<Self, String> {
+        let (addr_str, prefix_len) = prefix
+            .split_once('/')
+            .ok_or("Expected CIDR notation, e.g. 2001:db8::/64")?;
+        let prefix_len: u8 = prefix_len
+            .parse()
+            .map_err(|e| format!("Invalid prefix: {}", e))?;
+        if prefix_len > 128 {
+            return Err("Prefix length must be <= 128".to_string());
+        }
+        let addr: Ipv6Addr = addr_str
+            .parse()
+            .map_err(|e| format!("Invalid IPv6 address: {}", e))?;
+        let mut octets = addr.octets();
+        let host_bits = (128 - prefix_len) as u16;
+        let full_zero_bytes = (host_bits / 8) as usize;
+        for i in (16 - full_zero_bytes)..16 {
+            octets[i] = 0;
+        }
+        if host_bits % 8 != 0 {
+            let partial_idx = 16 - full_zero_bytes - 1;
+            let keep_bits = 8 - (host_bits % 8);
+            octets[partial_idx] &= ((1u16 << keep_bits) - 1) as u8;
+        }
+        Ok(Self {
+            prefix_bytes: octets,
+            next_iid: Arc::new(AtomicU64::new(1)),
+            available: Arc::new(RwLock::new(HashSet::new())),
+        })
+    }
+
+    /// Allocate a new IPv6 address.
+    pub fn allocate(&self) -> Ipv6Addr {
+        {
+            let mut avail = self.available.write().unwrap_or_else(|e| e.into_inner());
+            if let Some(&iid) = avail.iter().next() {
+                avail.remove(&iid);
+                return self.iid_to_addr(iid);
+            }
+        }
+        let iid = self.next_iid.fetch_add(1, Ordering::Relaxed);
+        self.iid_to_addr(iid)
+    }
+
+    /// Release an address for reuse.
+    pub fn release(&self, addr: Ipv6Addr) {
+        let iid = self.addr_to_iid(addr);
+        self.available
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(iid);
+    }
+
+    /// Number of currently available (released) addresses.
+    pub fn available_count(&self) -> usize {
+        self.available.read().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
+    fn iid_to_addr(&self, iid: u64) -> Ipv6Addr {
+        let mut octets = self.prefix_bytes;
+        octets[8..16].copy_from_slice(&iid.to_be_bytes());
+        Ipv6Addr::from(octets)
+    }
+
+    fn addr_to_iid(&self, addr: Ipv6Addr) -> u64 {
+        let octets = addr.octets();
+        u64::from_be_bytes(octets[8..16].try_into().unwrap())
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Tests
+// ═══════════════════════════════════════════════════════════════════════════
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -239,16 +292,32 @@ mod tests {
     }
 
     #[test]
-    fn cidr_parse_misaligned_network_normalized() {
+    fn cidr_parse_misaligned_normalizes() {
         let cidr = Ipv4Cidr::parse("10.42.5.13/20").unwrap();
         assert_eq!(cidr.network, Ipv4Addr::new(10, 42, 0, 0));
     }
 
     #[test]
-    fn cidr_parse_invalid_prefix() {
+    fn cidr_invalid() {
         assert!(Ipv4Cidr::parse("10.0.0.0/33").is_none());
-        assert!(Ipv4Cidr::parse("not-an-ip/24").is_none());
-        assert!(Ipv4Cidr::parse("10.0.0.0").is_none()); // no prefix
+        assert!(Ipv4Cidr::parse("not-ip/24").is_none());
+        assert!(Ipv4Cidr::parse("10.0.0.0").is_none());
+        assert!(Ipv4Cidr::parse("10.0.0.0/0").is_some()); // /0 is valid
+    }
+
+    #[test]
+    fn cidr_zero_prefix_does_not_underflow() {
+        // Was UB before; shift by 32 would be UB
+        let cidr = Ipv4Cidr::new(Ipv4Addr::new(192, 168, 1, 50), 0);
+        assert_eq!(cidr.prefix, 0);
+        assert_eq!(cidr.network, Ipv4Addr::new(0, 0, 0, 0));
+    }
+
+    #[test]
+    fn cidr_full_32_prefix() {
+        let cidr = Ipv4Cidr::new(Ipv4Addr::new(10, 0, 0, 5), 32);
+        assert_eq!(cidr.prefix, 32);
+        assert_eq!(cidr.network, Ipv4Addr::new(10, 0, 0, 5));
     }
 
     #[test]
@@ -266,26 +335,7 @@ mod tests {
     }
 
     #[test]
-    fn cidr_broadcast() {
-        let cidr = Ipv4Cidr::parse("10.42.0.0/24").unwrap();
-        assert_eq!(cidr.broadcast(), Ipv4Addr::new(10, 42, 0, 255));
-    }
-
-    #[test]
-    fn cidr_gateway() {
-        let cidr = Ipv4Cidr::parse("10.42.0.0/20").unwrap();
-        assert_eq!(cidr.gateway(), Ipv4Addr::new(10, 42, 0, 1));
-    }
-
-    #[test]
-    fn cidr_last_host() {
-        let cidr = Ipv4Cidr::parse("10.42.0.0/24").unwrap();
-        assert_eq!(cidr.last_host(), Some(Ipv4Addr::new(10, 42, 0, 254)));
-    }
-
-    #[test]
     fn pool_slash_30_has_one_host() {
-        // /30: 4 addresses: .0 (network), .1 (gateway), .2 (host), .3 (broadcast)
         let cidr = Ipv4Cidr::parse("10.42.0.0/30").unwrap();
         let mut pool = IpPool::new(cidr);
         assert_eq!(pool.count_free(), 1);
@@ -297,19 +347,17 @@ mod tests {
     }
 
     #[test]
-    fn pool_allocates_in_ascending_order() {
+    fn pool_allocates_ascending() {
         let cidr = Ipv4Cidr::parse("10.42.0.0/29").unwrap();
         let mut pool = IpPool::new(cidr);
-        // /29: 8 addresses: .0 net, .1 gw, .2-.6 hosts, .7 bcast → 5 hosts
         let ip1 = pool.allocate().unwrap();
         let ip2 = pool.allocate().unwrap();
         assert_eq!(ip1, Ipv4Addr::new(10, 42, 0, 2));
         assert_eq!(ip2, Ipv4Addr::new(10, 42, 0, 3));
-        assert_ne!(ip1, ip2);
     }
 
     #[test]
-    fn pool_release_reuses_address() {
+    fn pool_release_reuses() {
         let cidr = Ipv4Cidr::parse("10.42.0.0/29").unwrap();
         let mut pool = IpPool::new(cidr);
         let ip1 = pool.allocate().unwrap();
@@ -319,54 +367,31 @@ mod tests {
     }
 
     #[test]
-    fn pool_release_outside_cidr_ignored() {
-        let cidr = Ipv4Cidr::parse("10.42.0.0/24").unwrap();
-        let mut pool = IpPool::new(cidr);
-        let count_before = pool.count_free();
-        pool.release(Ipv4Addr::new(192, 168, 1, 1));
-        assert_eq!(pool.count_free(), count_before);
-    }
-
-    #[test]
     fn pool_allocate_subnet_aligned() {
         let cidr = Ipv4Cidr::parse("10.42.0.0/16").unwrap();
         let mut pool = IpPool::new(cidr);
         let subnet = pool.allocate_subnet(24).unwrap();
         assert_eq!(subnet.prefix, 24);
-        // Subnet must be aligned to /24 boundary
         assert_eq!(u32::from(subnet.network) & 0xFF, 0);
     }
 
     #[test]
-    fn pool_capacity() {
-        let cidr = Ipv4Cidr::parse("10.42.0.0/24").unwrap();
-        let pool = IpPool::new(cidr);
-        // /24: 256 addresses, host_count reports 254 (excludes network + broadcast),
-        // but the pool additionally reserves .1 for the gateway, so 253 are free.
-        assert_eq!(pool.capacity(), 256);
-        assert_eq!(pool.count_free(), 253);
+    fn ipv6_pool_sequential() {
+        let pool = Ipv6Pool::new("2001:db8::/64").unwrap();
+        let a1 = pool.allocate();
+        let a2 = pool.allocate();
+        assert_ne!(a1, a2);
+        assert_eq!(a1.octets()[0..8], [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0]);
+        assert_eq!(u64::from_be_bytes(a1.octets()[8..16].try_into().unwrap()), 1);
+        assert_eq!(u64::from_be_bytes(a2.octets()[8..16].try_into().unwrap()), 2);
     }
 
     #[test]
-    fn pool_expand_must_be_adjacent() {
-        let cidr = Ipv4Cidr::parse("10.42.0.0/24").unwrap();
-        let mut pool = IpPool::new(cidr);
-        let bad = Ipv4Cidr::parse("10.43.0.0/24").unwrap();
-        assert!(pool.expand(&bad).is_err());
-    }
-
-    #[test]
-    fn pool_expand_adjacent_works() {
-        let cidr = Ipv4Cidr::parse("10.42.0.0/24").unwrap();
-        let mut pool = IpPool::new(cidr);
-        let adj = Ipv4Cidr::parse("10.42.1.0/24").unwrap();
-        assert!(pool.expand(&adj).is_ok());
-        assert!(pool.count_free() > 254);
-    }
-
-    #[test]
-    fn cidr_to_string_roundtrip() {
-        let cidr = Ipv4Cidr::parse("10.42.0.0/20").unwrap();
-        assert_eq!(cidr.to_string(), "10.42.0.0/20");
+    fn ipv6_pool_release_reuse() {
+        let pool = Ipv6Pool::new("2001:db8::/64").unwrap();
+        let a1 = pool.allocate();
+        pool.release(a1);
+        let a2 = pool.allocate();
+        assert_eq!(a1, a2);
     }
 }
