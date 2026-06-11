@@ -98,7 +98,62 @@
 
 ## Not Started
 
-### T4: network — Veth, nftables, DNS, IPAM
+### T4: network — Veth, nftables, DNS, IPAM ✅
+
+**12 modules**, clean split between pure `planner` and side-effecting `sync`:
+
+**network/src/ipam.rs** — IpPool (BTreeSet free-list), Ipv4Cidr parse/normalize,
+subnet allocation, gateway/broadcast reservation, expand-to-adjacent
+
+**network/src/ipv6.rs** — Ipv6Pool from /64 prefix, IID allocation with release/reuse
+
+**network/src/netlink.rs** — Raw RTNETLINK (no `libc` dep, `core::ffi::c_void` alias):
+socket, veth create, link up/down, addr add/del, route add/del, setns helpers
+
+**network/src/veth.rs** — veth pair management: `veth-<uid8>` / `zeth-<uid8>` naming,
+host route, gateway IP, default route, netns guard, orphan cleanup
+
+**network/src/nft.rs** — NftEngine (rustables 0.8.7): SNAT, ClusterIP DNAT,
+NodePort DNAT, NSG allow/deny, set membership, catch-all chain
+
+**network/src/dns.rs** — UDP DNS server with DnsSnapshot (in-memory cache),
+service name parser, A/CNAME answers, upstream forwarding
+
+**network/src/ingress.rs** — L7 HTTP listener (Host: header → Service backend),
+IngressState with host→(svc,port) routing
+
+**network/src/np_controller.rs** — NetworkPolicy controller: nftables sets with
+pod-selector membership, `update_pod` / `remove_pod` for live sync
+
+**network/src/planner.rs** — Pure desired-state planner from StoreSnapshot:
+ClusterIP/NodePort DNAT, DNS records, NSG rules, remote pod routes
+
+**network/src/sync.rs** — Reconciler entry: `reconcile_network(snap, nft, dns,
+ingress, npc, node_name, gateway, store)` applies planner output
+
+**network/src/state.rs** — RuleKey (stable identity for idempotent ops), TableId,
+chain naming
+
+**network/src/rule.rs** — Declarative NftAction (Accept/Drop/DNAT/SNAT/Masq/Jump)
+and NftRule with builder
+
+**network/src/lib.rs** — `NetMux` facade, `NetworkEngine` trait, `PodResolver` trait,
+`attach_pod` / `detach_pod` / `configure_pod_netns` / `init_nft`
+
+**Build:** `cargo check -p network` clean. **Tests:** 77/77 unit tests pass
+(16 ipam + 4 ipv6 + 3 netlink + 4 veth + 4 nft + 12 dns + 5 ingress +
+6 np_controller + 7 planner + 2 sync + 4 lib + 4 state + 2 rule).
+
+**Key design decisions:**
+- No `nix` / `libc` deps — direct rustix + raw syscall extern where needed
+- veth created with `IFLA_NET_NS_PID` so peer lands in pod netns directly
+- `NetNsGuard` ensures host netns is restored on scope exit
+- DNS cache (DnsSnapshot) avoids store reads per query (PERFORMANCE-PLAN §13)
+- Declarative `NftRule` data type — composable, serializable, diffable
+- Planner is pure (no IO) — trivially testable, deterministic
+- `unsafe extern "C"` for send/recv (Rust 2024 requirement)
+- 4-bucket `#[cfg(test)] mod tests` pattern in every file
+
 ### T5: sync — Gossip, anti-entropy, vector clocks
 ### T6: controller — Reconcile loop (assign + reconcile)
 ### T7: api — HTTP handlers, auth, catalog
