@@ -216,7 +216,7 @@ pub fn write_setgroups(pid: i32, value: &str) -> Result<(), Errno> {
 /// Wait for a child process. Returns (pid, exit_code).
 pub fn waitpid(pid: i32) -> Option<(u32, i32)> {
     let target = if pid == -1 { None } else { rustix::process::Pid::from_raw(pid) };
-    let opts = rustix::process::WaitOptions::UNTRACED;
+    let opts = rustix::process::WaitOptions::empty();
     match rustix::process::waitpid(target, opts) {
         Ok(Some((p, status))) => {
             let code = status.exit_status().unwrap_or(-1);

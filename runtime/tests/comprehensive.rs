@@ -367,7 +367,7 @@ async fn test_tcp_probe_listening() {
 #[tokio::test]
 async fn test_exec_probe_dispatch() {
     let probe = ProbeConfig {
-        action: ProbeAction::Exec(ExecProbe { command: Some(vec!["/bin/true".into()]) }),
+        action: ProbeAction::Exec(ExecProbe { command: Some(vec!["true".into()]) }),
         initial_delay_seconds: 0,
         period_seconds: 1,
         timeout_seconds: 5,
@@ -642,12 +642,10 @@ fn test_fork_and_waitpid() {
         z8s_core::sys::ForkResult::Parent(child_pid) => {
             let start = std::time::Instant::now();
             while start.elapsed() < std::time::Duration::from_secs(5) {
-                if let Some((pid, exit_code)) = z8s_core::sys::waitpid(-1) {
-                    if pid == child_pid {
-                        assert_eq!(exit_code, 42);
-                        child_done = true;
-                        break;
-                    }
+                if let Some((_pid, exit_code)) = z8s_core::sys::waitpid(child_pid as i32) {
+                    assert_eq!(exit_code, 42);
+                    child_done = true;
+                    break;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }

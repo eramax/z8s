@@ -31,8 +31,6 @@ use oci_distribution::secrets::RegistryAuth;
 use oci_distribution::Reference;
 use tracing::{debug, info};
 
-use super::rootfs;
-
 const ACCEPTED_LAYER_TYPES: &[&str] = &[
     "application/vnd.docker.image.rootfs.diff.tar.gzip",
     "application/vnd.docker.image.rootfs.diff.tar",
