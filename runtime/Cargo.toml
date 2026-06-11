@@ -2,5 +2,19 @@
 name = "runtime"
 version = "0.1.0"
 edition = "2024"
+description = "Container lifecycle: image pull, spawn, rootfs, exec, health probes, cgroups"
 
 [dependencies]
+z8s_core = { path = "../core" }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "process", "fs"] }
+anyhow = "1.0.102"
+rustix = { version = "1.1.4", features = ["process", "fs", "mount", "thread", "pipe", "net", "system"] }
+async-trait = "0.1.89"
+tracing = "0.1.44"
+flate2 = "1.1"
+tar = "0.4"
+oci-distribution = "0.11"
+caps = "0.5"
+landlock = "0.4"

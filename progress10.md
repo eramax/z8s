@@ -30,12 +30,19 @@
 - `snapshot.rs` — StoreSnapshot (point-in-time view)
 
 **core/syscall.rs** — Direct Linux syscalls via rustix 1.1.4
-- mount, umount2, chroot, chdir
-- unshare, sethostname (rustix::system), setns
-- fork (inline asm, x86_64 + aarch64)
-- kill, pipe2, dup2, read, write, open, set_cloexec
+- mount, umount2, chroot, chdir, pivot_root — filesystem operations
+- unshare, sethostname, setns — namespace operations
+- fork — inline asm (x86_64 + aarch64)
+- execve — via rustix::runtime
+- kill, pipe2 — process/signal/pipe management
+- dup2_stdout/stderr/stdin — raw syscall 33 (rustix dup2 needs &mut OwnedFd)
+- ioctl — raw syscall 16 (rustix only exposes specific ioctls)
+- setuid, setgid — raw syscalls 105/106 (not in rustix 1.1.4)
+- mknod — raw syscall 133 (not in rustix 1.1.4)
 - flock_exclusive, flock_unlock
 - write_uid_map, write_gid_map, write_setgroups
+
+**Package rename:** `core` → `z8s_core` (prevents shadowing Rust's `core` crate which breaks `async_trait`)
 
 **Warnings fixed:**
 - helpers.rs: removed unnecessary `mut`
@@ -44,13 +51,41 @@
 
 ## In Progress
 
-### T3: runtime — Container Lifecycle
-- Container spawn (fork, namespaces, pipes)
-- Image pull (OCI registry)
-- Rootfs (chroot, pivot_root, overlayfs)
-- Exec (kubectl exec PTY + pipe)
-- Health probes (exec, httpGet, tcpSocket)
-- Cgroups v2
+### T3: runtime — Container Lifecycle ✅ (compiles clean)
+
+**runtime/src/lib.rs** — RuntimeProvider trait (async, object-safe)
+
+**runtime/src/spec.rs** — ContainerSpec, ContainerConfig, ResolvedVolume, ContainerConfigBuilder (fluent builder)
+
+**runtime/src/health.rs** — HealthChecker, ProbeConfig, ProbeAction (Exec/HTTPGet/TCPSocket), HealthStatus
+
+**runtime/src/cgroup.rs** — CgroupManager (cgroups v2: memory.max, memory.low, cpu.max, pids.max, cgroup.procs), apply_limits()
+
+**runtime/src/rootfs.rs** — Filesystem isolation (Pivot/Chroot/Degraded):
+- prepare_rootfs, setup_container_rootfs, child_enter_ns_fork
+- drop_capabilities (OCI default set), apply_landlock (LSM)
+- resolve_exec_path, build_container_argv, wrap_dynamic_linker
+- bind_mount_volumes, bind_mount_volumes_degraded
+- mount propagation via MountPropagationFlags (DOWNSTREAM/PRIVATE)
+
+**runtime/src/image.rs** — ImageManager (OCI pull via oci-distribution 0.11, layer cache, overlay/copy rootfs, whiteout handling, OCI config save/read/guess)
+
+**runtime/src/exec.rs** — Container exec (build_command with namespace entry, set_winsize via ioctl, PTY support)
+
+**runtime/src/supervisor.rs** — ContainerSupervisor (orchestrates spawn lifecycle):
+- spawn_isolated (double-fork root / single-fork userns)
+- write_userns_maps (newuidmap/subid/direct fallback)
+- RunningContainer tracking, log collection, probe management
+- Pure functions: merge_env, is_pid_alive, spawn_container_probes
+
+**Key design decisions:**
+- Renamed `core` → `z8s_core` to avoid Rust `core` shadowing
+- All syscalls use rustix 1.1.4 except: fork, ioctl, setuid, setgid, mknod, dup2 (raw asm for missing APIs)
+- Mount propagation uses `MountPropagationFlags` + `mount_change()` (not `MountFlags`)
+- `execve` via `rustix::runtime::execve` (returns Errno, not Result)
+- Signal names: `Signal::KILL`/`Signal::TERM` (not SIGKILL/SIGTERM)
+- `LinkNameSpaceType::User`/`Mount`/`Network`/`ProcessID` (PascalCase)
+- No `libc` crate — zero external C dependencies
 
 ## Not Started
 
