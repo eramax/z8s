@@ -29,7 +29,7 @@ use oci_distribution::client::{Client, ClientConfig, ImageLayer};
 use oci_distribution::config::ConfigFile;
 use oci_distribution::secrets::RegistryAuth;
 use oci_distribution::Reference;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use super::rootfs;
 
@@ -277,30 +277,24 @@ fn reorder_layers(
     ordered
 }
 
-/// Prepare container rootfs from shared cache (overlay or copy).
+/// Prepare container rootfs from shared cache using overlayfs.
+/// Each container gets an upper/work dir — writes go there, reads come from the shared cache.
+/// No copy — overlayfs is CoW by design.
 fn prepare_rootfs_from_cache(
     cache_path: &str,
     container_rootfs: &str,
     meta_path: &str,
     image_ref: &str,
 ) -> Result<String> {
-    // Try overlay first (root mode)
-    if rootfs::is_root() {
-        match try_overlay_mount(cache_path, container_rootfs) {
-            Ok(merged) => {
-                copy_oci_config(cache_path, &merged);
-                backfill_oci_config(cache_path, &merged);
-                std::fs::write(meta_path, image_ref)?;
-                return Ok(merged);
-            }
-            Err(e) => warn!("OverlayFS mount failed, falling back to copy: {}", e),
-        }
-    }
-    // Fallback: full copy
-    copy_cache_to_container(cache_path, container_rootfs, meta_path, image_ref)
+    let merged = try_overlay_mount(cache_path, container_rootfs)?;
+    copy_oci_config(cache_path, &merged);
+    backfill_oci_config(cache_path, &merged);
+    std::fs::write(meta_path, image_ref)?;
+    Ok(merged)
 }
 
-/// Attempt overlayfs mount: lower=cache, upper=per-container, work=overlayfs.
+/// Mount overlayfs: lower=shared cache, upper=per-container writes, work=kernel scratch.
+/// The merged view is what the container sees — CoW, no full copy.
 fn try_overlay_mount(cache_path: &str, container_rootfs: &str) -> Result<String> {
     let base = container_rootfs;
     let upper = format!("{}/upper", base);
@@ -319,27 +313,10 @@ fn try_overlay_mount(cache_path: &str, container_rootfs: &str) -> Result<String>
         rustix::mount::MountFlags::empty(),
         Some(&opts),
     )
-    .context("overlay mount failed")?;
+    .context("overlay mount failed — need root or unprivileged overlay support")?;
 
-    info!("OverlayFS mounted: {} + {} → {}", cache_path, upper, merged);
+    info!("OverlayFS: {} + {} → {}", cache_path, upper, merged);
     Ok(merged)
-}
-
-/// Copy shared cache to container rootfs.
-fn copy_cache_to_container(
-    cache_path: &str,
-    container_rootfs: &str,
-    meta_path: &str,
-    image_ref: &str,
-) -> Result<String> {
-    if Path::new(container_rootfs).exists() {
-        let _ = std::fs::remove_dir_all(container_rootfs);
-    }
-    copy_dir(Path::new(cache_path), Path::new(container_rootfs))?;
-    copy_oci_config(cache_path, container_rootfs);
-    backfill_oci_config(cache_path, container_rootfs);
-    std::fs::write(meta_path, image_ref)?;
-    Ok(container_rootfs.to_string())
 }
 
 fn copy_oci_config(src_dir: &str, dst_dir: &str) {
@@ -362,41 +339,6 @@ fn backfill_oci_config(cache_path: &str, container_rootfs: &str) {
         save_image_config(cache_path, guessed.entrypoint, guessed.cmd, guessed.env, None);
         copy_oci_config(cache_path, container_rootfs);
     }
-}
-
-/// Recursive directory copy preserving permissions and symlinks.
-fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
-    if dst.exists() && !dst.is_dir() {
-        return Ok(());
-    }
-    std::fs::create_dir_all(dst)?;
-    if let Ok(m) = std::fs::symlink_metadata(src) {
-        std::fs::set_permissions(dst, m.permissions()).ok();
-    }
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let src_child = entry.path();
-        let dst_child = dst.join(entry.file_name());
-        let meta = std::fs::symlink_metadata(&src_child)?;
-        let ft = meta.file_type();
-        if ft.is_symlink() {
-            let target = std::fs::read_link(&src_child)?;
-            if dst_child.exists() {
-                if dst_child.is_dir() {
-                    std::fs::remove_dir_all(&dst_child).ok();
-                } else {
-                    std::fs::remove_file(&dst_child).ok();
-                }
-            }
-            std::os::unix::fs::symlink(&target, &dst_child)?;
-        } else if ft.is_dir() {
-            copy_dir(&src_child, &dst_child)?;
-        } else if ft.is_file() {
-            let _ = std::fs::copy(&src_child, &dst_child);
-            std::fs::set_permissions(&dst_child, meta.permissions()).ok();
-        }
-    }
-    Ok(())
 }
 
 /// Unpack a single OCI image layer (tar.gz or tar).
