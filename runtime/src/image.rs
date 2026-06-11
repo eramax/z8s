@@ -87,20 +87,25 @@ impl ImageManager {
     }
 
     /// Pull and unpack an OCI image, returning the container rootfs path.
+    /// With overlay, the usable files are in `container_rootfs/merged/`.
     pub async fn unpack_image(&self, image_ref: &str, container_id: &str) -> Result<String> {
         let container_rootfs = format!("{}/{}", self.rootfs_dir, container_id);
         anyhow::ensure!(!container_rootfs.ends_with("/"), "Refusing to unpack to root");
 
         // Check if this container already has the rootfs cached
         let meta_path = format!("{}/.z8s-image-ref", container_rootfs);
-        if Path::new(&container_rootfs).exists()
+        let merged = format!("{}/merged", container_rootfs);
+
+        // If overlay merged dir exists and is actually mounted, reuse it
+        if Path::new(&merged).exists()
+            && is_overlay_mounted(&merged)
             && Path::new(&meta_path).exists()
             && std::fs::read_to_string(&meta_path)
                 .ok()
                 .is_some_and(|c| c.trim() == image_ref)
         {
-            info!("Reusing cached rootfs for {} at {}", image_ref, container_rootfs);
-            return Ok(container_rootfs);
+            info!("Reusing overlay rootfs for {} at {}", image_ref, merged);
+            return Ok(merged);
         }
 
         // Check shared image cache
@@ -182,14 +187,20 @@ impl ImageManager {
 
 // ── Pure Functions ─────────────────────────────────────────────────────────
 
-/// Base directory for z8s data.
-fn base_dir() -> String {
-    if rootfs::is_root() {
-        "/var/lib/z8s".to_string()
+/// Check if a directory is an overlay mount point.
+fn is_overlay_mounted(path: &str) -> bool {
+    if let Ok(mounts) = std::fs::read_to_string("/proc/mounts") {
+        mounts.lines().any(|line| {
+            line.contains("overlay") && line.contains(path)
+        })
     } else {
-        format!("{}/.local/share/z8s",
-            std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string()))
+        false
     }
+}
+
+/// Base directory for z8s data. Always use /home/abb path for consistency.
+fn base_dir() -> String {
+    "/home/abb/.local/share/z8s".to_string()
 }
 
 /// Save OCI image config to disk.

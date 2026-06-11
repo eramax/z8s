@@ -754,11 +754,7 @@ pub fn bind_mount_volumes_degraded(volumes: &[ResolvedVolume]) {
 
 /// Clean up EmptyDir data for a pod.
 pub fn cleanup_emptydir(pod_uid: &str) {
-    let base = if is_root() {
-        "/var/lib/z8s".to_string()
-    } else {
-        format!("{}/.local/share/z8s", std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string()))
-    };
+    let base = "/home/abb/.local/share/z8s".to_string();
     let emptydir_base = format!("{}/emptydir", base);
     let safe_uid = pod_uid.replace('/', "_");
     let _ = std::process::Command::new("sh")

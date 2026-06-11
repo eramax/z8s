@@ -16,7 +16,8 @@ fn test_base_dir() -> PathBuf {
 }
 
 fn cleanup() {
-    let _ = std::fs::remove_dir_all(test_base_dir());
+    // Don't cleanup shared base dir - other tests may be using it
+    // Each test cleans up its own subdirectory
 }
 
 // ── Image Pull + Unpack Tests ────────────────────────────────────────────
