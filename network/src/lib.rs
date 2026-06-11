@@ -33,23 +33,29 @@
 // Modules
 // ═══════════════════════════════════════════════════════════════════════════
 
+pub mod dns;
 pub mod engine;
 pub mod ipam;
 pub mod model;
+pub mod plan;
+pub mod rtnetlink;
 pub mod syscalls;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Re-exports — the public API
 // ═══════════════════════════════════════════════════════════════════════════
 
+pub use dns::{DnsConfig, DnsServer, DnsZone};
 pub use engine::{reconcile, Netmux, NetmuxBuilder};
 pub use ipam::{IpPool, Ipv4Cidr, Ipv6Pool};
 pub use model::{
-    NftChain, NftChainKind, NftCounter, NftExpr, NftFamily, NftHook, NftPolicy, NftRule, NftSet,
-    NftTable, NetlinkOp, NetmuxState, NsgAction, NsgRule, PodNetwork, ServicePortSpec,
-    ServiceSpec, VethPair, VNetSpec,
+    NetlinkOp, NetmuxState, NftChain, NftChainKind, NftCounter, NftExpr, NftFamily, NftHook,
+    NftPolicy, NftRule, NftSet, NftTable, NsgAction, NsgRule, PodNetwork, RouteSpec,
+    ServicePortSpec, ServiceSpec, VNetSpec, VethPair,
 };
-pub use syscalls::{encode_op, nfgen_header, NlaBuf, NlSocket};
+pub use plan::{plan, PlanConfig};
+pub use rtnetlink::{host_veth_name, peer_veth_name, RouteSocket};
+pub use syscalls::{encode_op, nfgen_header, NlSocket, NlaBuf};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // NetworkEngine trait — controllers/services depend on this
@@ -103,19 +109,15 @@ impl NetworkEngine for Arc<tokio::sync::Mutex<Netmux>> {
 impl Netmux {
     /// Add a pod to the current state (called when a pod is scheduled).
     pub fn add_pod_to_state(&mut self, pod: PodNetwork) {
-        let idx = pod.veth_host.parse::<u32>().unwrap_or(0);
         let mut cur = self.current().clone();
-        cur.pods.insert(pod.pod_uid.clone(), pod.clone());
-        cur.host_routes.insert(pod.pod_ip, idx);
+        cur.pods.insert(pod.pod_uid.clone(), pod);
         self.seed_current(cur);
     }
 
     /// Remove a pod and its associated state (called when a pod terminates).
     pub fn remove_pod_from_state(&mut self, pod_uid: &str) {
         let mut cur = self.current().clone();
-        if let Some(pod) = cur.pods.remove(pod_uid) {
-            cur.host_routes.remove(&pod.pod_ip);
-        }
+        cur.pods.remove(pod_uid);
         self.seed_current(cur);
     }
 }

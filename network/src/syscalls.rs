@@ -28,7 +28,6 @@
 //!
 //! Nested attributes (NLA_F_NESTED) carry a child stream of attrs.
 
-use std::net::Ipv4Addr;
 use std::os::fd::{AsRawFd, BorrowedFd};
 
 use neli::consts::socket::NlFamily;
@@ -52,8 +51,6 @@ const NFT_MSG_NEWRULE: u16 = 4;
 const NFT_MSG_DELRULE: u16 = 5;
 const NFT_MSG_NEWSET: u16 = 6;
 const NFT_MSG_DELSET: u16 = 7;
-const NFT_MSG_NEWSETELEM: u16 = 9;
-const NFT_MSG_DELSETELEM: u16 = 10;
 const NFT_MSG_NEWOBJ: u16 = 12;
 const NFT_MSG_DELOBJ: u16 = 13;
 
@@ -76,7 +73,6 @@ const NFTA_SET_KEY_LEN: u16 = 4;
 const NFTA_SET_DATA_LEN: u16 = 6;
 const NFTA_SET_ELEMENTS: u16 = 9;
 const NFTA_SET_ELEM_KEY: u16 = 1;
-const NFTA_SET_ELEM_DATA: u16 = 2;
 const NFTA_OBJ_NAME: u16 = 1;
 const NFTA_OBJ_TABLE: u16 = 2;
 const NFTA_OBJ_TYPE: u16 = 3;
@@ -87,48 +83,62 @@ const NFTA_COUNTER_PACKETS: u16 = 2;
 // NLA flags
 const NLA_F_NESTED: u16 = 0x8000;
 
-// Expression types
-const NFT_EXPR_META: u16 = 1;
-const NFT_EXPR_CMP: u16 = 6;
-const NFT_EXPR_PAYLOAD: u16 = 9;
-const NFT_EXPR_NAT: u16 = 14;
-const NFT_EXPR_IMMEDIATE: u16 = 17;
-const NFT_EXPR_LOOKUP: u16 = 18;
-const NFT_EXPR_MASQ: u16 = 19;
-const NFT_EXPR_ACCEPT: u16 = 28;
-const NFT_EXPR_DROP: u16 = 29;
+// Generic list-element / expression wrappers.
+// A rule's NFTA_RULE_EXPRESSIONS holds a series of NFTA_LIST_ELEM, each
+// carrying NFTA_EXPR_NAME ("cmp", "payload", …) + NFTA_EXPR_DATA (nested).
+const NFTA_LIST_ELEM: u16 = 1;
+const NFTA_EXPR_NAME: u16 = 1;
+const NFTA_EXPR_DATA: u16 = 2;
 
-// Expression attrs
-const NFT_META_KEY: u16 = 1;
-const NFT_META_DREG: u16 = 2;
-const NFT_CMP_SREG: u16 = 1;
-const NFT_CMP_OP: u16 = 2;
-const NFT_CMP_DATA: u16 = 3;
-const NFT_PAYLOAD_DREG: u16 = 1;
-const NFT_PAYLOAD_BASE: u16 = 2;
-const NFT_PAYLOAD_OFFSET: u16 = 3;
-const NFT_PAYLOAD_LEN: u16 = 4;
-const NFT_IMMEDIATE_DREG: u16 = 1;
-const NFT_IMMEDIATE_DATA: u16 = 2;
-const NFT_LOOKUP_SET: u16 = 1;
-const NFT_LOOKUP_SREG: u16 = 2;
-const NFT_NAT_TYPE: u16 = 1;
-const NFT_NAT_FAMILY: u16 = 2;
-const NFT_NAT_REG_ADDR_MIN: u16 = 3;
-const NFT_NAT_REG_ADDR_MAX: u16 = 4;
-const NFT_NAT_REG_PROTO_MIN: u16 = 5;
-const NFT_NAT_REG_PROTO_MAX: u16 = 6;
+// Typed register data: NFTA_DATA_VALUE for raw bytes, NFTA_DATA_VERDICT for
+// a verdict (accept/drop/jump/…).
+const NFTA_DATA_VALUE: u16 = 1;
+const NFTA_DATA_VERDICT: u16 = 2;
+const NFTA_VERDICT_CODE: u16 = 1;
+const NFTA_VERDICT_CHAIN: u16 = 2;
 
-// Meta keys
-const NFT_META_PROTOCOL: u8 = 4;
+// Verdict codes (stored big-endian). Negative nf-tables verdicts wrap around.
+const NF_DROP: u32 = 0;
+const NF_ACCEPT: u32 = 1;
+const NFT_JUMP: u32 = 0xFFFF_FFFD; // -3
+const NFT_GOTO: u32 = 0xFFFF_FFFE; // -2
+const NFT_RETURN: u32 = 0xFFFF_FFFB; // -5
 
-// Nat types
-const NFT_NAT_SNAT: u32 = 0;
-const NFT_NAT_DNAT: u32 = 1;
+// Expression attrs.
+const NFTA_META_DREG: u16 = 2;
+const NFTA_META_KEY: u16 = 1;
+const NFTA_CMP_SREG: u16 = 1;
+const NFTA_CMP_OP: u16 = 2;
+const NFTA_CMP_DATA: u16 = 3;
+const NFTA_PAYLOAD_DREG: u16 = 1;
+const NFTA_PAYLOAD_BASE: u16 = 2;
+const NFTA_PAYLOAD_OFFSET: u16 = 3;
+const NFTA_PAYLOAD_LEN: u16 = 4;
+const NFTA_IMMEDIATE_DREG: u16 = 1;
+const NFTA_IMMEDIATE_DATA: u16 = 2;
+const NFTA_LOOKUP_SET: u16 = 1;
+const NFTA_LOOKUP_SREG: u16 = 2;
+const NFTA_NAT_TYPE: u16 = 1;
+const NFTA_NAT_FAMILY: u16 = 2;
+const NFTA_NAT_REG_ADDR_MIN: u16 = 3;
+const NFTA_NAT_REG_ADDR_MAX: u16 = 4;
+const NFTA_NAT_REG_PROTO_MIN: u16 = 5;
+const NFTA_NAT_REG_PROTO_MAX: u16 = 6;
+const NFTA_BITWISE_SREG: u16 = 1;
+const NFTA_BITWISE_DREG: u16 = 2;
+const NFTA_BITWISE_LEN: u16 = 3;
+const NFTA_BITWISE_MASK: u16 = 4;
+const NFTA_BITWISE_XOR: u16 = 5;
+const NFTA_NG_DREG: u16 = 1;
+const NFTA_NG_MODULUS: u16 = 2;
+const NFTA_NG_TYPE: u16 = 3;
+const NFTA_NG_OFFSET: u16 = 4;
+
+// Numgen type: pseudo-random.
+const NFT_NG_RANDOM: u32 = 1;
 
 const NFT_OBJECT_COUNTER: u32 = 1;
 const NFT_REG_VERDICT: u32 = 0x00;
-const NF_RETURN: u32 = 0x00000005;
 
 // Netlink message flags (for nlmsghdr.nlmsg_flags).
 // NLM_F_REQUEST is required for all netlink requests.
@@ -162,6 +172,8 @@ pub fn nlmsg_flags_for(op: &NetlinkOp) -> u16 {
         | NetlinkOp::DelSet { .. }
         | NetlinkOp::SetFlush { .. }
         | NetlinkOp::DelCounter { .. } => base,
+        // Route ops are RTNETLINK, not nftables; they never reach this path.
+        NetlinkOp::AddRoute { .. } | NetlinkOp::DelRoute { .. } => base,
     }
 }
 
@@ -285,95 +297,124 @@ pub fn nfgen_header(family: NftFamily) -> [u8; 4] {
 // Expression encoders
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Encode a single rule expression into a NLA nested attribute.
+/// Emit one expression as an `NFTA_LIST_ELEM { NFTA_EXPR_NAME, NFTA_EXPR_DATA }`.
+fn put_expr<F>(out: &mut NlaBuf, name: &str, f: F)
+where
+    F: FnOnce(&mut NlaBuf),
+{
+    out.put_nested(NFTA_LIST_ELEM, |elem| {
+        elem.put_str(NFTA_EXPR_NAME, name);
+        elem.put_nested(NFTA_EXPR_DATA, f);
+    });
+}
+
+/// Emit a register data attribute wrapping raw bytes (`NFTA_DATA_VALUE`).
+fn put_data_value(out: &mut NlaBuf, kind: u16, bytes: &[u8]) {
+    out.put_nested(kind, |d| d.put_slice(NFTA_DATA_VALUE, bytes));
+}
+
+/// Emit a verdict data attribute (`NFTA_DATA_VERDICT`), optionally with a
+/// target chain (for jump/goto).
+fn put_verdict(out: &mut NlaBuf, kind: u16, code: u32, chain: Option<&str>) {
+    out.put_nested(kind, |d| {
+        d.put_nested(NFTA_DATA_VERDICT, |v| {
+            v.put_slice(NFTA_VERDICT_CODE, &code.to_be_bytes());
+            if let Some(c) = chain {
+                v.put_str(NFTA_VERDICT_CHAIN, c);
+            }
+        });
+    });
+}
+
+/// Encode a single rule expression into the rule's expression list.
 pub fn encode_expr(expr: &NftExpr, out: &mut NlaBuf) {
     match expr {
-        NftExpr::Meta { kind, .. } => {
-            out.put_nested(NFT_EXPR_META, |inner| {
-                inner.put_u32(NFT_META_KEY, *kind);
-                inner.put_slice(NFT_META_DREG, &1u32.to_be_bytes());
-            });
-        }
-        NftExpr::Cmp { sreg, op, data } => {
-            out.put_nested(NFT_EXPR_CMP, |inner| {
-                inner.put_u32(NFT_CMP_SREG, *sreg);
-                inner.put_u32(NFT_CMP_OP, *op);
-                inner.put_slice(NFT_CMP_DATA, data);
-            });
-        }
+        NftExpr::Meta { kind, .. } => put_expr(out, "meta", |d| {
+            d.put_u32(NFTA_META_KEY, *kind);
+            d.put_u32(NFTA_META_DREG, 1);
+        }),
+        NftExpr::Cmp { sreg, op, data } => put_expr(out, "cmp", |d| {
+            d.put_u32(NFTA_CMP_SREG, *sreg);
+            d.put_u32(NFTA_CMP_OP, *op);
+            put_data_value(d, NFTA_CMP_DATA, data);
+        }),
         NftExpr::Payload {
             dreg,
             base,
             offset,
             len,
-        } => {
-            out.put_nested(NFT_EXPR_PAYLOAD, |inner| {
-                inner.put_u32(NFT_PAYLOAD_DREG, *dreg);
-                inner.put_u32(NFT_PAYLOAD_BASE, *base);
-                inner.put_u32(NFT_PAYLOAD_OFFSET, *offset);
-                inner.put_u32(NFT_PAYLOAD_LEN, *len);
-            });
-        }
-        NftExpr::Lookup { set, sreg } => {
-            out.put_nested(NFT_EXPR_LOOKUP, |inner| {
-                inner.put_str(NFT_LOOKUP_SET, set);
-                inner.put_u32(NFT_LOOKUP_SREG, *sreg);
-            });
-        }
-        NftExpr::Immediate { dreg, data } => {
-            out.put_nested(NFT_EXPR_IMMEDIATE, |inner| {
-                inner.put_u32(NFT_IMMEDIATE_DREG, *dreg);
-                inner.put_slice(NFT_IMMEDIATE_DATA, data);
-            });
-        }
+        } => put_expr(out, "payload", |d| {
+            d.put_u32(NFTA_PAYLOAD_DREG, *dreg);
+            d.put_u32(NFTA_PAYLOAD_BASE, *base);
+            d.put_u32(NFTA_PAYLOAD_OFFSET, *offset);
+            d.put_u32(NFTA_PAYLOAD_LEN, *len);
+        }),
+        NftExpr::Lookup { set, sreg } => put_expr(out, "lookup", |d| {
+            d.put_str(NFTA_LOOKUP_SET, set);
+            d.put_u32(NFTA_LOOKUP_SREG, *sreg);
+        }),
+        NftExpr::Immediate { dreg, data } => put_expr(out, "immediate", |d| {
+            d.put_u32(NFTA_IMMEDIATE_DREG, *dreg);
+            put_data_value(d, NFTA_IMMEDIATE_DATA, data);
+        }),
         NftExpr::Nat {
             nat_type,
             sreg_addr,
             sreg_port,
-        } => {
-            out.put_nested(NFT_EXPR_NAT, |inner| {
-                inner.put_u32(NFT_NAT_TYPE, *nat_type);
-                inner.put_u32(NFT_NAT_FAMILY, NftFamily::Ip.as_u8() as u32);
-                inner.put_u32(NFT_NAT_REG_ADDR_MIN, *sreg_addr);
-                inner.put_u32(NFT_NAT_REG_ADDR_MAX, *sreg_addr);
-                inner.put_u32(NFT_NAT_REG_PROTO_MIN, *sreg_port);
-                inner.put_u32(NFT_NAT_REG_PROTO_MAX, *sreg_port);
-            });
-        }
-        NftExpr::Masquerade => {
-            out.put_nested(NFT_EXPR_MASQ, |inner| {
-                inner.put_u32(NFT_NAT_TYPE, NFT_NAT_SNAT);
-                inner.put_u32(NFT_NAT_FAMILY, NftFamily::Ip.as_u8() as u32);
-                inner.put_u32(NFT_NAT_REG_ADDR_MIN, 0);
-                inner.put_u32(NFT_NAT_REG_ADDR_MAX, 0);
-                inner.put_u32(NFT_NAT_REG_PROTO_MIN, 0);
-                inner.put_u32(NFT_NAT_REG_PROTO_MAX, 0);
-            });
-        }
-        NftExpr::Accept => {
-            out.put_nested(NFT_EXPR_ACCEPT, |_| {});
-        }
-        NftExpr::Drop => {
-            out.put_nested(NFT_EXPR_DROP, |_| {});
-        }
-        NftExpr::Return => {
-            out.put_nested(NFT_EXPR_IMMEDIATE, |inner| {
-                inner.put_u32(NFT_IMMEDIATE_DREG, NFT_REG_VERDICT);
-                inner.put_u32(NFT_IMMEDIATE_DATA, NF_RETURN);
-            });
-        }
-        NftExpr::Jump(chain) => {
-            out.put_nested(NFT_EXPR_IMMEDIATE, |inner| {
-                inner.put_u32(NFT_IMMEDIATE_DREG, NFT_REG_VERDICT);
-                inner.put_str(NFT_IMMEDIATE_DATA, chain);
-            });
-        }
-        NftExpr::Goto(chain) => {
-            out.put_nested(NFT_EXPR_IMMEDIATE, |inner| {
-                inner.put_u32(NFT_IMMEDIATE_DREG, NFT_REG_VERDICT);
-                inner.put_str(NFT_IMMEDIATE_DATA, chain);
-            });
-        }
+        } => put_expr(out, "nat", |d| {
+            d.put_u32(NFTA_NAT_TYPE, *nat_type);
+            d.put_u32(NFTA_NAT_FAMILY, NftFamily::Ip.as_u8() as u32);
+            d.put_u32(NFTA_NAT_REG_ADDR_MIN, *sreg_addr);
+            d.put_u32(NFTA_NAT_REG_ADDR_MAX, *sreg_addr);
+            if *sreg_port != 0xFFFF_FFFF {
+                d.put_u32(NFTA_NAT_REG_PROTO_MIN, *sreg_port);
+                d.put_u32(NFTA_NAT_REG_PROTO_MAX, *sreg_port);
+            }
+        }),
+        NftExpr::Masquerade => put_expr(out, "masq", |_d| {}),
+        NftExpr::Bitwise {
+            sreg,
+            dreg,
+            len,
+            mask,
+            xor,
+        } => put_expr(out, "bitwise", |d| {
+            d.put_u32(NFTA_BITWISE_SREG, *sreg);
+            d.put_u32(NFTA_BITWISE_DREG, *dreg);
+            d.put_u32(NFTA_BITWISE_LEN, *len);
+            put_data_value(d, NFTA_BITWISE_MASK, mask);
+            put_data_value(d, NFTA_BITWISE_XOR, xor);
+        }),
+        NftExpr::Numgen {
+            dreg,
+            modulus,
+            offset,
+        } => put_expr(out, "numgen", |d| {
+            d.put_u32(NFTA_NG_DREG, *dreg);
+            d.put_u32(NFTA_NG_MODULUS, *modulus);
+            d.put_u32(NFTA_NG_TYPE, NFT_NG_RANDOM);
+            d.put_u32(NFTA_NG_OFFSET, *offset);
+        }),
+        NftExpr::Accept => put_expr(out, "immediate", |d| {
+            d.put_u32(NFTA_IMMEDIATE_DREG, NFT_REG_VERDICT);
+            put_verdict(d, NFTA_IMMEDIATE_DATA, NF_ACCEPT, None);
+        }),
+        NftExpr::Drop => put_expr(out, "immediate", |d| {
+            d.put_u32(NFTA_IMMEDIATE_DREG, NFT_REG_VERDICT);
+            put_verdict(d, NFTA_IMMEDIATE_DATA, NF_DROP, None);
+        }),
+        NftExpr::Return => put_expr(out, "immediate", |d| {
+            d.put_u32(NFTA_IMMEDIATE_DREG, NFT_REG_VERDICT);
+            put_verdict(d, NFTA_IMMEDIATE_DATA, NFT_RETURN, None);
+        }),
+        NftExpr::Jump(chain) => put_expr(out, "immediate", |d| {
+            d.put_u32(NFTA_IMMEDIATE_DREG, NFT_REG_VERDICT);
+            put_verdict(d, NFTA_IMMEDIATE_DATA, NFT_JUMP, Some(chain));
+        }),
+        NftExpr::Goto(chain) => put_expr(out, "immediate", |d| {
+            d.put_u32(NFTA_IMMEDIATE_DREG, NFT_REG_VERDICT);
+            put_verdict(d, NFTA_IMMEDIATE_DATA, NFT_GOTO, Some(chain));
+        }),
     }
 }
 
@@ -447,8 +488,10 @@ pub fn encode_op(op: &NetlinkOp) -> (u16, Vec<u8>) {
             if !set.elements.is_empty() {
                 b.put_nested(NFTA_SET_ELEMENTS, |list| {
                     for el in &set.elements {
-                        list.put_nested(NFTA_SET_ELEM_KEY, |elem| {
-                            elem.put_slice(NFTA_SET_ELEM_DATA, el);
+                        list.put_nested(NFTA_LIST_ELEM, |item| {
+                            item.put_nested(NFTA_SET_ELEM_KEY, |key| {
+                                key.put_slice(NFTA_DATA_VALUE, el);
+                            });
                         });
                     }
                 });
@@ -484,6 +527,11 @@ pub fn encode_op(op: &NetlinkOp) -> (u16, Vec<u8>) {
             b.put_str(NFTA_OBJ_NAME, name);
             b.put_u32(NFTA_OBJ_TYPE, NFT_OBJECT_COUNTER);
             (NFT_MSG_DELOBJ, build_message(*family, b.finish()))
+        }
+        NetlinkOp::AddRoute { .. } | NetlinkOp::DelRoute { .. } => {
+            // Route ops belong to RTNETLINK (crate::rtnetlink), never the
+            // netfilter socket. The engine dispatches them before this point.
+            panic!("encode_op called with a route op: {op:?}")
         }
     }
 }
@@ -625,6 +673,7 @@ impl NlSocket {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::Ipv4Addr;
 
     #[test]
     fn nlabuf_put_u32_padded() {
@@ -728,7 +777,7 @@ mod tests {
     }
 
     #[test]
-    fn encode_drop_rule_uses_nested_drop_expr() {
+    fn encode_drop_rule_emits_immediate_verdict() {
         let op = NetlinkOp::AddRule {
             family: NftFamily::Ip,
             table: "filter".into(),
@@ -737,10 +786,8 @@ mod tests {
         };
         let (msg_type, body) = encode_op(&op);
         assert_eq!(msg_type, NFT_MSG_NEWRULE);
-        // After the NLA_F_NESTED fix, the type field carries
-        // (NFT_EXPR_DROP | NLA_F_NESTED) — not just the raw expr type.
-        let needle = (NFT_EXPR_DROP | NLA_F_NESTED).to_ne_bytes();
-        assert!(body.windows(2).any(|w| w == needle));
+        // A drop is an "immediate" expression writing the NF_DROP verdict.
+        assert!(body.windows(b"immediate".len()).any(|w| w == b"immediate"));
     }
 
     #[test]
@@ -763,34 +810,63 @@ mod tests {
     }
 
     #[test]
-    fn encode_meta_expr_emits_meta_key() {
+    fn encode_meta_expr_emits_name() {
         let mut b = NlaBuf::new();
         encode_expr(
             &NftExpr::Meta {
-                kind: NFT_META_PROTOCOL as u32,
+                kind: 16,
                 op: 0,
                 value: 0,
             },
             &mut b,
         );
-        let needle = NFT_META_KEY.to_ne_bytes();
-        assert!(b.as_slice().windows(2).any(|w| w == needle));
+        assert!(b.as_slice().windows(b"meta".len()).any(|w| w == b"meta"));
     }
 
     #[test]
-    fn encode_payload_expr_emits_offset_len() {
+    fn encode_payload_expr_emits_name() {
         let mut b = NlaBuf::new();
         encode_expr(
             &NftExpr::Payload {
                 dreg: 1,
-                base: 0,
-                offset: 9,
-                len: 1,
+                base: 1,
+                offset: 16,
+                len: 4,
             },
             &mut b,
         );
-        let needle = NFT_PAYLOAD_OFFSET.to_ne_bytes();
-        assert!(b.as_slice().windows(2).any(|w| w == needle));
+        assert!(b
+            .as_slice()
+            .windows(b"payload".len())
+            .any(|w| w == b"payload"));
+    }
+
+    #[test]
+    fn encode_bitwise_and_numgen() {
+        let mut b = NlaBuf::new();
+        encode_expr(
+            &NftExpr::Bitwise {
+                sreg: 1,
+                dreg: 1,
+                len: 4,
+                mask: vec![255, 255, 255, 0],
+                xor: vec![0, 0, 0, 0],
+            },
+            &mut b,
+        );
+        encode_expr(
+            &NftExpr::Numgen {
+                dreg: 9,
+                modulus: 3,
+                offset: 0,
+            },
+            &mut b,
+        );
+        assert!(b
+            .as_slice()
+            .windows(b"bitwise".len())
+            .any(|w| w == b"bitwise"));
+        assert!(b.as_slice().windows(b"numgen".len()).any(|w| w == b"numgen"));
     }
 
     #[test]

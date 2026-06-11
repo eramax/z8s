@@ -222,10 +222,10 @@ impl Ipv6Pool {
         let mut octets = addr.octets();
         let host_bits = (128 - prefix_len) as u16;
         let full_zero_bytes = (host_bits / 8) as usize;
-        for i in (16 - full_zero_bytes)..16 {
-            octets[i] = 0;
+        for b in octets.iter_mut().skip(16 - full_zero_bytes) {
+            *b = 0;
         }
-        if host_bits % 8 != 0 {
+        if !host_bits.is_multiple_of(8) {
             let partial_idx = 16 - full_zero_bytes - 1;
             let keep_bits = 8 - (host_bits % 8);
             octets[partial_idx] &= ((1u16 << keep_bits) - 1) as u8;

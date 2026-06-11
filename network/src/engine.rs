@@ -28,16 +28,14 @@
 //! sees the new desired state and the previous current, and computes the
 //! minimal op set.
 
-use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
-use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
-use crate::ipam::Ipv4Cidr;
 use crate::model::*;
-use crate::syscalls::{encode_op, NlSocket};
+use crate::rtnetlink::RouteSocket;
+use crate::syscalls::NlSocket;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Pure diff
@@ -136,15 +134,17 @@ pub fn reconcile(desired: &NetmuxState, current: &NetmuxState) -> Vec<NetlinkOp>
         }
     }
 
-    // ── Host routes ────────────────────────────────────────────────
-    for (ip, ifindex) in &desired.host_routes {
-        if current.host_routes.get(ip) != Some(ifindex) {
-            debug!(pod_ip = %ip, ifindex, "host route add/update");
+    // ── Routes ─────────────────────────────────────────────────────
+    // Reconcile-managed routes (remote pod routes, static routes). Local
+    // pod /32 routes are owned by `attach_pod` and never appear here.
+    for (key, want) in &desired.routes {
+        if current.routes.get(key) != Some(want) {
+            ops.push(NetlinkOp::AddRoute { route: want.clone() });
         }
     }
-    for ip in current.host_routes.keys() {
-        if !desired.host_routes.contains_key(ip) {
-            debug!(pod_ip = %ip, "host route remove (cleanup)");
+    for (key, cur) in &current.routes {
+        if !desired.routes.contains_key(key) {
+            ops.push(NetlinkOp::DelRoute { route: cur.clone() });
         }
     }
 
@@ -208,7 +208,7 @@ fn push_table_diff(ops: &mut Vec<NetlinkOp>, want: &NftTable, cur: &NftTable) {
             });
         }
     }
-    for (name, _) in &cur.counters {
+    for name in cur.counters.keys() {
         if !want.counters.contains_key(name) {
             ops.push(NetlinkOp::DelCounter {
                 family: want.family,
@@ -241,7 +241,7 @@ fn push_table_diff(ops: &mut Vec<NetlinkOp>, want: &NftTable, cur: &NftTable) {
             _ => {}
         }
     }
-    for (name, _) in &cur.sets {
+    for name in cur.sets.keys() {
         if !want.sets.contains_key(name) {
             ops.push(NetlinkOp::DelSet {
                 family: want.family,
@@ -390,7 +390,10 @@ fn push_chain_diff(
 /// - the controller-side `NetworkEngine` trait implementation
 pub struct Netmux {
     sock: Option<NlSocket>,
+    route: Option<RouteSocket>,
     current: NetmuxState,
+    /// Pod gateway address used for pod-side default routes / host veth IP.
+    gateway: Ipv4Addr,
 }
 
 impl Netmux {
@@ -398,17 +401,34 @@ impl Netmux {
     pub fn unconnected() -> Self {
         Self {
             sock: None,
+            route: None,
             current: NetmuxState::new(),
+            gateway: Ipv4Addr::new(10, 42, 0, 1),
         }
     }
 
-    /// Connect to the kernel netlink socket. Requires `CAP_NET_ADMIN`.
+    /// Connect to the kernel netlink sockets (netfilter + route). Requires
+    /// `CAP_NET_ADMIN`.
     pub fn connect() -> Result<Self> {
         let sock = NlSocket::open().context("opening netlink netfilter socket")?;
+        let route = RouteSocket::open().context("opening netlink route socket")?;
         Ok(Self {
             sock: Some(sock),
+            route: Some(route),
             current: NetmuxState::new(),
+            gateway: Ipv4Addr::new(10, 42, 0, 1),
         })
+    }
+
+    /// Set the pod gateway address (defaults to `10.42.0.1`).
+    pub fn with_gateway(mut self, gw: Ipv4Addr) -> Self {
+        self.gateway = gw;
+        self
+    }
+
+    /// The pod gateway address.
+    pub fn gateway(&self) -> Ipv4Addr {
+        self.gateway
     }
 
     /// Borrow the current applied state.
@@ -429,12 +449,22 @@ impl Netmux {
     pub fn apply(&mut self, ops: &[NetlinkOp], dry_run: bool) -> Result<()> {
         for op in ops {
             if !dry_run {
-                let sock = self
-                    .sock
-                    .as_ref()
-                    .ok_or_else(|| anyhow!("netlink socket not connected"))?;
-                sock.send(op)
-                    .with_context(|| format!("sending op: {:?}", op))?;
+                if op.is_route() {
+                    let route = self
+                        .route
+                        .as_ref()
+                        .ok_or_else(|| anyhow!("netlink route socket not connected"))?;
+                    route
+                        .apply(op)
+                        .with_context(|| format!("applying route op: {:?}", op))?;
+                } else {
+                    let sock = self
+                        .sock
+                        .as_ref()
+                        .ok_or_else(|| anyhow!("netlink netfilter socket not connected"))?;
+                    sock.send(op)
+                        .with_context(|| format!("sending op: {:?}", op))?;
+                }
             }
             self.apply_one_to_state(op);
         }
@@ -489,11 +519,10 @@ impl Netmux {
                 chain,
                 rule,
             } => {
-                if let Some(t) = self.current.tables.get_mut(&(*family, table.clone())) {
-                    if let Some(c) = t.chains.get_mut(chain) {
+                if let Some(t) = self.current.tables.get_mut(&(*family, table.clone()))
+                    && let Some(c) = t.chains.get_mut(chain) {
                         c.rules.push(rule.clone());
                     }
-                }
             }
             NetlinkOp::DelRule {
                 family,
@@ -501,11 +530,10 @@ impl Netmux {
                 chain,
                 handle,
             } => {
-                if let Some(t) = self.current.tables.get_mut(&(*family, table.clone())) {
-                    if let Some(c) = t.chains.get_mut(chain) {
+                if let Some(t) = self.current.tables.get_mut(&(*family, table.clone()))
+                    && let Some(c) = t.chains.get_mut(chain) {
                         c.rules.retain(|r| r.handle != Some(*handle));
                     }
-                }
             }
             NetlinkOp::AddSet { family, table, set } => {
                 if let Some(t) = self.current.tables.get_mut(&(*family, table.clone())) {
@@ -518,11 +546,10 @@ impl Netmux {
                 }
             }
             NetlinkOp::SetFlush { family, table, name } => {
-                if let Some(t) = self.current.tables.get_mut(&(*family, table.clone())) {
-                    if let Some(s) = t.sets.get_mut(name) {
+                if let Some(t) = self.current.tables.get_mut(&(*family, table.clone()))
+                    && let Some(s) = t.sets.get_mut(name) {
                         s.elements.clear();
                     }
-                }
             }
             NetlinkOp::AddCounter { family, table, counter } => {
                 if let Some(t) = self.current.tables.get_mut(&(*family, table.clone())) {
@@ -534,7 +561,76 @@ impl Netmux {
                     t.counters.remove(name);
                 }
             }
+            NetlinkOp::AddRoute { route } => {
+                self.current.routes.insert(route.key(), route.clone());
+            }
+            NetlinkOp::DelRoute { route } => {
+                self.current.routes.remove(&route.key());
+            }
         }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Pod lifecycle (imperative CRI hot path)
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// Attach a pod to the network: allocate a veth pair, give the host side
+    /// the gateway IP and a `/32` route to the pod, then move the peer into
+    /// the pod's netns and configure its address + default route.
+    ///
+    /// This is the synchronous CRI hot path. It does not run a full reconcile;
+    /// it performs only the per-pod netlink work and records the pod in the
+    /// engine's current state so later reconciles see it.
+    pub fn attach_pod(
+        &mut self,
+        pod_uid: &str,
+        pod_ip: Ipv4Addr,
+        container_pid: u32,
+    ) -> Result<VethPair> {
+        let route = self
+            .route
+            .as_ref()
+            .ok_or_else(|| anyhow!("netlink route socket not connected"))?;
+        let pair = route
+            .attach_pod(pod_uid, pod_ip, container_pid, self.gateway)
+            .with_context(|| format!("attaching pod {pod_uid}"))?;
+        self.current.pods.insert(
+            pod_uid.to_string(),
+            PodNetwork {
+                pod_uid: pod_uid.to_string(),
+                pod_ip,
+                veth_host: pair.host_name.clone(),
+                veth_peer: pair.peer_name.clone(),
+                vnet: None,
+            },
+        );
+        self.current.veths.insert(pair.host_name.clone(), pair.clone());
+        Ok(pair)
+    }
+
+    /// Detach a pod: remove the host `/32` route and delete the veth pair.
+    /// The peer interface is destroyed automatically with its host side.
+    pub fn detach_pod(&mut self, pod_uid: &str) -> Result<()> {
+        let route = self
+            .route
+            .as_ref()
+            .ok_or_else(|| anyhow!("netlink route socket not connected"))?;
+        if let Some(pod) = self.current.pods.remove(pod_uid) {
+            route
+                .detach_pod(&pod.veth_host, pod.pod_ip)
+                .with_context(|| format!("detaching pod {pod_uid}"))?;
+            self.current.veths.remove(&pod.veth_host);
+        }
+        Ok(())
+    }
+
+    /// Remove veth pairs whose pod UID is no longer active (crash recovery).
+    pub fn clean_orphan_veths(&self, active_uids: &[String]) -> Result<usize> {
+        let route = self
+            .route
+            .as_ref()
+            .ok_or_else(|| anyhow!("netlink route socket not connected"))?;
+        route.clean_orphan_veths(active_uids)
     }
 }
 
@@ -703,14 +799,17 @@ impl NetmuxBuilder {
         self
     }
 
-    /// Patch a pod's network info (IP + veth).
+    /// Patch a pod's network info (IP + veth). Local pod connectivity (veth,
+    /// `/32` route) is applied by `attach_pod`; this only records the pod in
+    /// the declarative state.
     pub fn add_pod(&mut self, pod: PodNetwork) -> &mut Self {
-        self.state
-            .pods
-            .insert(pod.pod_uid.clone(), pod.clone());
-        self.state
-            .host_routes
-            .insert(pod.pod_ip, pod.veth_host.parse().unwrap_or(0));
+        self.state.pods.insert(pod.pod_uid.clone(), pod);
+        self
+    }
+
+    /// Add a reconcile-managed route (remote pod route or static route).
+    pub fn add_route(&mut self, route: RouteSpec) -> &mut Self {
+        self.state.routes.insert(route.key(), route);
         self
     }
 
@@ -733,6 +832,7 @@ fn sanitize(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ipam::Ipv4Cidr;
 
     #[test]
     fn reconcile_no_change() {
@@ -991,7 +1091,20 @@ mod tests {
         });
         let state = b.build();
         assert!(state.pods.contains_key("uid-1"));
-        assert!(state.host_routes.contains_key(&Ipv4Addr::new(10, 42, 0, 5)));
+    }
+
+    #[test]
+    fn reconcile_adds_and_removes_route() {
+        let mut desired = NetmuxState::new();
+        let r = RouteSpec::host_via(Ipv4Addr::new(10, 42, 1, 5), Ipv4Addr::new(192, 168, 1, 2));
+        desired.routes.insert(r.key(), r.clone());
+        let ops = reconcile(&desired, &NetmuxState::new());
+        assert!(ops.iter().any(|op| matches!(op, NetlinkOp::AddRoute { .. })));
+        // And cleanup when it disappears from desired.
+        let mut current = NetmuxState::new();
+        current.routes.insert(r.key(), r);
+        let ops = reconcile(&NetmuxState::new(), &current);
+        assert!(ops.iter().any(|op| matches!(op, NetlinkOp::DelRoute { .. })));
     }
 
     #[test]

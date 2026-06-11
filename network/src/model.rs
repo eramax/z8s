@@ -209,6 +209,32 @@ pub enum NftExpr {
     },
     /// Masquerade (SNAT with the outgoing interface address).
     Masquerade,
+    /// Bitwise transform: `dreg = (sreg & mask) ^ xor`. Used to mask an
+    /// address down to its network prefix before a [`NftExpr::Cmp`] so a
+    /// single rule can match a whole CIDR.
+    Bitwise {
+        /// Source register.
+        sreg: u32,
+        /// Destination register.
+        dreg: u32,
+        /// Length in bytes (4 for IPv4).
+        len: u32,
+        /// Mask bytes (the prefix mask).
+        mask: Vec<u8>,
+        /// XOR bytes (usually all-zero).
+        xor: Vec<u8>,
+    },
+    /// Pseudo-random or incrementing number generator into a register.
+    /// Used to spread connections across service backends (load balancing):
+    /// `dreg = (random % modulus) + offset`.
+    Numgen {
+        /// Destination register.
+        dreg: u32,
+        /// Modulus (number of backends).
+        modulus: u32,
+        /// Offset added to the result.
+        offset: u32,
+    },
     /// Accept verdict.
     Accept,
     /// Drop verdict.
@@ -269,6 +295,239 @@ impl NftRule {
         self.comment = Some(c.into());
         self
     }
+
+    /// Build a rule directly from a list of expressions.
+    pub fn from_exprs(exprs: Vec<NftExpr>) -> Self {
+        Self {
+            handle: None,
+            exprs,
+            comment: None,
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Rule builders — compose expression lists for the common intents
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// These are pure functions that turn high-level intent (match this CIDR, DNAT
+// to that backend, masquerade this pod range) into the ordered expression
+// list nftables expects. Keeping them here means the planner stays readable
+// and the wire encoding stays in `syscalls`.
+
+/// nftables payload base: link-layer header.
+pub const PAYLOAD_LL: u32 = 0;
+/// nftables payload base: network (IP) header.
+pub const PAYLOAD_NETWORK: u32 = 1;
+/// nftables payload base: transport (TCP/UDP) header.
+pub const PAYLOAD_TRANSPORT: u32 = 2;
+
+/// Comparison op: equal.
+pub const CMP_EQ: u32 = 0;
+
+/// `meta` key for the layer-4 protocol byte.
+pub const META_L4PROTO: u32 = 16;
+
+/// DNAT nat type.
+pub const NAT_DNAT: u32 = 1;
+/// SNAT nat type.
+pub const NAT_SNAT: u32 = 0;
+
+/// IP protocol number for TCP.
+pub const PROTO_TCP: u8 = 6;
+/// IP protocol number for UDP.
+pub const PROTO_UDP: u8 = 17;
+
+/// Compute the 4-byte network mask for an IPv4 prefix length.
+pub fn prefix_mask_v4(prefix: u8) -> [u8; 4] {
+    let mask: u32 = if prefix == 0 {
+        0
+    } else if prefix >= 32 {
+        !0
+    } else {
+        !0u32 << (32 - prefix)
+    };
+    mask.to_be_bytes()
+}
+
+/// Map a protocol string ("TCP"/"UDP") to its IP protocol number.
+pub fn proto_number(proto: &str) -> u8 {
+    match proto.to_ascii_uppercase().as_str() {
+        "UDP" => PROTO_UDP,
+        _ => PROTO_TCP,
+    }
+}
+
+/// Expressions that match an IPv4 address field (`offset` 12=src, 16=dst)
+/// against a CIDR. Returns an empty vec for a `/0` (match-all) CIDR.
+pub fn match_cidr(offset: u32, cidr: &Ipv4Cidr) -> Vec<NftExpr> {
+    if cidr.prefix == 0 {
+        return vec![];
+    }
+    let mut out = vec![NftExpr::Payload {
+        dreg: 1,
+        base: PAYLOAD_NETWORK,
+        offset,
+        len: 4,
+    }];
+    if cidr.prefix < 32 {
+        out.push(NftExpr::Bitwise {
+            sreg: 1,
+            dreg: 1,
+            len: 4,
+            mask: prefix_mask_v4(cidr.prefix).to_vec(),
+            xor: vec![0u8; 4],
+        });
+    }
+    out.push(NftExpr::Cmp {
+        sreg: 1,
+        op: CMP_EQ,
+        data: cidr.network.octets().to_vec(),
+    });
+    out
+}
+
+/// Expressions matching the layer-4 protocol (TCP/UDP).
+pub fn match_l4proto(proto: u8) -> Vec<NftExpr> {
+    vec![
+        NftExpr::Meta {
+            kind: META_L4PROTO,
+            op: CMP_EQ,
+            value: proto as u32,
+        },
+        NftExpr::Cmp {
+            sreg: 1,
+            op: CMP_EQ,
+            data: vec![proto],
+        },
+    ]
+}
+
+/// Expressions matching the transport destination port.
+pub fn match_dport(port: u16) -> Vec<NftExpr> {
+    vec![
+        NftExpr::Payload {
+            dreg: 1,
+            base: PAYLOAD_TRANSPORT,
+            offset: 2,
+            len: 2,
+        },
+        NftExpr::Cmp {
+            sreg: 1,
+            op: CMP_EQ,
+            data: port.to_be_bytes().to_vec(),
+        },
+    ]
+}
+
+/// Expressions performing a DNAT to `ip:port`. Loads the address into reg 1
+/// and the port into reg 2, then issues the NAT verdict.
+pub fn dnat_to(ip: Ipv4Addr, port: u16) -> Vec<NftExpr> {
+    vec![
+        NftExpr::Immediate {
+            dreg: 1,
+            data: ip.octets().to_vec(),
+        },
+        NftExpr::Immediate {
+            dreg: 2,
+            data: port.to_be_bytes().to_vec(),
+        },
+        NftExpr::Nat {
+            nat_type: NAT_DNAT,
+            sreg_addr: 1,
+            sreg_port: 2,
+        },
+    ]
+}
+
+/// Build a ClusterIP DNAT rule for one backend. When `lb = Some((idx, total))`
+/// and `total > 1`, a `numgen` selector spreads connections across backends.
+pub fn clusterip_dnat_rule(
+    cluster_ip: Ipv4Addr,
+    proto: u8,
+    port: u16,
+    backend_ip: Ipv4Addr,
+    backend_port: u16,
+    lb: Option<(u32, u32)>,
+) -> NftRule {
+    let mut exprs = match_cidr(16, &Ipv4Cidr::new(cluster_ip, 32));
+    exprs.extend(match_l4proto(proto));
+    exprs.extend(match_dport(port));
+    if let Some((idx, total)) = lb
+        && total > 1 {
+            exprs.push(NftExpr::Numgen {
+                dreg: 9,
+                modulus: total,
+                offset: 0,
+            });
+            exprs.push(NftExpr::Cmp {
+                sreg: 9,
+                op: CMP_EQ,
+                data: idx.to_le_bytes().to_vec(),
+            });
+        }
+    exprs.extend(dnat_to(backend_ip, backend_port));
+    NftRule::from_exprs(exprs)
+}
+
+/// Build a NodePort DNAT rule (matches only protocol + node port).
+pub fn nodeport_dnat_rule(
+    proto: u8,
+    node_port: u16,
+    backend_ip: Ipv4Addr,
+    backend_port: u16,
+    lb: Option<(u32, u32)>,
+) -> NftRule {
+    let mut exprs = match_l4proto(proto);
+    exprs.extend(match_dport(node_port));
+    if let Some((idx, total)) = lb
+        && total > 1 {
+            exprs.push(NftExpr::Numgen {
+                dreg: 9,
+                modulus: total,
+                offset: 0,
+            });
+            exprs.push(NftExpr::Cmp {
+                sreg: 9,
+                op: CMP_EQ,
+                data: idx.to_le_bytes().to_vec(),
+            });
+        }
+    exprs.extend(dnat_to(backend_ip, backend_port));
+    NftRule::from_exprs(exprs)
+}
+
+/// Build a masquerade rule for traffic leaving the given source CIDR.
+pub fn masquerade_rule(src: &Ipv4Cidr) -> NftRule {
+    let mut exprs = match_cidr(12, src);
+    exprs.push(NftExpr::Masquerade);
+    NftRule::from_exprs(exprs)
+}
+
+/// Build an NSG-style filter rule: match optional src/dst CIDRs and an
+/// optional protocol+port, then accept or drop.
+pub fn nsg_filter_rule(
+    accept: bool,
+    src: Option<&Ipv4Cidr>,
+    dst: Option<&Ipv4Cidr>,
+    proto: Option<u8>,
+    dport: Option<u16>,
+) -> NftRule {
+    let mut exprs = Vec::new();
+    if let Some(s) = src {
+        exprs.extend(match_cidr(12, s));
+    }
+    if let Some(d) = dst {
+        exprs.extend(match_cidr(16, d));
+    }
+    if let Some(p) = proto {
+        exprs.extend(match_l4proto(p));
+    }
+    if let Some(dp) = dport {
+        exprs.extend(match_dport(dp));
+    }
+    exprs.push(if accept { NftExpr::Accept } else { NftExpr::Drop });
+    NftRule::from_exprs(exprs)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -536,6 +795,39 @@ pub struct VethPair {
     pub peer_ifindex: u32,
 }
 
+/// A declarative IPv4 route. Local pod `/32` routes are applied imperatively
+/// by `attach_pod`; the routes tracked in [`NetmuxState`] are the
+/// reconcile-managed ones (remote pod routes via a peer gateway, static
+/// RouteTable entries).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RouteSpec {
+    /// Destination network.
+    pub dest: Ipv4Addr,
+    /// Destination prefix length.
+    pub prefix: u8,
+    /// Next-hop gateway, if any.
+    pub gateway: Option<Ipv4Addr>,
+    /// Output interface index, if pinned.
+    pub oif: Option<u32>,
+}
+
+impl RouteSpec {
+    /// A host route to a single address via a gateway (remote pod route).
+    pub fn host_via(dest: Ipv4Addr, gateway: Ipv4Addr) -> Self {
+        Self {
+            dest,
+            prefix: 32,
+            gateway: Some(gateway),
+            oif: None,
+        }
+    }
+
+    /// The map key: destination network + prefix.
+    pub fn key(&self) -> (Ipv4Addr, u8) {
+        (self.dest, self.prefix)
+    }
+}
+
 /// The complete network state — what the engine thinks is currently in place.
 #[derive(Debug, Clone, Default)]
 pub struct NetmuxState {
@@ -551,8 +843,9 @@ pub struct NetmuxState {
     pub veths: BTreeMap<String, VethPair>,
     /// DNS records (hostname -> IPv4).
     pub dns_records: HashMap<String, Ipv4Addr>,
-    /// Host routes to pod IPs (pod_ip -> host veth ifindex).
-    pub host_routes: BTreeMap<Ipv4Addr, u32>,
+    /// Reconcile-managed routes keyed by `(dest, prefix)` (remote pod routes,
+    /// static routes). Local pod `/32` routes are owned by `attach_pod`.
+    pub routes: BTreeMap<(Ipv4Addr, u8), RouteSpec>,
     /// Generation counter (monotonic).
     pub generation: u64,
 }
@@ -572,7 +865,7 @@ impl NetmuxState {
             pods: desired.pods.clone(),
             veths: desired.veths.clone(),
             dns_records: desired.dns_records.clone(),
-            host_routes: desired.host_routes.clone(),
+            routes: desired.routes.clone(),
             generation: desired.generation,
         }
     }
@@ -606,6 +899,17 @@ pub enum NetlinkOp {
     SetFlush { family: NftFamily, table: String, name: String },
     AddCounter { family: NftFamily, table: String, counter: NftCounter },
     DelCounter { family: NftFamily, table: String, name: String },
+    /// Install an IPv4 route (RTNETLINK, not nftables).
+    AddRoute { route: RouteSpec },
+    /// Remove an IPv4 route (RTNETLINK, not nftables).
+    DelRoute { route: RouteSpec },
+}
+
+impl NetlinkOp {
+    /// Whether this op is an RTNETLINK route op (vs. an nftables op).
+    pub fn is_route(&self) -> bool {
+        matches!(self, NetlinkOp::AddRoute { .. } | NetlinkOp::DelRoute { .. })
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

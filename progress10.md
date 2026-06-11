@@ -100,59 +100,64 @@
 
 ### T4: network — Veth, nftables, DNS, IPAM ✅
 
-**12 modules**, clean split between pure `planner` and side-effecting `sync`:
+**7 modules**, functional core / imperative shell. Everything is expressed as
+immutable structs (tables → chains → rules → sets) that a pure `reconcile`
+diffs into the minimal set of kernel ops. No `rustables` / `libc` / `nix` —
+only `rustix` + `neli` for socket plumbing.
 
 **network/src/ipam.rs** — IpPool (BTreeSet free-list), Ipv4Cidr parse/normalize,
-subnet allocation, gateway/broadcast reservation, expand-to-adjacent
+subnet allocation, gateway/broadcast reservation; Ipv6Pool from /64 prefix
 
-**network/src/ipv6.rs** — Ipv6Pool from /64 prefix, IID allocation with release/reuse
+**network/src/model.rs** — the declarative model: `NftFamily/Chain/Hook/Policy`,
+`NftExpr` (Meta/Cmp/Payload/Lookup/Immediate/Nat/Masquerade/Bitwise/Numgen/
+verdicts), `NftRule` + pure rule builders (`match_cidr`, `match_l4proto`,
+`match_dport`, `dnat_to`, `clusterip_dnat_rule`, `nodeport_dnat_rule`,
+`masquerade_rule`, `nsg_filter_rule`), `NftTable/Chain/Set/Counter`, `RouteSpec`,
+`NetmuxState`, and `NetlinkOp` (incl. `AddRoute`/`DelRoute`)
 
-**network/src/netlink.rs** — Raw RTNETLINK (no `libc` dep, `core::ffi::c_void` alias):
-socket, veth create, link up/down, addr add/del, route add/del, setns helpers
+**network/src/syscalls.rs** — nftables wire encoding over `NETLINK_NETFILTER`:
+`NlaBuf` attribute builder (nested + padding), batch envelopes, correct
+`NFTA_LIST_ELEM`/`EXPR_NAME`/`EXPR_DATA` + typed `DATA_VALUE`/`DATA_VERDICT`,
+`NlSocket` send/ACK
 
-**network/src/veth.rs** — veth pair management: `veth-<uid8>` / `zeth-<uid8>` naming,
-host route, gateway IP, default route, netns guard, orphan cleanup
+**network/src/rtnetlink.rs** — `RouteSocket` over `NETLINK_ROUTE` (fresh socket
+per call so it binds to the current netns): veth pair (`IFLA_NET_NS_PID` so the
+peer lands in the pod netns directly), get_ifindex, set_up, del_link, add_addr,
+add_route/del_route, `NetnsGuard` (rustix `move_into_link_name_space`),
+`attach_pod`/`detach_pod`/`clean_orphan_veths`, `veth-<uid8>`/`zeth-<uid8>` naming
 
-**network/src/nft.rs** — NftEngine (rustables 0.8.7): SNAT, ClusterIP DNAT,
-NodePort DNAT, NSG allow/deny, set membership, catch-all chain
+**network/src/engine.rs** — `Netmux` facade + pure `reconcile(desired, current)`:
+table/chain/rule/set/route diff with automatic `Del*` cleanup, route ops routed
+to `RouteSocket` vs nft ops to `NlSocket`, imperative `attach_pod`/`detach_pod`
+hot path, `NetmuxBuilder`
 
-**network/src/dns.rs** — UDP DNS server with DnsSnapshot (in-memory cache),
-service name parser, A/CNAME answers, upstream forwarding
+**network/src/plan.rs** — pure `plan(snapshot, PlanConfig) -> NetmuxState` from
+z8s_core DB types: per-node `z8s_nat_{node}` / `z8s_filter_{node}` tables,
+ClusterIP/NodePort DNAT with cluster-wide backend resolution + numgen LB,
+pod-CIDR masquerade, NSG allow/deny + whitelist default-deny, VNet isolation +
+pools, NetworkPolicy pod-selector IP sets, remote pod routes via peer gateways,
+DNS records
 
-**network/src/ingress.rs** — L7 HTTP listener (Host: header → Service backend),
-IngressState with host→(svc,port) routing
+**network/src/dns.rs** — compact tokio UDP DNS server: hand-rolled RFC 1035
+codec (pure `parse_query`/`build_response`), hot-swappable `DnsZone` behind
+`RwLock`, A-record answers + NXDOMAIN for the cluster domain + upstream forward
 
-**network/src/np_controller.rs** — NetworkPolicy controller: nftables sets with
-pod-selector membership, `update_pod` / `remove_pod` for live sync
+**network/src/lib.rs** — re-exports, `NetworkEngine` trait, pod-state helpers
 
-**network/src/planner.rs** — Pure desired-state planner from StoreSnapshot:
-ClusterIP/NodePort DNAT, DNS records, NSG rules, remote pod routes
-
-**network/src/sync.rs** — Reconciler entry: `reconcile_network(snap, nft, dns,
-ingress, npc, node_name, gateway, store)` applies planner output
-
-**network/src/state.rs** — RuleKey (stable identity for idempotent ops), TableId,
-chain naming
-
-**network/src/rule.rs** — Declarative NftAction (Accept/Drop/DNAT/SNAT/Masq/Jump)
-and NftRule with builder
-
-**network/src/lib.rs** — `NetMux` facade, `NetworkEngine` trait, `PodResolver` trait,
-`attach_pod` / `detach_pod` / `configure_pod_netns` / `init_nft`
-
-**Build:** `cargo check -p network` clean. **Tests:** 77/77 unit tests pass
-(16 ipam + 4 ipv6 + 3 netlink + 4 veth + 4 nft + 12 dns + 5 ingress +
-6 np_controller + 7 planner + 2 sync + 4 lib + 4 state + 2 rule).
+**Build:** `cargo build -p network` clean (no warnings), `cargo clippy` clean.
+**Tests:** 84/84 unit tests pass.
 
 **Key design decisions:**
-- No `nix` / `libc` deps — direct rustix + raw syscall extern where needed
-- veth created with `IFLA_NET_NS_PID` so peer lands in pod netns directly
-- `NetNsGuard` ensures host netns is restored on scope exit
-- DNS cache (DnsSnapshot) avoids store reads per query (PERFORMANCE-PLAN §13)
-- Declarative `NftRule` data type — composable, serializable, diffable
-- Planner is pure (no IO) — trivially testable, deterministic
-- `unsafe extern "C"` for send/recv (Rust 2024 requirement)
-- 4-bucket `#[cfg(test)] mod tests` pattern in every file
+- No `rustables` / `nix` / `libc` — hand-rolled nftables + RTNETLINK encoding
+  over `rustix` + `neli` sockets
+- Functional core (`reconcile`, `plan`, rule builders, DNS codec all pure) +
+  imperative shell (`Netmux::apply`, `RouteSocket`, `DnsServer::serve`)
+- `plan(snapshot, cfg)` patches DB structs straight into the engine; the diff
+  emits the minimal ops and cleans up removed/stale resources automatically
+- Multi-node fabric: per-node tables, remote pod `/32` routes via peer gateways
+- veth created with `IFLA_NET_NS_PID`; `NetnsGuard` restores host netns on drop
+- Note: `NetworkPolicyIngressRule`/`EgressRule` are empty stubs in z8s_core, so
+  the planner emits pod-selector sets but no ingress/egress match rules yet
 
 ### T5: sync — Gossip, anti-entropy, vector clocks
 ### T6: controller — Reconcile loop (assign + reconcile)

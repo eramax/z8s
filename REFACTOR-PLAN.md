@@ -9,7 +9,7 @@ z8s (CLI)                          z8s-node (daemon)
 │ Spawns z8s-node      │──spawn──▶ │ DB (redb)                         │
 │ Shows status         │            │ API server (:6443)                │
 │ Stop/start/restart   │            │ CRI (containers, images, exec)    │
-│ Join tokens          │            │ Network (veth, nftables, DNS)     │
+│ Join tokens          │            │ Network (nftables, veth, routes, DNS)     │
 │ Kubeconfig           │            │ Scheduler (pod assignment)        │
 │ Reset/cleanup        │            │ Gossip (multi-node sync)          │
 └─────────────────────┘            │ Reconciler (watch + apply)        │
@@ -68,7 +68,7 @@ $ z8s reset                       # stops all, wipes DB + rootfs
 | API handlers repeat CRUD boilerplate | `handlers/crd.rs`, `apply.rs` | Each resource = ~100 LOC of similar code |
 | Components depend on everything | `components/mod.rs` imports cri, netmux, scheduler, storage, store | No module testable alone |
 | `AnyResource` match arms everywhere | Every handler, every reconciler | Verbose, no compile-time safety |
-| `netmux/mod.rs` is 797 LOC | One file with NetMux + 20 free functions | God module |
+| `netmux/mod.rs` was 797 LOC | Now 7 focused files (model/engine/plan/syscalls/rtnetlink/dns/ipam) | Resolved ✅ |
 
 ---
 
@@ -109,14 +109,16 @@ z8s/
 │   ├── health.rs                   # Liveness/readiness probes
 │   └── spec.rs                     # ContainerSpec builder
 │
-├── network/                        # veth, nftables, DNS, ingress, IPAM
-│   ├── mod.rs                      # NetMux, NetworkEngine trait
-│   ├── ipam.rs                     # IP pool, CIDR, subnet allocation
-│   ├── veth.rs                     # Veth pair create/delete/move
-│   ├── nft.rs                      # nftables rules (DNAT, SNAT, filter)
-│   ├── dns.rs                      # In-cluster DNS
-│   ├── ingress.rs                  # Ingress HTTP listener
-│   └── netlink.rs                  # Raw netlink ops (sysctl, routes, addrs)
+├── network/                        # nftables, veth, routes, DNS, IPAM (no rustables/nix/libc)
+│   ├── lib.rs                      # re-exports, NetworkEngine trait, pod-state helpers
+│   ├── model.rs                    # declarative model: NftTable/Chain/Rule/Set/Expr,
+│   │                              #   RouteSpec, NetmuxState, NetlinkOp + rule builders
+│   ├── engine.rs                  # Netmux facade + pure reconcile(desired,current)->ops
+│   ├── plan.rs                    # pure plan(snapshot, PlanConfig) -> NetmuxState
+│   ├── syscalls.rs                # nftables wire encoding over NETLINK_NETFILTER (neli+rustix)
+│   ├── rtnetlink.rs               # RouteSocket over NETLINK_ROUTE: veth, addr, route, netns
+│   ├── dns.rs                      # compact tokio UDP DNS server (A records + upstream)
+│   └── ipam.rs                     # IpPool/Ipv6Pool, Ipv4Cidr parse/normalize, subnet alloc
 │
 ├── sync/                           # multi-node: gossip, anti-entropy, vector clocks
 │   ├── mod.rs                      # GossipEngine, GossipState
@@ -192,14 +194,16 @@ z8s/
 │   ├── health.rs                   # Liveness/readiness probes
 │   └── spec.rs                     # ContainerSpec builder
 │
-├── network/                        # veth, nftables, DNS, ingress, IPAM
-│   ├── mod.rs                      # NetMux, NetworkEngine trait
-│   ├── ipam.rs                     # IP pool, CIDR, subnet allocation
-│   ├── veth.rs                     # Veth pair create/delete/move
-│   ├── nft.rs                      # nftables rules (DNAT, SNAT, filter)
-│   ├── dns.rs                      # In-cluster DNS
-│   ├── ingress.rs                  # Ingress HTTP listener
-│   └── netlink.rs                  # Raw netlink ops (sysctl, routes, addrs)
+├── network/                        # nftables, veth, routes, DNS, IPAM (no rustables/nix/libc)
+│   ├── lib.rs                      # re-exports, NetworkEngine trait, pod-state helpers
+│   ├── model.rs                    # declarative model: NftTable/Chain/Rule/Set/Expr,
+│   │                              #   RouteSpec, NetmuxState, NetlinkOp + rule builders
+│   ├── engine.rs                  # Netmux facade + pure reconcile(desired,current)->ops
+│   ├── plan.rs                    # pure plan(snapshot, PlanConfig) -> NetmuxState
+│   ├── syscalls.rs                # nftables wire encoding over NETLINK_NETFILTER (neli+rustix)
+│   ├── rtnetlink.rs               # RouteSocket over NETLINK_ROUTE: veth, addr, route, netns
+│   ├── dns.rs                      # compact tokio UDP DNS server (A records + upstream)
+│   └── ipam.rs                     # IpPool/Ipv6Pool, Ipv4Cidr parse/normalize, subnet alloc
 │
 ├── sync/                           # multi-node: gossip, anti-entropy, vector clocks
 │   ├── mod.rs                      # GossipEngine, GossipState
@@ -250,7 +254,7 @@ z8s/
 |---------|---------------|------------------------------|
 | **core** | Types, store, events, syscalls | runtime, network, api, controller |
 | **runtime** | Container lifecycle | api, controller, network, sync |
-| **network** | Veths, nftables, DNS, IPAM | api, controller, runtime, sync |
+| **network** | Nftables, veth, routes, DNS, IPAM (no rustables/nix/libc) | api, controller, runtime, sync |
 | **sync** | Multi-node gossip + consensus | api, controller, runtime, network |
 | **controller** | Reconcile loop (assign + start/stop) | api (reads from store, not API) |
 | **api** | HTTP handlers + auth | runtime, network, sync, controller |
@@ -265,7 +269,7 @@ API is a thin HTTP shell over the store. Controller is the brain that does all r
 core           (zero internal deps)
   ↑
 runtime        (depends on: core)
-network        (depends on: core)
+network        (depends on: core; no rustables/nix/libc — hand-rolled nftables + RTNETLINK)
 sync           (depends on: core)
   ↑
 controller     (depends on: core, runtime, network, sync)
@@ -285,7 +289,7 @@ No cycles. CLI is completely independent.
 |--------|-------|-----|
 | `z8s-types/` (14 files) + `z8s-store/` (14 files) + `z8s-components/` (mod.rs) | `core/types/` + `core/store.rs` + `core/hub.rs` | Types + persistence + event bus are one concept: "what is the truth" |
 | `z8s-cri/` (16 files) | `runtime/` (8 files) | Container lifecycle is one job |
-| `z8s-netmux/` (12 files) | `network/` (7 files) | Networking is one job |
+| `z8s-netmux/` (12 files) | `network/` (8 files) | Consolidated: hand-rolled nftables + RTNETLINK (no rustables/nix/libc), functional core, pure plan + reconcile |
 | `z8s-gossip/` (6 files) | `sync/` (6 files) | Same, better name |
 | `scheduler/` + `orchestrator/` | `controller/` (4 files) | One control loop, two roles |
 | `z8s-api/` (18 files) | `api/` (8 files) | Components removed — handler IS the component |
@@ -558,25 +562,52 @@ let applied: usize = rules.iter()
     .count();
 ```
 
-### 6. Declarative Network Rules — Builder Pattern
+### 6. Declarative Network — Struct-Mapped Tables/Chains/Rules
+
+The network crate uses a **functional core / imperative shell** design. All
+network state is expressed as immutable structs (`NftTable` → `NftChain` →
+`NftRule` → `NftExpr`) that the pure `reconcile(desired, current)` function
+diffs into the minimal set of `NetlinkOp`s. The planner `plan(snapshot, cfg)`
+bridges the DB directly into the engine.
 
 ```rust
-// Before: imperative nft setup
-net.nft.add_snat("default", "10.0.0.0/8").await?;
-net.nft.add_forward_allow("10.0.0.0/8", "0.0.0.0/0").await?;
-net.nft.add_forward_deny("0.0.0.0/0", "10.0.0.0/8").await?;
-net.nft.add_dnat(cluster_ip, port, &backends).await?;
+// Pure rule builders compose expression lists for the common intents.
+// No IO — these just produce NftRule values.
+let dnat = clusterip_dnat_rule(cluster_ip, PROTO_TCP, 80, backend_ip, 8080, Some((0, 3)));
+let masq = masquerade_rule(&pod_cidr);
+let nsg  = nsg_filter_rule(true, Some(&src_cidr), Some(&dst_cidr), None, None);
 
-// After: declarative rule builder
-use network::rule::{RuleSet, Rule};
+// The planner builds a NetmuxState from the store snapshot (pure function).
+let desired = plan(&snapshot, &PlanConfig {
+    node_name: "node-a".into(),
+    pod_cidr: Ipv4Cidr::parse("10.42.0.0/16").unwrap(),
+    service_cidr: Ipv4Cidr::parse("10.96.0.0/16").unwrap(),
+    cluster_domain: "cluster.local".into(),
+    gateway: Ipv4Addr::new(10, 42, 0, 1),
+    peers: vec![("node-b".into(), Ipv4Addr::new(192, 168, 1, 2))],
+});
 
-RuleSet::new("default-vnet")
-    .allow("10.0.0.0/8", "0.0.0.0/0")     // pods → internet
-    .deny("0.0.0.0/0", "10.0.0.0/8")       // internet → pods
-    .snat("10.0.0.0/8")                      // masquerade
-    .dnat(cluster_ip, port, &backends)        // service proxy
-    .apply(&net.nft).await?;
+// The engine diffs desired vs current and applies the ops to the kernel.
+let ops = reconcile(&desired, &engine.current());
+engine.apply(&ops, false)?;  // nft ops → NlSocket, route ops → RouteSocket
+
+// Pod lifecycle (CRI hot path) is imperative:
+engine.attach_pod("uid-abc", pod_ip, container_pid)?;
+engine.detach_pod("uid-abc")?;
+
+// Automatic cleanup: resources removed from desired produce Del* ops.
+// No orphan rules, stale routes, or dangling veths after reconcile.
 ```
+
+**What `plan` produces per node:**
+- `z8s_nat_{node}` — ClusterIP/NodePort DNAT (prerouting + output) with
+  numgen load-balancing across cluster-wide backends; pod-CIDR masquerade
+  (postrouting)
+- `z8s_filter_{node}` — NSG allow/deny rules (forward) + whitelist default-deny
+- VNet isolation + per-VNet IP pools
+- NetworkPolicy pod-selector IP sets
+- Remote pod `/32` routes via peer gateways
+- DNS records (`svc.ns.svc.cluster.local` → ClusterIP)
 
 ### 7. Pipe-Style Data Flow
 
@@ -774,6 +805,137 @@ Instead of full dump on every connect:
 3. Apply changes, update watermark
 4. Send Ack { term: max_received_term }
 ```
+
+---
+
+## Network Crate — Architecture & Current State ✅
+
+The `network` crate is complete: 7 source files, 84 unit tests, zero clippy
+warnings, no `rustables`/`nix`/`libc` dependencies. It talks to the kernel
+directly via `rustix` + `neli` for socket plumbing, with hand-rolled nftables
+and RTNETLINK wire encoding.
+
+### Design: Functional Core / Imperative Shell
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                     Functional Core (no IO)                      │
+│                                                                  │
+│  model.rs    NftTable → NftChain → NftRule → NftExpr             │
+│              RouteSpec, NetmuxState, NetlinkOp                    │
+│              Pure rule builders: match_cidr, dnat_to,             │
+│              clusterip_dnat_rule, masquerade_rule,                │
+│              nsg_filter_rule, nodeport_dnat_rule                  │
+│                                                                  │
+│  engine.rs   reconcile(desired, current) -> Vec<NetlinkOp>       │
+│              Pure diff — table/chain/rule/set/route diff         │
+│              with automatic Del* cleanup                          │
+│                                                                  │
+│  plan.rs     plan(snapshot, PlanConfig) -> NetmuxState           │
+│              DB → declarative state bridge (pure)                │
+│              Per-node nat/filter tables, DNAT, NSG, routes, DNS  │
+│                                                                  │
+│  dns.rs      parse_query, build_response (pure codec)            │
+│              RFC 1035 wire format — A records + NXDOMAIN         │
+└──────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                     Imperative Shell (IO)                         │
+│                                                                  │
+│  syscalls.rs   NlSocket over NETLINK_NETFILTER (neli + rustix)   │
+│                NlaBuf builder, batch envelopes, ACK handling      │
+│                Correct NFTA_LIST_ELEM/EXPR_NAME/EXPR_DATA wire   │
+│                Typed DATA_VALUE/DATA_VERDICT, verdict codes      │
+│                                                                  │
+│  rtnetlink.rs  RouteSocket over NETLINK_ROUTE (neli + rustix)    │
+│                Fresh socket per call (binds to current netns)     │
+│                veth pair (IFLA_NET_NS_PID), set_up, del_link,   │
+│                add_addr, add_route/del_route, NetnsGuard          │
+│                attach_pod / detach_pod / clean_orphan_veths       │
+│                                                                  │
+│  dns.rs        DnsServer — tokio UDP serve loop                  │
+│                Hot-swappable DnsZone behind RwLock               │
+│                A-record answers + upstream forwarding             │
+│                                                                  │
+│  engine.rs     Netmux facade — holds NlSocket + RouteSocket      │
+│                apply(ops, dry_run) dispatches to the right socket│
+│                attach_pod/detach_pod (CRI hot path)               │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### Module Map
+
+| File | LOC | Purpose |
+|------|-----|---------|
+| `model.rs` | ~780 | Declarative types + pure rule builders |
+| `engine.rs` | ~900 | Netmux facade + reconcile + NetmuxBuilder |
+| `plan.rs` | ~570 | Pure DB→state planner with 6 unit tests |
+| `syscalls.rs` | ~860 | Nftables wire encoding + NlSocket |
+| `rtnetlink.rs` | ~560 | RTNETLINK veth/addr/route/netns + RouteSocket |
+| `dns.rs` | ~310 | DNS codec + async UDP server |
+| `ipam.rs` | ~400 | IpPool/Ipv6Pool + Ipv4Cidr |
+| `lib.rs` | ~190 | Re-exports, NetworkEngine trait, pod helpers |
+
+### What the Planner Produces (per node)
+
+```
+plan(snapshot, PlanConfig) → NetmuxState
+│
+├── z8s_nat_{node} table
+│   ├── prerouting chain  — ClusterIP/NodePort DNAT with numgen LB
+│   ├── output chain      — same DNAT for locally-originated traffic
+│   └── postrouting chain — pod-CIDR masquerade
+│
+├── z8s_filter_{node} table
+│   ├── forward chain — NSG allow/deny + default-deny (whitelist)
+│   └── forward chain — VNet no-internet drops
+│
+├── NftSets — NetworkPolicy pod-selector IP sets (np_{ns}_{name})
+├── IpPools — "pods" CIDR + "vnet-{name}" per-VNet pools
+├── Routes  — remote pod /32 via peer gateway
+└── DNS     — {svc}.{ns}.svc.cluster.local → ClusterIP
+```
+
+### Reconciliation Flow
+
+```
+Controller tick:
+  1. Read StoreSnapshot from DB
+  2. plan(snapshot, cfg)           ← pure, no IO
+  3. reconcile(&desired, &current) ← pure, returns Vec<NetlinkOp>
+  4. engine.apply(&ops, false)      ← side-effecting kernel calls
+     ├── nft ops → NlSocket (NETLINK_NETFILTER)
+     └── route ops → RouteSocket (NETLINK_ROUTE)
+  5. Automatic cleanup: anything in current but not desired
+     produces Del* ops (stale rules, removed routes, etc.)
+```
+
+### Pod Lifecycle (CRI Hot Path)
+
+```
+attach_pod(uid, pod_ip, container_pid):
+  1. Create veth pair (veth-{uid8} host, zeth-{uid8} peer)
+     with IFLA_NET_NS_PID so peer lands in pod netns
+  2. Set host side up, assign gateway IP
+  3. Add host /32 route to pod_ip via host veth
+  4. Enter pod netns (NetnsGuard RAII)
+  5. Set peer up, assign pod_ip/32
+  6. Add default route via gateway
+  7. Restore host netns on guard drop
+
+detach_pod(uid):
+  1. Delete host /32 route
+  2. Delete veth pair (peer auto-destroyed)
+```
+
+### Known Gaps
+
+- `NetworkPolicyIngressRule`/`EgressRule` are empty stubs in z8s_core,
+  so the planner emits pod-selector sets but no ingress/egress match
+  rules yet
+- Ingress (L7 HTTP) was in the old 12-module design but not yet
+  reimplemented in the consolidated crate
 
 ---
 
@@ -1033,14 +1195,15 @@ z8s/
 │   ├── health.rs                   # Probes
 │   └── spec.rs                     # ContainerSpec builder
 │
-├── network/                        # veth, nftables, DNS, IPAM
-│   ├── mod.rs                      # NetMux, NetworkEngine trait
-│   ├── ipam.rs                     # IP pool, CIDR
-│   ├── veth.rs                     # Veth pair create/delete
-│   ├── nft.rs                      # nftables rules
-│   ├── dns.rs                      # In-cluster DNS
-│   ├── ingress.rs                  # Ingress HTTP listener
-│   └── netlink.rs                  # Raw netlink ops
+├── network/                        # nftables, veth, routes, DNS, IPAM (no rustables/nix/libc)
+│   ├── lib.rs                      # re-exports, NetworkEngine trait, pod-state helpers
+│   ├── model.rs                    # NftTable/Chain/Rule/Set/Expr, RouteSpec, NetmuxState, NetlinkOp
+│   ├── engine.rs                  # Netmux facade + pure reconcile(desired,current)->ops
+│   ├── plan.rs                    # pure plan(snapshot, PlanConfig) -> NetmuxState
+│   ├── syscalls.rs                # nftables wire encoding over NETLINK_NETFILTER (neli+rustix)
+│   ├── rtnetlink.rs               # RouteSocket over NETLINK_ROUTE: veth, addr, route, netns
+│   ├── dns.rs                      # compact tokio UDP DNS server (A records + upstream)
+│   └── ipam.rs                     # IpPool/Ipv6Pool, Ipv4Cidr parse/normalize
 │
 ├── sync/                           # multi-node gossip
 │   ├── mod.rs                      # GossipEngine
@@ -1105,14 +1268,15 @@ z8s/
 │   ├── health.rs                   # Probes
 │   └── spec.rs                     # ContainerSpec builder
 │
-├── network/                        # veth, nftables, DNS, IPAM
-│   ├── mod.rs                      # NetMux, NetworkEngine trait
-│   ├── ipam.rs                     # IP pool, CIDR
-│   ├── veth.rs                     # Veth pair create/delete
-│   ├── nft.rs                      # nftables rules
-│   ├── dns.rs                      # In-cluster DNS
-│   ├── ingress.rs                  # Ingress HTTP listener
-│   └── netlink.rs                  # Raw netlink ops
+├── network/                        # nftables, veth, routes, DNS, IPAM (no rustables/nix/libc)
+│   ├── lib.rs                      # re-exports, NetworkEngine trait, pod-state helpers
+│   ├── model.rs                    # NftTable/Chain/Rule/Set/Expr, RouteSpec, NetmuxState, NetlinkOp
+│   ├── engine.rs                  # Netmux facade + pure reconcile(desired,current)->ops
+│   ├── plan.rs                    # pure plan(snapshot, PlanConfig) -> NetmuxState
+│   ├── syscalls.rs                # nftables wire encoding over NETLINK_NETFILTER (neli+rustix)
+│   ├── rtnetlink.rs               # RouteSocket over NETLINK_ROUTE: veth, addr, route, netns
+│   ├── dns.rs                      # compact tokio UDP DNS server (A records + upstream)
+│   └── ipam.rs                     # IpPool/Ipv6Pool, Ipv4Cidr parse/normalize
 │
 ├── sync/                           # multi-node gossip
 │   ├── mod.rs                      # GossipEngine
@@ -1163,7 +1327,7 @@ z8s/
 core           (zero internal deps)
   ↑
 runtime        (depends on: core)
-network        (depends on: core)
+network        (depends on: core; no rustables/nix/libc — hand-rolled nftables + RTNETLINK)
 sync           (depends on: core)
   ↑
 controller     (depends on: core, runtime, network, sync)
@@ -1199,7 +1363,7 @@ kubectl apply -f pod.yaml
 | **API** | core (types + store) | runtime, network, sync, controller |
 | **Controller** | core, runtime, network, sync | api |
 | **Runtime** | core | api, controller, network, sync |
-| **Network** | core | api, controller, runtime, sync |
+| **Network** | core (no rustables/nix/libc) | api, controller, runtime, sync |
 | **Sync** | core | api, controller, runtime, network |
 
 API is just a thin HTTP layer over the store. Controller is the brain that does all real work.
@@ -1207,6 +1371,8 @@ API is just a thin HTTP layer over the store. Controller is the brain that does 
 ---
 
 ## 19. Remove `nix` Crate — Direct Kernel Syscalls via rustix
+
+**Status**: ✅ The `network` crate has already migrated: no `rustables`, `nix`, or `libc`; it uses `rustix` + `neli` exclusively. The `core/syscall.rs` layer still uses `libc` directly for fork/wait/mount/chroot; a future pass can migrate those to `rustix` as well.
 
 **Problem**: `nix` is a safe wrapper around Linux syscalls, but adds:
 - 1 extra dependency (and its transitive deps)
@@ -1446,7 +1612,7 @@ libc = "0.2"  # already a transitive dep of tokio/nix
 | 1 | Create workspace, extract `core/` (types + store + events + syscalls) | ~4000 | ~200 |
 | 2 | Create `core/syscall.rs` — replace nix with direct libc | ~300 | ~800 (nix calls) |
 | 3 | Extract `runtime/` (cri + spawn) | ~3500 | ~100 |
-| 4 | Extract `network/` (netmux + netlink) | ~2500 | ~300 |
+| 4 | Extract `network/` (netmux + netlink) | ~2500 | ~300 | ✅ Done: 7 modules, 84 tests, no rustables/nix/libc |
 | 5 | Extract `sync/` (gossip + anti-entropy) | ~800 | ~200 |
 | 6 | Merge scheduler + reconciler into `controller/` | ~600 | ~400 |
 | 7 | Extract `api/` (handlers + auth + catalog) | ~3000 | ~500 |
