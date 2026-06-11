@@ -82,6 +82,7 @@ pub struct EventRecord {
 
 impl EventRecord {
     /// Create a new event record.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         reason: &str,
         message: &str,

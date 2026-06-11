@@ -196,7 +196,7 @@ impl RedbBackend {
             let mut table = txn.open_table(RESOURCES)?;
             let key = record.uid();
             let bytes = serde_json::to_vec(record)?;
-            table.insert(key.as_ref() as &str, bytes.as_slice())?;
+            table.insert(key as &str, bytes.as_slice())?;
         }
         txn.commit()?;
         Ok(())
@@ -221,7 +221,7 @@ impl RedbBackend {
             for record in records {
                 let key = record.uid();
                 let bytes = serde_json::to_vec(record)?;
-                table.insert(key.as_ref() as &str, bytes.as_slice())?;
+                table.insert(key as &str, bytes.as_slice())?;
             }
             for uid in deletes {
                 table.remove(*uid)?;
@@ -415,11 +415,10 @@ impl StoreBackend for RedbBackend {
             let mut records = Vec::new();
             if let Ok(iter) = table.iter() {
                 for entry in iter {
-                    if let Ok(entry) = entry {
-                        if let Ok(record) = serde_json::from_slice(entry.1.value()) {
+                    if let Ok(entry) = entry
+                        && let Ok(record) = serde_json::from_slice(entry.1.value()) {
                             records.push(record);
                         }
-                    }
                 }
             }
             records
@@ -659,15 +658,13 @@ impl StoreBackend for RedbBackend {
             };
             let mut events = Vec::new();
             if let Ok(iter) = table.range::<&str>(prefix.as_str()..) {
-                for entry in iter {
-                    if let Ok(entry) = entry {
-                        let key = entry.0.value();
-                        if !key.starts_with(&prefix) {
-                            break;
-                        }
-                        if let Ok(event) = serde_json::from_slice(entry.1.value()) {
-                            events.push(event);
-                        }
+                for entry in iter.flatten() {
+                    let key = entry.0.value();
+                    if !key.starts_with(&prefix) {
+                        break;
+                    }
+                    if let Ok(event) = serde_json::from_slice(entry.1.value()) {
+                        events.push(event);
                     }
                 }
             }
@@ -692,7 +689,7 @@ impl StoreBackend for RedbBackend {
             };
             all.into_iter()
                 .filter(|e| e.resource_kind == kind)
-                .filter(|e| namespace.as_deref().map_or(true, |ns| e.resource_namespace.as_deref() == Some(ns)))
+                .filter(|e| namespace.as_deref().is_none_or(|ns| e.resource_namespace.as_deref() == Some(ns)))
                 .collect()
         }).await.unwrap_or_default()
     }
@@ -705,7 +702,7 @@ impl StoreBackend for RedbBackend {
                 Ok(e) => e,
                 Err(_) => return vec![],
             };
-            all.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+            all.sort_by_key(|b| std::cmp::Reverse(b.timestamp));
             all.truncate(limit);
             all
         }).await.unwrap_or_default()
@@ -721,24 +718,21 @@ impl StoreBackend for RedbBackend {
             // Group events by resource UID
             let mut by_resource: HashMap<String, Vec<(String, u64)>> = HashMap::new();
             if let Ok(iter) = table.iter() {
-                for entry in iter {
-                    if let Ok(entry) = entry {
-                        let key = entry.0.value().to_string();
-                        if let Some(uid) = key.split('/').next() {
-                            if let Ok(event) = serde_json::from_slice::<EventRecord>(entry.1.value()) {
-                                by_resource.entry(uid.to_string())
-                                    .or_default()
-                                    .push((key, event.event_id));
-                            }
+                for entry in iter.flatten() {
+                    let key = entry.0.value().to_string();
+                    if let Some(uid) = key.split('/').next()
+                        && let Ok(event) = serde_json::from_slice::<EventRecord>(entry.1.value()) {
+                            by_resource.entry(uid.to_string())
+                                .or_default()
+                                .push((key, event.event_id));
                         }
-                    }
                 }
             }
 
             // Find events to delete (keep newest N per resource)
             let mut to_delete = Vec::new();
             for (_uid, mut events) in by_resource {
-                events.sort_by(|a, b| b.1.cmp(&a.1)); // newest first
+                events.sort_by_key(|e| std::cmp::Reverse(e.1)); // newest first
                 if events.len() > keep_per_resource {
                     for (key, _) in events.into_iter().skip(keep_per_resource) {
                         to_delete.push(key);
@@ -771,11 +765,10 @@ impl RedbBackend {
         let mut events = Vec::new();
         if let Ok(iter) = table.iter() {
             for entry in iter {
-                if let Ok(entry) = entry {
-                    if let Ok(event) = serde_json::from_slice(entry.1.value()) {
+                if let Ok(entry) = entry
+                    && let Ok(event) = serde_json::from_slice(entry.1.value()) {
                         events.push(event);
                     }
-                }
             }
         }
         Ok(events)

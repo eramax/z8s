@@ -17,6 +17,7 @@ use crate::types::{AnyResource, ResourceRecord, ResourceStatus};
 
 /// A single write operation. Used for batch writes.
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum StoreOp {
     /// Create or update spec + optional assignment.
     WriteSpec {
@@ -44,6 +45,7 @@ pub enum StoreOp {
 /// Subscribers (API watch, gossip, DNS cache) receive these events
 /// to trigger reactive behavior.
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum StoreEvent {
     /// A resource was created or updated.
     Applied {

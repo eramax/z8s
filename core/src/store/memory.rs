@@ -235,7 +235,7 @@ impl StoreBackend for MemoryBackend {
             .filter(|e| e.resource_uid == resource_uid)
             .cloned()
             .collect();
-        result.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        result.sort_by_key(|b| std::cmp::Reverse(b.timestamp));
         result
     }
 
@@ -247,14 +247,14 @@ impl StoreBackend for MemoryBackend {
         let events = self.events.read().await;
         events.iter()
             .filter(|e| e.resource_kind == kind)
-            .filter(|e| namespace.map_or(true, |ns| e.resource_namespace.as_deref() == Some(ns)))
+            .filter(|e| namespace.is_none_or(|ns| e.resource_namespace.as_deref() == Some(ns)))
             .cloned()
             .collect()
     }
 
     async fn get_recent_events(&self, limit: usize) -> Vec<EventRecord> {
         let mut events = self.events.read().await.clone();
-        events.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        events.sort_by_key(|b| std::cmp::Reverse(b.timestamp));
         events.truncate(limit);
         events
     }

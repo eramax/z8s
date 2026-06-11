@@ -187,7 +187,7 @@ fn ymd_to_days(year: u32, month: u32, day: u32) -> u64 {
 }
 
 fn is_leap_year(year: u32) -> bool {
-    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+    year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400))
 }
 
 fn day_of_year_to_md(day_of_year: u32, leap: bool) -> (u32, u32) {

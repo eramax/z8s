@@ -136,6 +136,7 @@ pub trait Resource: Clone + Send + Sync + 'static {
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", content = "data")]
+#[allow(clippy::large_enum_variant)]
 pub enum AnyResource {
     Pod(super::compute::Pod),
     Deployment(super::compute::Deployment),
@@ -482,6 +483,7 @@ pub struct Condition {
 
 /// Status of a single container.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Default)]
 pub struct ContainerStatus {
     /// Container name.
     pub name: String,
@@ -502,18 +504,6 @@ pub struct ContainerStatus {
     pub state: ContainerState,
 }
 
-impl Default for ContainerStatus {
-    fn default() -> Self {
-        Self {
-            name: String::new(),
-            ready: false,
-            restart_count: 0,
-            image: String::new(),
-            container_id: None,
-            state: ContainerState::default(),
-        }
-    }
-}
 
 // ── ContainerState ────────────────────────────────────────────────────────
 
