@@ -28,11 +28,11 @@
 //!
 //! Nested attributes (NLA_F_NESTED) carry a child stream of attrs.
 
-use std::os::fd::{AsRawFd, BorrowedFd};
+use std::os::fd::{AsRawFd, OwnedFd};
 
-use neli::consts::socket::NlFamily;
-use neli::socket::NlSocket as NlSocketInner;
-use neli::utils::Groups;
+use nix::sys::socket::{
+    self, AddressFamily, MsgFlags, NetlinkAddr, SockFlag, SockProtocol, SockType,
+};
 
 use crate::model::*;
 
@@ -56,6 +56,8 @@ const NFT_MSG_DELOBJ: u16 = 13;
 
 // Nftables attribute types
 const NFTA_TABLE_NAME: u16 = 1;
+const NFTA_TABLE_FLAGS: u16 = 2;
+const NFTA_TABLE_USERDATA: u16 = 6;
 const NFTA_CHAIN_NAME: u16 = 1;
 const NFTA_CHAIN_TABLE: u16 = 2;
 const NFTA_CHAIN_HOOKNUM: u16 = 4;
@@ -432,6 +434,14 @@ pub fn encode_op(op: &NetlinkOp) -> (u16, Vec<u8>) {
         NetlinkOp::AddTable { family, name } => {
             let mut b = NlaBuf::new();
             b.put_str(NFTA_TABLE_NAME, name);
+            // NFTA_TABLE_FLAGS is required by the kernel (value 0 = no flags).
+            // Both nft CLI and rustables send this; without it the kernel
+            // rejects the op with EINVAL.
+            b.put_u32(NFTA_TABLE_FLAGS, 0);
+            // NFTA_TABLE_USERDATA (16 bytes of zeros) — nft CLI sends this
+            // for its own internal bookkeeping. The kernel accepts an empty
+            // value, but sending it matches nft CLI's wire format exactly.
+            b.put_slice(NFTA_TABLE_USERDATA, &[0u8; 16]);
             (NFT_MSG_NEWTABLE, build_message(*family, b.finish()))
         }
         NetlinkOp::DelTable { family, name } => {
@@ -564,26 +574,31 @@ fn type_name_to_u32(name: &str) -> u32 {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Netlink socket — uses neli for bind/send/recv
+// Netlink socket — uses nix (same as rustables) for open/bind/send/recv
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// A netlink socket bound to the NETLINK_NETFILTER protocol.
-/// Uses [`neli`] to open and bind the socket (neli constructs a proper
-/// `sockaddr_nl` and registers the socket with the kernel). Send/recv use
-/// the raw fd via [`rustix::net`] since neli's typed `send`/`recv` take
-/// `Nlmsghdr<T, P>` wrappers which would force a full typed refactor.
+/// Uses [`nix`] for open/bind/send/recv (same approach as the rustables
+/// crate, which is a known-working nftables implementation).
 pub struct NlSocket {
-    sock: NlSocketInner,
+    sock: OwnedFd,
 }
 
 impl NlSocket {
     /// Open a netlink socket bound to the NETLINK_NETFILTER protocol.
     /// Requires CAP_NET_ADMIN.
     pub fn open() -> std::io::Result<Self> {
-        let sock = NlSocketInner::new(NlFamily::Netfilter)?;
-        // Bind to (pid=0, groups=empty). pid=0 means "auto-assign" by the
-        // kernel; no groups means no multicast subscriptions.
-        sock.bind(Some(0), Groups::empty())?;
+        let sock = socket::socket(
+            AddressFamily::Netlink,
+            SockType::Raw,
+            SockFlag::empty(),
+            SockProtocol::NetlinkNetFilter,
+        )
+        .map_err(|e| std::io::Error::from_raw_os_error(e as i32))?;
+        // Bind to (pid=0, groups=0). pid=0 means "auto-assign" by the kernel.
+        let addr = NetlinkAddr::new(0, 0);
+        socket::bind(sock.as_raw_fd(), &addr)
+            .map_err(|e| std::io::Error::from_raw_os_error(e as i32))?;
         Ok(Self { sock })
     }
 
@@ -593,7 +608,6 @@ impl NlSocket {
     /// The single ACK is read after BATCH_END.
     pub fn send(&self, op: &NetlinkOp) -> std::io::Result<Vec<u8>> {
         let (msg_type, body) = encode_op(op);
-        let flags = nlmsg_flags_for(op);
 
         // ── Wire format note ──────────────────────────────────────────
         // nft CLI uses nlmsg_pid=0 in every message of the batch. The
@@ -612,19 +626,22 @@ impl NlSocket {
         // regardless of NLM_F_ACK, because the batch is a transaction.
 
         // Build BATCH_BEGIN: nlmsghdr(16) + nfgenmsg(4) = 20 bytes.
+        // Flags: NLM_F_REQUEST | NLM_F_ACK (rustables pattern — the kernel
+        // sends an ACK for BATCH_BEGIN because it carries NLM_F_ACK).
         let begin_type = NFNL_MSG_BATCH_BEGIN;
         let mut begin = Vec::with_capacity(20);
         begin.extend_from_slice(&20u32.to_ne_bytes()); // nlmsg_len = 20
         begin.extend_from_slice(&begin_type.to_ne_bytes());
-        begin.extend_from_slice(&NLM_F_REQUEST.to_ne_bytes());
+        begin.extend_from_slice(&(NLM_F_REQUEST | NLM_F_ACK).to_ne_bytes());
         begin.extend_from_slice(&0u32.to_ne_bytes()); // nlmsg_seq = 0
         begin.extend_from_slice(&0u32.to_ne_bytes()); // nlmsg_pid = 0
         // nfgenmsg: family=AF_UNSPEC(0), version=0, res_id=10 (network byte order)
         begin.extend_from_slice(&[0u8, 0, 0, 10]);
 
         // Build the actual op message: nlmsghdr(16) + body.
-        // Strip NLM_F_ACK, NLM_F_CREATE, and NLM_F_EXCL — match nft CLI.
-        let op_flags = NLM_F_REQUEST;
+        // Flags: NLM_F_REQUEST | NLM_F_CREATE | NLM_F_ACK (rustables pattern).
+        // The kernel sends an ACK for the op because it carries NLM_F_ACK.
+        let op_flags = NLM_F_REQUEST | NLM_F_CREATE | NLM_F_ACK;
         let total_len = (16 + body.len()) as u32;
         let mut msg = Vec::with_capacity(16 + body.len());
         msg.extend_from_slice(&total_len.to_ne_bytes());
@@ -639,9 +656,9 @@ impl NlSocket {
         }
 
         // Build BATCH_END: nlmsghdr(16) + nfgenmsg(4) = 20 bytes.
-        // nft CLI uses NLM_F_REQUEST only (no NLM_F_ACK) on BATCH_END; the
-        // kernel still sends a single NLMSG_ERROR reply after the batch is
-        // committed (because the batch is a transaction).
+        // Flags: NLM_F_REQUEST only (no NLM_F_ACK — rustables pattern).
+        // The kernel commits the batch after BATCH_END and the transaction
+        // is complete; no per-message ACK for BATCH_END.
         let end_type = NFNL_MSG_BATCH_END;
         let mut end = Vec::with_capacity(20);
         end.extend_from_slice(&20u32.to_ne_bytes()); // nlmsg_len = 20
@@ -664,34 +681,35 @@ impl NlSocket {
         combined.extend_from_slice(&end);
 
         let raw_fd = self.sock.as_raw_fd();
-        // SAFETY: the socket is valid for the lifetime of `self`, and all
-        // send/recv calls complete before this method returns.
-        let fd = unsafe { BorrowedFd::borrow_raw(raw_fd) };
+        // Use nix::sendto (same as rustables) — bare send() on a bound
+        // netlink socket works, but sendto with an explicit NetlinkAddr
+        // is what rustables does and is the most portable.
+        let addr = NetlinkAddr::new(0, 0);
+        socket::sendto(raw_fd, &combined, &addr, MsgFlags::empty())
+            .map_err(|e| std::io::Error::from_raw_os_error(e as i32))?;
 
-        // Send the entire batch envelope in one call.
-        rustix::net::send(fd, &combined, rustix::net::SendFlags::empty())?;
-
-        // Drain ACKs: the kernel sends a single NLMSG_ERROR reply after
-        // BATCH_END (because BATCH_END has NLM_F_ACK). We loop in case the
-        // kernel sends a multipart ACK or notification.
+        // Drain ACKs: 2 expected (BATCH_BEGIN has NLM_F_ACK, op has NLM_F_ACK,
+        // BATCH_END does NOT have NLM_F_ACK — matching rustables pattern).
+        // Only interpret bytes 16-19 as errno if the reply is NLMSG_ERROR
+        // (type 2); otherwise it's a notification or other message type.
         let mut last_reply = Vec::new();
-        loop {
+        for _ in 0..2 {
             let mut reply = vec![0u8; 8192];
-            let (_data, n) =
-                rustix::net::recv(fd, &mut reply, rustix::net::RecvFlags::empty())?;
+            let n = socket::recv(raw_fd, &mut reply, MsgFlags::empty())
+                .map_err(|e| std::io::Error::from_raw_os_error(e as i32))?;
             reply.truncate(n);
             if reply.len() >= 20 {
-                let errno = i32::from_ne_bytes([reply[16], reply[17], reply[18], reply[19]]);
-                if errno != 0 {
-                    return Err(std::io::Error::from_raw_os_error(-errno));
+                // nlmsghdr layout: len(4) | type(2) | flags(2) | seq(4) | pid(4)
+                let nlmsg_type = u16::from_ne_bytes([reply[4], reply[5]]);
+                if nlmsg_type == 2 {
+                    // NLMSG_ERROR: bytes 16-19 are the error code (i32)
+                    let errno = i32::from_ne_bytes([reply[16], reply[17], reply[18], reply[19]]);
+                    if errno != 0 {
+                        return Err(std::io::Error::from_raw_os_error(-errno));
+                    }
                 }
             }
             last_reply = reply;
-            // If the reply is shorter than the kernel's max message size
-            // (8KiB), the batch is complete (atomic message).
-            if last_reply.len() < 8192 {
-                break;
-            }
         }
         Ok(last_reply)
     }
@@ -766,7 +784,8 @@ mod tests {
         };
         let (msg_type, body) = encode_op(&op);
         assert_eq!(msg_type, NFT_MSG_NEWTABLE);
-        assert_eq!(body.len(), 16);
+        // body = nfgenmsg(4) + NLA TABLE_NAME(12) + NLA TABLE_FLAGS(8) + NLA TABLE_USERDATA(20) = 44
+        assert_eq!(body.len(), 44);
         assert_eq!(body[0], 2);
     }
 

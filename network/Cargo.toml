@@ -13,7 +13,7 @@ anyhow = "1.0.102"
 rustix = { version = "1.1.4", features = ["process", "fs", "mount", "thread", "pipe", "net", "system", "runtime", "stdio", "termios"] }
 async-trait = "0.1.89"
 tracing = "0.1.44"
-# neli handles netlink socket bind/send/recv correctly. SocketAddrNetlink
-# isn't publicly exported from rustix 1.1.4, so we use neli for the socket
-# plumbing and keep our hand-rolled nftables attribute encoding.
-neli = "0.7.4"
+# nix handles netlink socket open/bind/send/recv correctly (same as rustables,
+# a known-working nftables implementation). neli was tried first but the
+# socket setup didn't match what the kernel expects.
+nix = { version = "0.30", features = ["socket"] }

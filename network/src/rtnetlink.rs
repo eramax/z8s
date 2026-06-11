@@ -23,9 +23,9 @@ use std::net::Ipv4Addr;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 
 use anyhow::{anyhow, Context, Result};
-use neli::consts::socket::NlFamily;
-use neli::socket::NlSocket as NlSocketInner;
-use neli::utils::Groups;
+use nix::sys::socket::{
+    self, AddressFamily, MsgFlags, NetlinkAddr, SockFlag, SockProtocol, SockType,
+};
 use rustix::thread::LinkNameSpaceType;
 use tracing::{debug, info, warn};
 
@@ -121,21 +121,29 @@ fn nlmsghdr(msg_type: u16, flags: u16, seq: u32, pid: u32, body: &[u8]) -> Vec<u
 /// single request/reply transaction. Returns the reply bytes (the caller
 /// parses interface indices etc.); errors carry the kernel errno.
 fn txn(build: impl FnOnce(u32) -> Vec<u8>, what: &str) -> Result<Vec<u8>> {
-    let sock = NlSocketInner::new(NlFamily::Route).context("open NETLINK_ROUTE socket")?;
-    sock.bind(Some(0), Groups::empty()).context("bind route socket")?;
-    let pid = sock.pid().context("route socket pid")?;
+    let sock = socket::socket(
+        AddressFamily::Netlink,
+        SockType::Raw,
+        SockFlag::empty(),
+        SockProtocol::NetlinkRoute,
+    )
+    .map_err(|e| anyhow!("{what}: open NETLINK_ROUTE socket: errno {}", e as i32))?;
+    // Bind to (pid=0, groups=0). pid=0 means "auto-assign" by the kernel.
+    let addr = NetlinkAddr::new(0, 0);
+    socket::bind(sock.as_raw_fd(), &addr)
+        .map_err(|e| anyhow!("{what}: bind route socket: errno {}", e as i32))?;
+    // Use the bound pid as nlmsg_pid (nft CLI / rustables use 0; RTNETLINK
+    // routing is more forgiving either way, but 0 is the userspace convention).
+    let pid = 0u32;
     let msg = build(pid);
 
     let raw = sock.as_raw_fd();
-    // SAFETY: `sock` is alive for the whole transaction; the borrowed fd is
-    // only used for the send/recv calls below.
-    let fd = unsafe { BorrowedFd::borrow_raw(raw) };
-    rustix::net::send(fd, &msg, rustix::net::SendFlags::empty())
-        .with_context(|| format!("{what}: send"))?;
+    socket::sendto(raw, &msg, &NetlinkAddr::new(0, 0), MsgFlags::empty())
+        .map_err(|e| anyhow!("{what}: send: errno {}", e as i32))?;
 
     let mut reply = vec![0u8; 8192];
-    let (_d, n) = rustix::net::recv(fd, &mut reply, rustix::net::RecvFlags::empty())
-        .with_context(|| format!("{what}: recv"))?;
+    let n = socket::recv(raw, &mut reply, MsgFlags::empty())
+        .map_err(|e| anyhow!("{what}: recv: errno {}", e as i32))?;
     reply.truncate(n);
     check_error(&reply, what)?;
     Ok(reply)
@@ -391,8 +399,14 @@ pub struct RouteSocket;
 impl RouteSocket {
     /// Verify we can open a `NETLINK_ROUTE` socket.
     pub fn open() -> Result<Self> {
-        let sock = NlSocketInner::new(NlFamily::Route).context("open NETLINK_ROUTE socket")?;
-        sock.bind(Some(0), Groups::empty()).context("bind route socket")?;
+        let sock = socket::socket(
+            AddressFamily::Netlink,
+            SockType::Raw,
+            SockFlag::empty(),
+            SockProtocol::NetlinkRoute,
+        )
+        .map_err(|e| anyhow!("open NETLINK_ROUTE socket: errno {}", e as i32))?;
+        let _ = socket::bind(sock.as_raw_fd(), &NetlinkAddr::new(0, 0));
         Ok(Self)
     }
 
