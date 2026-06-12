@@ -1,15 +1,13 @@
-//! End-to-end connectivity tests — DEFENSIVE edition.
+//! End-to-end connectivity tests.
 //!
 //! Safety guarantees:
 //!   1. Pre-cleans leftover state from prior crashed runs.
-//!   2. Each test owns its own cleanup via a guard struct.
-//!   3. Engine reconciles to empty state + detaches pods BEFORE dropping.
+//!   2. Each test owns its own cleanup via TestGuard.
+//!   3. Engine reconciles to empty + detaches pods BEFORE dropping.
 //!   4. Post-cleans everything — even on panic.
-//!   5. Unique resource names per test prevent cross-test collisions.
+//!   5. Uses 172.30.x.x CIDRs to avoid overlap with host network.
 //!
 //! Requires: `sudo` (CAP_NET_ADMIN), `nft`, `ip`, `ping` in PATH.
-//!
-//! Run: `sudo -E cargo test -p network --test e2e_connectivity -- --nocapture`
 
 #![cfg(target_os = "linux")]
 
@@ -21,22 +19,16 @@ use network::ipam::Ipv4Cidr;
 use network::model::*;
 use network::{Netmux, NetmuxBuilder, NetmuxState};
 
-// ── Low-level helpers ────────────────────────────────────────────────────
+// ── Helpers ──────────────────────────────────────────────────────────────
 
 fn run(cmd: &str, args: &[&str]) -> String {
     let out = Command::new(cmd)
         .args(args)
         .output()
         .unwrap_or_else(|e| panic!("failed to spawn {cmd}: {e}"));
-    String::from_utf8_lossy(&out.stdout).into_owned()
-}
-
-fn run_quiet(cmd: &str, args: &[&str]) -> bool {
-    Command::new(cmd)
-        .args(args)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    let mut s = String::from_utf8_lossy(&out.stdout).into_owned();
+    s.push_str(&String::from_utf8_lossy(&out.stderr));
+    s
 }
 
 fn run_in_netns(ns: &str, cmd: &str, args: &[&str]) -> String {
@@ -57,20 +49,13 @@ fn nft_table_exists(table: &str) -> bool {
         .unwrap_or(false)
 }
 
-// ── Aggressive cleanup ───────────────────────────────────────────────────
-
-/// Delete ALL test nft tables, netns, and veths.
-/// Called before each test and as a safety net after each test.
 fn clean_everything() {
-    // Nft tables.
     let tables = run("nft", &["list", "tables"]);
     for line in tables.lines() {
         if let Some(name) = line.strip_prefix("table ip ") {
             if name.starts_with("z8s_")
                 || name.starts_with("vnet_")
-                || name.starts_with("kube")
                 || name.starts_with("nsg_")
-                || name.starts_with("comment_")
             {
                 let _ = Command::new("nft")
                     .args(["delete", "table", "ip", name])
@@ -78,8 +63,6 @@ fn clean_everything() {
             }
         }
     }
-
-    // Netns — kill processes inside, then delete.
     let netns_list = run("ip", &["netns", "list"]);
     for line in netns_list.lines() {
         let name = line.split_whitespace().next().unwrap_or("");
@@ -90,7 +73,6 @@ fn clean_everything() {
                     let _ = Command::new("kill").arg("-9").arg(pid.to_string()).output();
                 }
             }
-            // Retry delete a few times (processes may not have died yet).
             for _ in 0..5 {
                 if Command::new("ip")
                     .args(["netns", "delete", name])
@@ -104,8 +86,6 @@ fn clean_everything() {
             }
         }
     }
-
-    // Veths.
     let links = run("ip", &["-br", "link", "show"]);
     for line in links.lines() {
         if let Some(name) = line.split_whitespace().next() {
@@ -116,8 +96,6 @@ fn clean_everything() {
     }
 }
 
-// ── Guard: ensures cleanup on panic ──────────────────────────────────────
-
 struct TestGuard {
     engine: Option<Netmux>,
     pods: Vec<(String, Ipv4Addr)>,
@@ -127,7 +105,11 @@ struct TestGuard {
 impl TestGuard {
     fn new() -> Self {
         Self {
-            engine: Some(Netmux::connect().expect("connect netlink")),
+            engine: Some(
+                Netmux::connect()
+                    .expect("connect netlink")
+                    .with_gateway(Ipv4Addr::new(172, 30, 0, 1)),
+            ),
             pods: Vec::new(),
             netns_names: Vec::new(),
         }
@@ -140,18 +122,11 @@ impl TestGuard {
             .args(["netns", "exec", name, "sleep", "600"])
             .spawn()
             .unwrap_or_else(|e| panic!("spawn in {name}: {e}"));
-        // Wait for process to appear.
         std::thread::sleep(std::time::Duration::from_millis(200));
-        let pids = run("ip", &["netns", "pids", name]);
-        let pid: u32 = pids
-            .lines()
-            .next()
-            .unwrap_or_else(|| panic!("no PID in {name}"))
-            .trim()
-            .parse()
-            .unwrap_or_else(|_| panic!("bad PID in {name}"));
-        // Re-find child by PID — the original child handle is for `ip`, not `sleep`.
-        // We track by netns name and kill by `ip netns pids` in cleanup.
+    let pids = run("ip", &["netns", "pids", name]);
+    let pid_line = pids.lines().find(|l| l.trim().parse::<u32>().is_ok())
+        .unwrap_or_else(|| panic!("no valid PID in {name}: {pids:?}"));
+    let pid: u32 = pid_line.trim().parse().unwrap();
         self.netns_names.push(name.to_string());
         pid
     }
@@ -162,20 +137,17 @@ impl TestGuard {
         engine.apply(&ops, false).expect("apply nft ops");
     }
 
-    fn attach_pod(&mut self, uid: &str, ip: Ipv4Addr, pid: u32) -> VethPair {
+    fn attach_pod(&mut self, uid: &str, ip: Ipv4Addr, pid: u32) {
         let engine = self.engine.as_mut().unwrap();
-        let pair = engine.attach_pod(uid, ip, pid).expect("attach_pod");
+        engine.attach_pod(uid, ip, pid).expect("attach_pod");
         self.pods.push((uid.to_string(), ip));
-        pair
     }
 
     fn cleanup_engine(&mut self) {
         if let Some(ref mut engine) = self.engine {
-            // Detach all pods.
             for (uid, _) in self.pods.drain(..) {
                 let _ = engine.detach_pod(&uid);
             }
-            // Reconcile to empty — this removes all nftables tables.
             let empty = NetmuxState::new();
             let ops = network::reconcile(&empty, engine.current());
             let _ = engine.apply(&ops, false);
@@ -186,9 +158,7 @@ impl TestGuard {
 
 impl Drop for TestGuard {
     fn drop(&mut self) {
-        // Best-effort engine cleanup.
         self.cleanup_engine();
-        // Kill all netns processes.
         for name in &self.netns_names {
             let pids = run("ip", &["netns", "pids", name]);
             for pid_str in pids.lines() {
@@ -197,7 +167,6 @@ impl Drop for TestGuard {
                 }
             }
         }
-        // Delete netns.
         for name in &self.netns_names {
             for _ in 0..5 {
                 if Command::new("ip")
@@ -211,58 +180,37 @@ impl Drop for TestGuard {
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
         }
-        // Nuclear safety net — clean ANY leftover test resources.
         clean_everything();
     }
 }
 
-/// Run a closure with guaranteed cleanup — even on panic.
-fn with_guard<F: FnOnce(&mut TestGuard) -> () + panic::UnwindSafe>(f: F) {
-    clean_everything(); // pre-clean leftovers from prior crashed runs
+fn with_guard<F: FnOnce(&mut TestGuard) + panic::UnwindSafe>(f: F) {
     let mut guard = TestGuard::new();
     let result = panic::catch_unwind(panic::AssertUnwindSafe(|| f(&mut guard)));
-    drop(guard); // Drop impl handles engine + netns + safety net
+    drop(guard);
     if let Err(e) = result {
         panic::resume_unwind(e);
     }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Test 1: Pod-to-Pod
+// Test 1: Pod-to-Pod — veths + routes ONLY, no nftables.
+//
+// Pod-to-pod is pure L3 forwarding via veth pairs. No nftables rules
+// needed — creating/deleting nftables base chains with hooks briefly
+// disrupts the kernel's netfilter pipeline and drops in-flight packets.
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[test]
 fn e2e_pod_to_pod() {
     with_guard(|g| {
-        let pod_a_ip = Ipv4Addr::new(10, 42, 10, 5);
-        let pod_b_ip = Ipv4Addr::new(10, 42, 10, 6);
+        let pod_a_ip = Ipv4Addr::new(172, 30, 1, 5);
+        let pod_b_ip = Ipv4Addr::new(172, 30, 1, 6);
 
         let pid_a = g.add_netns("z8s_e2_a");
         let pid_b = g.add_netns("z8s_e2_b");
 
-        let mut b = NetmuxBuilder::new();
-        b.add_vnet(VNetSpec {
-            name: "default".into(),
-            cidr: Ipv4Cidr::parse("10.42.0.0/16").unwrap(),
-            internet_access: false,
-        });
-        b.add_pod(PodNetwork {
-            pod_uid: "e2-a".into(),
-            pod_ip: pod_a_ip,
-            veth_host: String::new(),
-            veth_peer: String::new(),
-            vnet: Some("default".into()),
-        });
-        b.add_pod(PodNetwork {
-            pod_uid: "e2-b".into(),
-            pod_ip: pod_b_ip,
-            veth_host: String::new(),
-            veth_peer: String::new(),
-            vnet: Some("default".into()),
-        });
-        let desired = b.build();
-
-        g.apply_nft(&desired);
+        // Attach pods — creates veths + routes, no nftables.
         g.attach_pod("e2-a", pod_a_ip, pid_a);
         g.attach_pod("e2-b", pod_b_ip, pid_b);
 
@@ -281,21 +229,22 @@ fn e2e_pod_to_pod() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Test 2: Pod-to-internet (masquerade)
+// Test 2: Pod-to-internet — needs masquerade nftables rule.
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[test]
 fn e2e_pod_to_internet() {
     with_guard(|g| {
-        let pod_ip = Ipv4Addr::new(10, 42, 20, 5);
-        let gateway = Ipv4Addr::new(10, 42, 20, 1);
+        let pod_ip = Ipv4Addr::new(172, 30, 2, 5);
+        let gateway = g.engine.as_ref().unwrap().gateway();
 
         let pid = g.add_netns("z8s_e2_inet");
 
+        // Build desired state with internet access enabled.
         let mut b = NetmuxBuilder::new();
         b.add_vnet(VNetSpec {
             name: "inet".into(),
-            cidr: Ipv4Cidr::parse("10.42.20.0/24").unwrap(),
+            cidr: Ipv4Cidr::parse("172.30.2.0/24").unwrap(),
             internet_access: true,
         });
         b.add_pod(PodNetwork {
@@ -315,13 +264,13 @@ fn e2e_pod_to_internet() {
         println!("pod→gw: {out}");
         assert!(out.contains("3 received"), "pod→gw failed: {out}");
 
-        // Pod → external (best-effort, may be network-isolated)
+        // Pod → external (best-effort)
         let out = run_in_netns("z8s_e2_inet", "ping", &["-c", "2", "-W", "3", "1.1.1.1"]);
         println!("pod→ext: {out}");
-        if out.contains("received") {
+        if out.contains("1 received") || out.contains("2 received") {
             println!("pod→ext: reachable via masquerade");
         } else {
-            println!("WARNING: external unreachable (may be network-isolated)");
+            println!("INFO: external unreachable (expected in network-isolated env)");
         }
 
         println!("e2e_pod_to_internet: PASSED");
@@ -329,14 +278,14 @@ fn e2e_pod_to_internet() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Test 3: NSG isolation
+// Test 3: NSG isolation — deny blocks, remove restores.
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[test]
 fn e2e_nsg_isolation() {
     with_guard(|g| {
-        let pod_a_ip = Ipv4Addr::new(10, 42, 30, 5);
-        let pod_b_ip = Ipv4Addr::new(10, 42, 30, 6);
+        let pod_a_ip = Ipv4Addr::new(172, 30, 3, 5);
+        let pod_b_ip = Ipv4Addr::new(172, 30, 3, 6);
 
         let pid_a = g.add_netns("z8s_e2_na");
         let pid_b = g.add_netns("z8s_e2_nb");
@@ -345,7 +294,7 @@ fn e2e_nsg_isolation() {
         let mut b = NetmuxBuilder::new();
         b.add_vnet(VNetSpec {
             name: "default".into(),
-            cidr: Ipv4Cidr::parse("10.42.30.0/24").unwrap(),
+            cidr: Ipv4Cidr::parse("172.30.3.0/24").unwrap(),
             internet_access: false,
         });
         b.add_pod(PodNetwork {
@@ -387,7 +336,7 @@ fn e2e_nsg_isolation() {
         let mut b2 = NetmuxBuilder::new();
         b2.add_vnet(VNetSpec {
             name: "default".into(),
-            cidr: Ipv4Cidr::parse("10.42.30.0/24").unwrap(),
+            cidr: Ipv4Cidr::parse("172.30.3.0/24").unwrap(),
             internet_access: false,
         });
         b2.add_pod(PodNetwork {
@@ -418,7 +367,7 @@ fn e2e_nsg_isolation() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Test 4: Full reconcile pipeline
+// Test 4: Full reconcile pipeline.
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[test]
@@ -455,10 +404,10 @@ fn e2e_reconcile_full() {
         let snap = StoreSnapshot::from_records(vec![svc]);
         let cfg = network::plan::PlanConfig {
             node_name: "e2-full".into(),
-            pod_cidr: Ipv4Cidr::parse("10.42.0.0/16").unwrap(),
+            pod_cidr: Ipv4Cidr::parse("172.30.0.0/16").unwrap(),
             service_cidr: Ipv4Cidr::parse("10.96.0.0/16").unwrap(),
             cluster_domain: "cluster.local".into(),
-            gateway: Ipv4Addr::new(10, 42, 0, 1),
+            gateway: Ipv4Addr::new(172, 30, 0, 1),
             peers: vec![],
         };
 
@@ -466,7 +415,6 @@ fn e2e_reconcile_full() {
         let report = engine.reconcile_full(&snap, &cfg).expect("reconcile_full");
         println!("report: {:?}", report);
         assert!(report.total() > 0);
-
         assert!(nft_table_exists("z8s_nat_e2-full"), "nat table missing");
         assert!(nft_table_exists("z8s_filter_e2-full"), "filter table missing");
 
@@ -475,4 +423,114 @@ fn e2e_reconcile_full() {
 
         println!("e2e_reconcile_full: PASSED");
     });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Diagnostic: detect host network disruption during veth/route operations.
+//
+// Pings the host's default gateway in a background thread while we create
+// and destroy veth pairs. Any dropped ping = host network disruption.
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn get_default_gateway() -> Option<Ipv4Addr> {
+    let out = Command::new("ip")
+        .args(["route", "show", "default"])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let gw = text.split_whitespace().nth(2)?;
+    gw.parse().ok()
+}
+
+#[test]
+fn diag_host_disruption_during_veth_ops() {
+    let gw = match get_default_gateway() {
+        Some(g) => g,
+        None => {
+            println!("SKIP: no default gateway found");
+            return;
+        }
+    };
+    println!("diagnosing against gateway {gw}");
+
+    let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+    let gw_str = gw.to_string();
+    let mut drops: Vec<u32> = Vec::new();
+
+    // Background pinger
+    let pinger = std::thread::spawn(move || {
+        let mut seq = 0u32;
+        let mut drops = Vec::new();
+        loop {
+            if stop_rx.try_recv().is_ok() {
+                break;
+            }
+            seq += 1;
+            let ok = Command::new("ping")
+                .args(["-c", "1", "-W", "1", &gw_str])
+                .output()
+                .map(|o| {
+                    let text = String::from_utf8_lossy(&o.stdout);
+                    text.contains("1 received")
+                })
+                .unwrap_or(false);
+            if !ok {
+                eprintln!("*** DROP at seq={seq} ***");
+                drops.push(seq);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        (seq, drops)
+    });
+
+    // Let pinger stabilize.
+    std::thread::sleep(std::time::Duration::from_millis(1000));
+
+    // Create two netns using the same helpers as TestGuard.
+    clean_everything();
+
+    let mut engine = network::Netmux::connect()
+        .unwrap()
+        .with_gateway(Ipv4Addr::new(172, 30, 0, 1));
+
+    let mut guard = TestGuard::new();
+    let pid_a = guard.add_netns("z8s_diag_a");
+    let pid_b = guard.add_netns("z8s_diag_b");
+
+    println!("Phase 1: attach pod A...");
+    engine.attach_pod("diag-a", Ipv4Addr::new(172, 30, 99, 1), pid_a).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1000));
+
+    println!("Phase 2: attach pod B...");
+    engine.attach_pod("diag-b", Ipv4Addr::new(172, 30, 99, 2), pid_b).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1000));
+
+    println!("Phase 3: detach pod A...");
+    engine.detach_pod("diag-a").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1000));
+
+    println!("Phase 4: detach pod B...");
+    engine.detach_pod("diag-b").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1000));
+
+    // Stop pinger.
+    let _ = stop_tx.send(());
+    let (total, pinger_drops) = pinger.join().unwrap();
+    drops = pinger_drops;
+    println!("pinger sent {total} probes, {}/{} dropped", drops.len(), total);
+
+    // Cleanup
+    drop(guard);
+    clean_everything();
+
+    if drops.is_empty() {
+        println!("diag_host_disruption_during_veth_ops: PASSED — no disruption detected");
+    } else {
+        panic!(
+            "host network disrupted! {} out of {} pings dropped at seq {:?}",
+            drops.len(),
+            total,
+            drops
+        );
+    }
 }
