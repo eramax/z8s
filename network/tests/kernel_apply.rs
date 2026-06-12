@@ -159,8 +159,8 @@ fn kernel_apply_and_cleanup() {
         "expected drop verdict in nsg, got: {}",
         nsg_listing
     );
-    // Note: comments are stored in user data (NFTA_RULE_USERDATA) which we
-    // don't currently encode, so we skip checking for them in the kernel.
+    // Note: NFTA_RULE_USERDATA comment encoding not yet implemented;
+    // skip checking for the comment in the kernel output.
 
     // ── Clean up: reconcile against empty state ───────────────────
     let empty = NetmuxState::new();
