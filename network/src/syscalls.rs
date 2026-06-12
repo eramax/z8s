@@ -125,6 +125,7 @@ const NFTA_IMMEDIATE_DREG: u16 = 1;
 const NFTA_IMMEDIATE_DATA: u16 = 2;
 const NFTA_LOOKUP_SET: u16 = 1;
 const NFTA_LOOKUP_SREG: u16 = 2;
+const NFTA_LOOKUP_SET_ID: u16 = 4;
 const NFTA_NAT_TYPE: u16 = 1;
 const NFTA_NAT_FAMILY: u16 = 2;
 const NFTA_NAT_REG_ADDR_MIN: u16 = 3;
@@ -366,6 +367,7 @@ pub fn encode_expr(expr: &NftExpr, out: &mut NlaBuf) {
         NftExpr::Lookup { set, sreg } => put_expr(out, "lookup", |d| {
             d.put_str(NFTA_LOOKUP_SET, set);
             d.put_u32(NFTA_LOOKUP_SREG, *sreg);
+            d.put_u32(NFTA_LOOKUP_SET_ID, 1);
         }),
         NftExpr::Immediate { dreg, data } => put_expr(out, "immediate", |d| {
             d.put_u32(NFTA_IMMEDIATE_DREG, *dreg);

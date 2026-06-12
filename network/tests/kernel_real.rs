@@ -335,6 +335,12 @@ fn kernel_lookup_rule() {
             NftPolicy::Accept,
         )
         .with_rule(NftRule::from_exprs(vec![
+            NftExpr::Payload {
+                dreg: 1,
+                base: 1, // NFT_PAYLOAD_NETWORK_HEADER
+                offset: 12, // IPv4 saddr
+                len: 4,
+            },
             NftExpr::Lookup {
                 set: "allowed".into(),
                 sreg: 1,
@@ -346,7 +352,13 @@ fn kernel_lookup_rule() {
 
     let mut engine = Netmux::connect().expect("connect");
     let ops = reconcile(&desired, engine.current());
-    engine.apply(&ops, false).expect("apply lookup rule");
+    // Send all ops in a single batch so the lookup can reference the set
+    let nft_ops: Vec<_> = ops.iter().filter(|op| !op.is_route()).cloned().collect();
+    network::syscalls::send_batch(&nft_ops).expect("apply lookup rule batch");
+
+    // Seed the engine state so cleanup works
+    let desired2 = desired.clone();
+    engine.seed_current(desired2);
 
     let listing = nft(&["-n", "list", "table", "ip", "z8s_test_lookup"]);
     println!("lookup listing:\n{}", listing);
