@@ -468,7 +468,9 @@ pub fn encode_op(op: &NetlinkOp) -> (u16, Vec<u8>) {
                 b.put_str(NFTA_CHAIN_TYPE, chain.kind.as_str());
                 b.put_nested(NFTA_CHAIN_HOOK, |h| {
                     h.put_u32(NFTA_HOOK_HOOKNUM, hook.as_u32());
-                    h.put_u32(NFTA_HOOK_PRIORITY, chain.priority as u32);
+                    // Priority must be encoded as i32 (matching pelagos/nft CLI).
+                    let prio = chain.priority;
+                    h.put_slice(NFTA_HOOK_PRIORITY, &prio.to_be_bytes());
                 });
                 b.put_u32(NFTA_CHAIN_POLICY, chain.policy.as_u32());
             }
@@ -755,7 +757,6 @@ fn send_and_drain_acks(
     // Drain ACK responses (matching pelagos recvmsg loop)
     let mut recv_buf = vec![0u8; 32768];
     let mut remaining = num_ack;
-    eprintln!("[drain] num_ack={}, waiting for {} ACKs", num_ack, remaining);
     while remaining > 0 {
         let iov_recv = libc::iovec {
             iov_base: recv_buf.as_mut_ptr() as *mut _,
@@ -774,7 +775,6 @@ fn send_and_drain_acks(
             return Err(e);
         }
         let n = n as usize;
-        eprintln!("[drain] recvmsg returned {} bytes", n);
         let mut offset = 0usize;
         while offset + 16 <= n {
             let msg_len =
@@ -786,18 +786,14 @@ fn send_and_drain_acks(
             if msg_type == NLMSG_ERROR_TYPE && offset + 20 <= n {
                 let error =
                     i32::from_ne_bytes(recv_buf[offset + 16..offset + 20].try_into().unwrap());
-                eprintln!("[drain] NLMSG_ERROR errno={} remaining={}", error, remaining);
                 if error != 0 {
                     unsafe { libc::close(fd) };
                     return Err(std::io::Error::from_raw_os_error(-error));
                 }
                 remaining = remaining.saturating_sub(1);
             } else if msg_type == NLMSG_DONE_TYPE {
-                eprintln!("[drain] NLMSG_DONE");
                 remaining = 0;
                 break;
-            } else {
-                eprintln!("[drain] other msg_type={}", msg_type);
             }
             offset += align4(msg_len);
         }

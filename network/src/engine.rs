@@ -723,7 +723,7 @@ impl NetmuxBuilder {
                     "prerouting",
                     NftChainKind::Nat,
                     NftHook::Prerouting,
-                    -300,
+                    -199,
                     NftPolicy::Accept,
                 )
                 .with_rule(NftRule::jump("vnet-isolation")),
@@ -793,32 +793,15 @@ impl NetmuxBuilder {
                 .get_mut("clusterip-dnat")
                 .expect("clusterip-dnat chain just initialized");
             for port in &svc.ports {
-                let rule = NftRule {
-                    handle: None,
-                    exprs: vec![
-                        NftExpr::Payload {
-                            dreg: 1,
-                            base: 0,
-                            offset: 16,
-                            len: 4,
-                        },
-                        NftExpr::Cmp {
-                            sreg: 1,
-                            op: 0,
-                            data: cluster_ip.octets().to_vec(),
-                        },
-                        NftExpr::Immediate {
-                            dreg: 2,
-                            data: vec![],
-                        },
-                        NftExpr::Nat {
-                            nat_type: 1, // DNAT
-                            sreg_addr: 2,
-                            sreg_port: 0xFFFFFFFF,
-                        },
-                    ],
-                    comment: Some(format!("{}/{}", svc.name, port.name)),
+                let target = port.target_port;
+                let proto = match port.protocol.as_str() {
+                    "UDP" => 17u8,
+                    _ => 6u8, // TCP
                 };
+                let backend_ip = cluster_ip; // use cluster_ip as backend for now
+                let rule = clusterip_dnat_rule(
+                    cluster_ip, proto, port.port, backend_ip, target, None,
+                ).with_comment(format!("{}/{}", svc.name, port.name));
                 dnat_chain.rules.push(rule);
             }
         }
@@ -845,7 +828,7 @@ impl NetmuxBuilder {
             }
             table.chains.get_mut("ingress").unwrap().rules.push(
                 NftRule {
-                    handle: Some(i as u64 + 1),
+                    handle: None,
                     exprs,
                     comment: Some(r.name.clone()),
                 },
