@@ -95,6 +95,7 @@ pub fn plan(snap: &StoreSnapshot, cfg: &PlanConfig) -> NetmuxState {
     plan_services(snap, &pods, cfg, &mut nat);
     plan_masquerade(cfg, &mut nat);
     plan_nsgs(snap, &mut filter);
+    plan_dns_firewall(&mut filter);
     plan_vnets(snap, &mut state, &mut filter);
     plan_network_policies(snap, &pods, &mut state, &filter.name);
     plan_catch_all(&pods, cfg, &mut filter);
@@ -285,6 +286,35 @@ fn resolve_backends(
 fn plan_masquerade(cfg: &PlanConfig, nat: &mut NftTable) {
     let rule = masquerade_rule(&cfg.pod_cidr).with_comment("pod-cidr-masquerade");
     push_rule(nat, "postrouting", rule);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DNS firewall — allow DNS (UDP/TCP 53) into the INPUT chain
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn plan_dns_firewall(filter: &mut NftTable) {
+    // UDP DNS
+    let udp_dns = NftRule::from_exprs({
+        let mut exprs = Vec::new();
+        exprs.extend(match_l4proto(PROTO_UDP));
+        exprs.extend(match_dport(53));
+        exprs.push(NftExpr::Accept);
+        exprs
+    })
+    .with_comment("dns-udp-accept");
+
+    // TCP DNS
+    let tcp_dns = NftRule::from_exprs({
+        let mut exprs = Vec::new();
+        exprs.extend(match_l4proto(PROTO_TCP));
+        exprs.extend(match_dport(53));
+        exprs.push(NftExpr::Accept);
+        exprs
+    })
+    .with_comment("dns-tcp-accept");
+
+    push_rule(filter, "input", udp_dns);
+    push_rule(filter, "input", tcp_dns);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -749,5 +779,34 @@ mod tests {
         )]);
         let state = plan(&snap, &cfg());
         assert!(state.routes.is_empty());
+    }
+
+    #[test]
+    fn plan_dns_firewall_adds_input_rules() {
+        let snap = StoreSnapshot::from_records(vec![]);
+        let state = plan(&snap, &cfg());
+        let filter = state.table(NftFamily::Ip, "z8s_filter_node-a").unwrap();
+        let input = &filter.chains["input"];
+
+        // Should have exactly 2 DNS rules: UDP 53 and TCP 53.
+        let dns_rules: Vec<_> = input
+            .rules
+            .iter()
+            .filter(|r| {
+                r.comment.as_deref() == Some("dns-udp-accept")
+                    || r.comment.as_deref() == Some("dns-tcp-accept")
+            })
+            .collect();
+        assert_eq!(dns_rules.len(), 2, "expected 2 DNS firewall rules, got {}", input.rules.len());
+
+        // Verify UDP rule has port 53 match + accept.
+        let udp = input.rules.iter().find(|r| r.comment.as_deref() == Some("dns-udp-accept")).unwrap();
+        assert!(udp.exprs.iter().any(|e| matches!(e, NftExpr::Accept)));
+        assert!(udp.exprs.iter().any(|e| matches!(e, NftExpr::Meta { kind: META_L4PROTO, .. })));
+
+        // Verify TCP rule has port 53 match + accept.
+        let tcp = input.rules.iter().find(|r| r.comment.as_deref() == Some("dns-tcp-accept")).unwrap();
+        assert!(tcp.exprs.iter().any(|e| matches!(e, NftExpr::Accept)));
+        assert!(tcp.exprs.iter().any(|e| matches!(e, NftExpr::Meta { kind: META_L4PROTO, .. })));
     }
 }

@@ -1118,3 +1118,63 @@ fn netdev_table_chain() {
     let ops = reconcile(&empty, engine.current());
     engine.apply(&ops, false).expect("cleanup");
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Test 25: DNS firewall rules — UDP/TCP 53 accept in INPUT chain
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn kernel_dns_firewall_rules() {
+    cleanup_tables(&["z8s_filter_dns_fw"]);
+
+    let mut desired = NetmuxState::new();
+    let mut table = NftTable::new("z8s_filter_dns_fw", NftFamily::Ip);
+    table.chains.insert(
+        "input".into(),
+        NftChain::base(
+            "input",
+            NftChainKind::Filter,
+            NftHook::Input,
+            0,
+            NftPolicy::Accept,
+        ),
+    );
+    desired.tables.insert((NftFamily::Ip, "z8s_filter_dns_fw".into()), table);
+
+    // Manually apply DNS firewall rules (same pattern as plan_dns_firewall).
+    let table = desired.tables.get_mut(&(NftFamily::Ip, "z8s_filter_dns_fw".into())).unwrap();
+    let udp_dns = NftRule::from_exprs({
+        let mut exprs = Vec::new();
+        exprs.extend(match_l4proto(PROTO_UDP));
+        exprs.extend(match_dport(53));
+        exprs.push(NftExpr::Accept);
+        exprs
+    })
+    .with_comment("dns-udp-accept");
+    let tcp_dns = NftRule::from_exprs({
+        let mut exprs = Vec::new();
+        exprs.extend(match_l4proto(PROTO_TCP));
+        exprs.extend(match_dport(53));
+        exprs.push(NftExpr::Accept);
+        exprs
+    })
+    .with_comment("dns-tcp-accept");
+    table.chains.get_mut("input").unwrap().rules.push(udp_dns);
+    table.chains.get_mut("input").unwrap().rules.push(tcp_dns);
+
+    let mut engine = Netmux::connect().expect("connect");
+    let ops = reconcile(&desired, engine.current());
+    engine.apply(&ops, false).expect("apply DNS firewall rules");
+
+    let listing = nft(&["-n", "list", "table", "ip", "z8s_filter_dns_fw"]);
+    println!("dns firewall listing:\n{}", listing);
+    assert!(listing.contains("udp"), "UDP rule missing");
+    assert!(listing.contains("tcp"), "TCP rule missing");
+    assert!(listing.contains("dport 53"), "port 53 missing");
+    assert!(listing.contains("accept"), "accept verdict missing");
+
+    // Cleanup.
+    let empty = NetmuxState::new();
+    let ops = reconcile(&empty, engine.current());
+    engine.apply(&ops, false).expect("cleanup");
+}

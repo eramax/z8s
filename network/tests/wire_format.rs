@@ -399,11 +399,11 @@ fn encode_meta_expr() {
     assert!(elem_attrs[1].is_nested); // NFTA_EXPR_DATA
 
     let data_attrs = parse_nested_attrs(&elem_attrs[1].payload);
-    // NFTA_META_KEY = 1, NFTA_META_DREG = 2
-    let key = data_attrs.iter().find(|a| a.base_type() == 1).unwrap();
-    assert_eq!(read_u32_be(&key.payload, 0), 16); // L4PROTO
-    let dreg = data_attrs.iter().find(|a| a.base_type() == 2).unwrap();
+    // NFTA_META_DREG = 1, NFTA_META_KEY = 2 (kernel enum order)
+    let dreg = data_attrs.iter().find(|a| a.base_type() == 1).unwrap();
     assert_eq!(read_u32_be(&dreg.payload, 0), 1);
+    let key = data_attrs.iter().find(|a| a.base_type() == 2).unwrap();
+    assert_eq!(read_u32_be(&key.payload, 0), 16); // L4PROTO
 }
 
 #[test]

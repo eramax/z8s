@@ -113,8 +113,8 @@ const NFT_GOTO: u32 = 0xFFFF_FFFC; // -4
 const NFT_RETURN: u32 = 0xFFFF_FFFB; // -5
 
 // Expression attrs.
-const NFTA_META_DREG: u16 = 2;
-const NFTA_META_KEY: u16 = 1;
+const NFTA_META_DREG: u16 = 1;
+const NFTA_META_KEY: u16 = 2;
 const NFTA_CMP_SREG: u16 = 1;
 const NFTA_CMP_OP: u16 = 2;
 const NFTA_CMP_DATA: u16 = 3;
