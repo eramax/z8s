@@ -55,7 +55,7 @@ pub use model::{
 };
 pub use plan::{plan, PlanConfig};
 pub use rtnetlink::{host_veth_name, peer_veth_name, RouteSocket};
-pub use syscalls::{encode_op, nfgen_header, NlSocket, NlaBuf};
+pub use syscalls::{encode_op, nfgen_header, send_batch, NlSocket, NlaBuf};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // NetworkEngine trait — controllers/services depend on this

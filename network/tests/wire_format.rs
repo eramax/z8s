@@ -146,12 +146,12 @@ fn encode_add_table_body_layout() {
 
     // NFTA_TABLE_NAME = 1
     assert_eq!(attrs[0].base_type(), 1);
-    assert_eq!(attrs[0].payload, b"filter");
+    assert_eq!(attrs[0].payload, b"filter\0");
 
     // NFTA_TABLE_FLAGS = 2
     assert_eq!(attrs[1].base_type(), 2);
     assert_eq!(attrs[1].payload.len(), 4);
-    assert_eq!(read_u32(&attrs[1].payload, 0), 0);
+    assert_eq!(read_u32_be(&attrs[1].payload, 0), 0);
 }
 
 // ─── Chain Tests ──────────────────────────────────────────────────────────
@@ -183,7 +183,7 @@ fn encode_chain_with_hook_is_nested() {
     // NFTA_HOOK_HOOKNUM = 1, NFTA_HOOK_PRIORITY = 2.
     assert_eq!(hook_attrs.len(), 2);
     assert_eq!(hook_attrs[0].base_type(), 1); // HOOKNUM
-    assert_eq!(read_u32(&hook_attrs[0].payload, 0), 1); // NF_INET_LOCAL_IN
+    assert_eq!(read_u32_be(&hook_attrs[0].payload, 0), 1); // NF_INET_LOCAL_IN
     assert_eq!(hook_attrs[1].base_type(), 2); // PRIORITY
     assert_eq!(
         i32::from_ne_bytes(hook_attrs[1].payload[0..4].try_into().unwrap()),
@@ -211,7 +211,7 @@ fn encode_chain_policy_value() {
     let policy_attr = attrs.iter().find(|a| a.base_type() == 5);
     assert!(policy_attr.is_some(), "NFTA_CHAIN_POLICY not found");
     let policy = policy_attr.unwrap();
-    assert_eq!(read_u32(&policy.payload, 0), 0); // NF_DROP = 0
+    assert_eq!(read_u32_be(&policy.payload, 0), 0); // NF_DROP = 0
 }
 
 #[test]
@@ -233,7 +233,7 @@ fn encode_chain_type_is_string() {
     // NFTA_CHAIN_TYPE = 7
     let type_attr = attrs.iter().find(|a| a.base_type() == 7);
     assert!(type_attr.is_some(), "NFTA_CHAIN_TYPE not found");
-    assert_eq!(type_attr.unwrap().payload, b"nat");
+    assert_eq!(type_attr.unwrap().payload, b"nat\0");
 }
 
 #[test]
@@ -272,11 +272,11 @@ fn encode_drop_rule_verdict() {
 
     // NFTA_RULE_TABLE = 1
     assert_eq!(attrs[0].base_type(), 1);
-    assert_eq!(attrs[0].payload, b"filter");
+    assert_eq!(attrs[0].payload, b"filter\0");
 
     // NFTA_RULE_CHAIN = 2
     assert_eq!(attrs[1].base_type(), 2);
-    assert_eq!(attrs[1].payload, b"input");
+    assert_eq!(attrs[1].payload, b"input\0");
 
     // NFTA_RULE_EXPRESSIONS = 4, nested
     let exprs_attr = attrs.iter().find(|a| a.base_type() == 4);
@@ -294,7 +294,7 @@ fn encode_drop_rule_verdict() {
     // Should have NAME (1) and DATA (2).
     assert!(elem_attrs.len() >= 2);
     assert_eq!(elem_attrs[0].base_type(), 1); // NAME
-    assert_eq!(elem_attrs[0].payload, b"immediate");
+    assert_eq!(elem_attrs[0].payload, b"immediate\0");
     assert!(elem_attrs[1].is_nested); // DATA should be nested
 
     // Inside the expression data, find the verdict.
@@ -302,7 +302,7 @@ fn encode_drop_rule_verdict() {
     // NFTA_IMMEDIATE_DREG = 1, NFTA_IMMEDIATE_DATA = 2
     let dreg = data_attrs.iter().find(|a| a.base_type() == 1);
     assert!(dreg.is_some());
-    assert_eq!(read_u32(&dreg.unwrap().payload, 0), 0); // NFT_REG_VERDICT = 0
+    assert_eq!(read_u32_be(&dreg.unwrap().payload, 0), 0); // NFT_REG_VERDICT = 0
 
     let verdict_data = data_attrs.iter().find(|a| a.base_type() == 2);
     assert!(verdict_data.is_some());
@@ -366,7 +366,7 @@ fn encode_jump_rule_verdict_chain_name() {
 
     // NFTA_VERDICT_CHAIN = 2
     let chain = verdict_attrs.iter().find(|a| a.base_type() == 2).unwrap();
-    assert_eq!(chain.payload, b"nsg-rules");
+    assert_eq!(chain.payload, b"nsg-rules\0");
 }
 
 // ─── Expression Tests ─────────────────────────────────────────────────────
@@ -389,15 +389,15 @@ fn encode_meta_expr() {
 
     let elem_attrs = parse_nested_attrs(&attrs[0].payload);
     assert_eq!(elem_attrs[0].base_type(), 1); // NFTA_EXPR_NAME
-    assert_eq!(elem_attrs[0].payload, b"meta");
+    assert_eq!(elem_attrs[0].payload, b"meta\0");
     assert!(elem_attrs[1].is_nested); // NFTA_EXPR_DATA
 
     let data_attrs = parse_nested_attrs(&elem_attrs[1].payload);
     // NFTA_META_KEY = 1, NFTA_META_DREG = 2
     let key = data_attrs.iter().find(|a| a.base_type() == 1).unwrap();
-    assert_eq!(read_u32(&key.payload, 0), 16); // L4PROTO
+    assert_eq!(read_u32_be(&key.payload, 0), 16); // L4PROTO
     let dreg = data_attrs.iter().find(|a| a.base_type() == 2).unwrap();
-    assert_eq!(read_u32(&dreg.payload, 0), 1);
+    assert_eq!(read_u32_be(&dreg.payload, 0), 1);
 }
 
 #[test]
@@ -413,15 +413,15 @@ fn encode_cmp_expr() {
     );
     let attrs = parse_nested_attrs(b.as_slice());
     let elem_attrs = parse_nested_attrs(&attrs[0].payload);
-    assert_eq!(elem_attrs[0].payload, b"cmp");
+    assert_eq!(elem_attrs[0].payload, b"cmp\0");
     let data_attrs = parse_nested_attrs(&elem_attrs[1].payload);
 
     // NFTA_CMP_SREG = 1
     let sreg = data_attrs.iter().find(|a| a.base_type() == 1).unwrap();
-    assert_eq!(read_u32(&sreg.payload, 0), 1);
+    assert_eq!(read_u32_be(&sreg.payload, 0), 1);
     // NFTA_CMP_OP = 2
     let op = data_attrs.iter().find(|a| a.base_type() == 2).unwrap();
-    assert_eq!(read_u32(&op.payload, 0), 0); // EQ
+    assert_eq!(read_u32_be(&op.payload, 0), 0); // EQ
     // NFTA_CMP_DATA = 3 (nested)
     let cmp_data = data_attrs.iter().find(|a| a.base_type() == 3).unwrap();
     assert!(cmp_data.is_nested);
@@ -444,17 +444,17 @@ fn encode_payload_expr() {
     );
     let attrs = parse_nested_attrs(b.as_slice());
     let elem_attrs = parse_nested_attrs(&attrs[0].payload);
-    assert_eq!(elem_attrs[0].payload, b"payload");
+    assert_eq!(elem_attrs[0].payload, b"payload\0");
     let data_attrs = parse_nested_attrs(&elem_attrs[1].payload);
 
     let dreg = data_attrs.iter().find(|a| a.base_type() == 1).unwrap();
-    assert_eq!(read_u32(&dreg.payload, 0), 1);
+    assert_eq!(read_u32_be(&dreg.payload, 0), 1);
     let base = data_attrs.iter().find(|a| a.base_type() == 2).unwrap();
-    assert_eq!(read_u32(&base.payload, 0), 1);
+    assert_eq!(read_u32_be(&base.payload, 0), 1);
     let off = data_attrs.iter().find(|a| a.base_type() == 3).unwrap();
-    assert_eq!(read_u32(&off.payload, 0), 16);
+    assert_eq!(read_u32_be(&off.payload, 0), 16);
     let length = data_attrs.iter().find(|a| a.base_type() == 4).unwrap();
-    assert_eq!(read_u32(&length.payload, 0), 4);
+    assert_eq!(read_u32_be(&length.payload, 0), 4);
 }
 
 #[test]
@@ -470,21 +470,21 @@ fn encode_nat_expr() {
     );
     let attrs = parse_nested_attrs(b.as_slice());
     let elem_attrs = parse_nested_attrs(&attrs[0].payload);
-    assert_eq!(elem_attrs[0].payload, b"nat");
+    assert_eq!(elem_attrs[0].payload, b"nat\0");
     let data_attrs = parse_nested_attrs(&elem_attrs[1].payload);
 
     // NFTA_NAT_TYPE = 1
     let nat_type = data_attrs.iter().find(|a| a.base_type() == 1).unwrap();
-    assert_eq!(read_u32(&nat_type.payload, 0), 1); // DNAT
+    assert_eq!(read_u32_be(&nat_type.payload, 0), 1); // DNAT
     // NFTA_NAT_FAMILY = 2
     let family = data_attrs.iter().find(|a| a.base_type() == 2).unwrap();
-    assert_eq!(read_u32(&family.payload, 0), 2); // NFPROTO_IPV4
+    assert_eq!(read_u32_be(&family.payload, 0), 2); // NFPROTO_IPV4
     // NFTA_NAT_REG_ADDR_MIN = 3
     let addr_min = data_attrs.iter().find(|a| a.base_type() == 3).unwrap();
-    assert_eq!(read_u32(&addr_min.payload, 0), 1);
+    assert_eq!(read_u32_be(&addr_min.payload, 0), 1);
     // NFTA_NAT_REG_PROTO_MIN = 5
     let proto_min = data_attrs.iter().find(|a| a.base_type() == 5).unwrap();
-    assert_eq!(read_u32(&proto_min.payload, 0), 2);
+    assert_eq!(read_u32_be(&proto_min.payload, 0), 2);
 }
 
 #[test]
@@ -502,15 +502,15 @@ fn encode_bitwise_expr() {
     );
     let attrs = parse_nested_attrs(b.as_slice());
     let elem_attrs = parse_nested_attrs(&attrs[0].payload);
-    assert_eq!(elem_attrs[0].payload, b"bitwise");
+    assert_eq!(elem_attrs[0].payload, b"bitwise\0");
     let data_attrs = parse_nested_attrs(&elem_attrs[1].payload);
 
     let sreg = data_attrs.iter().find(|a| a.base_type() == 1).unwrap();
-    assert_eq!(read_u32(&sreg.payload, 0), 1);
+    assert_eq!(read_u32_be(&sreg.payload, 0), 1);
     let dreg = data_attrs.iter().find(|a| a.base_type() == 2).unwrap();
-    assert_eq!(read_u32(&dreg.payload, 0), 1);
+    assert_eq!(read_u32_be(&dreg.payload, 0), 1);
     let length = data_attrs.iter().find(|a| a.base_type() == 3).unwrap();
-    assert_eq!(read_u32(&length.payload, 0), 4);
+    assert_eq!(read_u32_be(&length.payload, 0), 4);
 
     // NFTA_BITWISE_MASK = 4 (nested)
     let mask_attr = data_attrs.iter().find(|a| a.base_type() == 4).unwrap();
@@ -533,21 +533,21 @@ fn encode_numgen_expr() {
     );
     let attrs = parse_nested_attrs(b.as_slice());
     let elem_attrs = parse_nested_attrs(&attrs[0].payload);
-    assert_eq!(elem_attrs[0].payload, b"numgen");
+    assert_eq!(elem_attrs[0].payload, b"numgen\0");
     let data_attrs = parse_nested_attrs(&elem_attrs[1].payload);
 
     // NFTA_NG_DREG = 1
     let dreg = data_attrs.iter().find(|a| a.base_type() == 1).unwrap();
-    assert_eq!(read_u32(&dreg.payload, 0), 9);
+    assert_eq!(read_u32_be(&dreg.payload, 0), 9);
     // NFTA_NG_MODULUS = 2
     let modulus = data_attrs.iter().find(|a| a.base_type() == 2).unwrap();
-    assert_eq!(read_u32(&modulus.payload, 0), 3);
+    assert_eq!(read_u32_be(&modulus.payload, 0), 3);
     // NFTA_NG_TYPE = 3
     let typ = data_attrs.iter().find(|a| a.base_type() == 3).unwrap();
-    assert_eq!(read_u32(&typ.payload, 0), 1); // RANDOM
+    assert_eq!(read_u32_be(&typ.payload, 0), 1); // RANDOM
     // NFTA_NG_OFFSET = 4
     let offset = data_attrs.iter().find(|a| a.base_type() == 4).unwrap();
-    assert_eq!(read_u32(&offset.payload, 0), 0);
+    assert_eq!(read_u32_be(&offset.payload, 0), 0);
 }
 
 #[test]
@@ -556,7 +556,7 @@ fn encode_masquerade_expr() {
     network::syscalls::encode_expr(&NftExpr::Masquerade, &mut b);
     let attrs = parse_nested_attrs(b.as_slice());
     let elem_attrs = parse_nested_attrs(&attrs[0].payload);
-    assert_eq!(elem_attrs[0].payload, b"masq");
+    assert_eq!(elem_attrs[0].payload, b"masq\0");
     // Masquerade has empty data (no expression-specific attributes).
     // The NFTA_EXPR_DATA should still be present as an empty nested attr.
     let data_attrs = parse_nested_attrs(&elem_attrs[1].payload);
@@ -579,25 +579,25 @@ fn encode_add_set_with_elements() {
 
     // NFTA_SET_TABLE = 1
     assert_eq!(attrs[0].base_type(), 1);
-    assert_eq!(attrs[0].payload, b"filter");
+    assert_eq!(attrs[0].payload, b"filter\0");
 
     // NFTA_SET_NAME = 2
     assert_eq!(attrs[1].base_type(), 2);
-    assert_eq!(attrs[1].payload, b"pods");
+    assert_eq!(attrs[1].payload, b"pods\0");
 
     // NFTA_SET_FLAGS = 3
     let flags = attrs.iter().find(|a| a.base_type() == 3).unwrap();
-    let flags_val = read_u32(&flags.payload, 0);
+    let flags_val = read_u32_be(&flags.payload, 0);
     assert_eq!(flags_val & 1, 1, "NFT_SET_ANONYMOUS should be set");
     assert_eq!(flags_val & 0x20, 0x20, "NFT_SET_CONSTANT should be set for pre-populated set");
 
     // NFTA_SET_KEY_TYPE = 4
     let key_type = attrs.iter().find(|a| a.base_type() == 4).unwrap();
-    assert_eq!(read_u32(&key_type.payload, 0), 7); // ipv4_addr
+    assert_eq!(read_u32_be(&key_type.payload, 0), 7); // ipv4_addr
 
     // NFTA_SET_KEY_LEN = 5
     let key_len = attrs.iter().find(|a| a.base_type() == 5).unwrap();
-    assert_eq!(read_u32(&key_len.payload, 0), 4);
+    assert_eq!(read_u32_be(&key_len.payload, 0), 4);
 
     // NFTA_SET_ELEMENTS = 13 (nested)
     let elements = attrs.iter().find(|a| a.base_type() == 13);
@@ -986,15 +986,15 @@ fn encode_conntrack_expr() {
     );
     let attrs = parse_nested_attrs(b.as_slice());
     let elem_attrs = parse_nested_attrs(&attrs[0].payload);
-    assert_eq!(elem_attrs[0].payload, b"ct");
+    assert_eq!(elem_attrs[0].payload, b"ct\0");
     let data_attrs = parse_nested_attrs(&elem_attrs[1].payload);
 
     // NFTA_CT_DREG = 1
     let dreg = data_attrs.iter().find(|a| a.base_type() == 1).unwrap();
-    assert_eq!(read_u32(&dreg.payload, 0), 1);
+    assert_eq!(read_u32_be(&dreg.payload, 0), 1);
     // NFTA_CT_KEY = 2
     let key = data_attrs.iter().find(|a| a.base_type() == 2).unwrap();
-    assert_eq!(read_u32(&key.payload, 0), 3); // STATE
+    assert_eq!(read_u32_be(&key.payload, 0), 3); // STATE
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1739,8 +1739,7 @@ fn service_cidr_route_functions_exist() {
 fn send_batch_signature_compiles() {
     // Verify the method signature compiles. Actual calls need CAP_NET_ADMIN.
     fn _check(ops: &[network::NetlinkOp]) -> std::io::Result<()> {
-        let sock = network::NlSocket::open()?;
-        sock.send_batch(ops)
+        network::syscalls::send_batch(ops)
     }
     let _ = _check;
 }

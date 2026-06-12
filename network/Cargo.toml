@@ -17,3 +17,4 @@ tracing = "0.1.44"
 # a known-working nftables implementation). neli was tried first but the
 # socket setup didn't match what the kernel expects.
 nix = { version = "0.30", features = ["socket"] }
+libc = "0.2"

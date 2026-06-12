@@ -485,6 +485,35 @@ impl Netmux {
         Ok(n)
     }
 
+    /// Full reconcile: plan from a store snapshot + apply to kernel + return report.
+    ///
+    /// This is the method controllers should call. It combines:
+    /// 1. `plan(snapshot, cfg)` — build desired state from DB
+    /// 2. `reconcile(desired, current)` — compute diff
+    /// 3. `apply(ops, false)` — send to kernel
+    /// 4. Return a `ReconcileReport` with per-resource-type op counts
+    pub fn reconcile_full(
+        &mut self,
+        snap: &z8s_core::store::StoreSnapshot,
+        cfg: &crate::plan::PlanConfig,
+    ) -> Result<ReconcileReport> {
+        let desired = crate::plan::plan(snap, cfg);
+        let ops = reconcile(&desired, &self.current);
+        let report = ReconcileReport::from_ops(&ops);
+        if report.total() > 0 {
+            info!(
+                tables = report.tables,
+                chains = report.chains,
+                rules = report.rules,
+                sets = report.sets,
+                routes = report.routes,
+                "reconcile_full: applying ops"
+            );
+        }
+        self.apply(&ops, false)?;
+        Ok(report)
+    }
+
     /// Update the in-memory `current` to reflect an op without contacting the
     /// kernel. Keeps the diff function honest.
     fn apply_one_to_state(&mut self, op: &NetlinkOp) {
@@ -665,7 +694,7 @@ impl NetmuxBuilder {
             .with_chain(
                 NftChain::base(
                     "prerouting",
-                    NftChainKind::Filter,
+                    NftChainKind::Nat,
                     NftHook::Prerouting,
                     -300,
                     NftPolicy::Accept,

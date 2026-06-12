@@ -28,7 +28,7 @@
 //!
 //! Nested attributes (NLA_F_NESTED) carry a child stream of attrs.
 
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::AsRawFd;
 
 use nix::sys::socket::{
     self, AddressFamily, MsgFlags, NetlinkAddr, SockFlag, SockProtocol, SockType,
@@ -42,17 +42,18 @@ use crate::model::*;
 
 const NFNL_SUBSYS_NFTABLES: u16 = 10;
 
-// Nftables netlink message types
+// Nftables netlink message types (matching kernel enum nf_tables_msg_types)
 const NFT_MSG_NEWTABLE: u16 = 0;
-const NFT_MSG_DELTABLE: u16 = 1;
-const NFT_MSG_NEWCHAIN: u16 = 2;
-const NFT_MSG_DELCHAIN: u16 = 3;
-const NFT_MSG_NEWRULE: u16 = 4;
-const NFT_MSG_DELRULE: u16 = 5;
-const NFT_MSG_NEWSET: u16 = 6;
-const NFT_MSG_DELSET: u16 = 7;
-const NFT_MSG_NEWOBJ: u16 = 12;
-const NFT_MSG_DELOBJ: u16 = 13;
+const NFT_MSG_GETTABLE: u16 = 1;
+const NFT_MSG_DELTABLE: u16 = 2;
+const NFT_MSG_NEWCHAIN: u16 = 3;
+const NFT_MSG_DELCHAIN: u16 = 5;
+const NFT_MSG_NEWRULE: u16 = 6;
+const NFT_MSG_DELRULE: u16 = 8;
+const NFT_MSG_NEWSET: u16 = 9;
+const NFT_MSG_DELSET: u16 = 11;
+const NFT_MSG_NEWOBJ: u16 = 18;
+const NFT_MSG_DELOBJ: u16 = 20;
 
 // Nftables attribute types
 const NFTA_TABLE_NAME: u16 = 1;
@@ -162,16 +163,20 @@ const NLM_F_APPEND: u16 = 0x800;
 // a batch on modern kernels; individual messages get EINVAL).
 // The BATCH_BEGIN/END nlmsg_type is just NFNL_MSG_BATCH_BEGIN/END (the
 // nfnetlink subsys for batch control is 0, so no shift is needed).
-const NFNL_MSG_BATCH_BEGIN: u16 = 1;
-const NFNL_MSG_BATCH_END: u16 = 2;
+// From linux/netfilter/nfnetlink.h: NLMSG_MIN_TYPE=16, so BEGIN=16, END=17.
+const NFNL_MSG_BATCH_BEGIN: u16 = 16;
+const NFNL_MSG_BATCH_END: u16 = 17;
+
+const NLMSG_ERROR_TYPE: u16 = 2;
+const NLMSG_DONE_TYPE: u16 = 3;
 
 /// Compute the nlmsg_flags for a given op.
 pub fn nlmsg_flags_for(op: &NetlinkOp) -> u16 {
     let base = NLM_F_REQUEST | NLM_F_ACK;
     match op {
-        NetlinkOp::AddTable { .. } => base | NLM_F_CREATE | NLM_F_EXCL,
+        NetlinkOp::AddTable { .. } => base | NLM_F_CREATE,
         NetlinkOp::AddChain { .. } | NetlinkOp::AddSet { .. } | NetlinkOp::AddCounter { .. } => {
-            base | NLM_F_CREATE | NLM_F_EXCL
+            base | NLM_F_CREATE
         }
         NetlinkOp::AddRule { .. } => base | NLM_F_CREATE | NLM_F_APPEND,
         NetlinkOp::DelTable { .. }
@@ -221,28 +226,26 @@ impl NlaBuf {
         self.put_slice(kind, &val.to_ne_bytes());
     }
 
-    /// Append a u32 in NLA format.
+    /// Append a u32 in NLA format. Netlink attribute values are big-endian.
     pub fn put_u32(&mut self, kind: u16, val: u32) {
-        self.put_slice(kind, &val.to_ne_bytes());
+        self.put_slice(kind, &val.to_be_bytes());
     }
 
-    /// Append a u64 in NLA format.
+    /// Append a u64 in NLA format. Netlink attribute values are big-endian.
     pub fn put_u64(&mut self, kind: u16, val: u64) {
-        self.put_slice(kind, &val.to_ne_bytes());
+        self.put_slice(kind, &val.to_be_bytes());
     }
 
     /// Append a C-string in NLA format (padded to 4-byte boundary).
-    /// `nla_len` is the logical length (header + payload), NOT the padded total.
-    /// The kernel reads `nla_len - 4` bytes of payload then seeks to the next
-    /// attr at `nla_len` rounded up to 4 bytes. String is NOT NUL-terminated
-    /// (matching rustables wire format exactly).
+    /// String is NUL-terminated (matching nft CLI wire format exactly).
     pub fn put_str(&mut self, kind: u16, s: &str) {
-        let bytes = s.as_bytes();
+        let mut bytes = s.as_bytes().to_vec();
+        bytes.push(0); // null-terminate
         let nla_len = 4 + bytes.len();
         let pad = (4 - (nla_len % 4)) % 4;
         self.bytes.extend_from_slice(&(nla_len as u16).to_ne_bytes());
         self.bytes.extend_from_slice(&kind.to_ne_bytes());
-        self.bytes.extend_from_slice(bytes);
+        self.bytes.extend_from_slice(&bytes);
         if pad > 0 {
             self.bytes.resize(self.bytes.len() + pad, 0);
         }
@@ -455,16 +458,16 @@ pub fn encode_op(op: &NetlinkOp) -> (u16, Vec<u8>) {
             let mut b = NlaBuf::new();
             b.put_str(NFTA_CHAIN_TABLE, table);
             b.put_str(NFTA_CHAIN_NAME, &chain.name);
-            b.put_str(NFTA_CHAIN_TYPE, chain.kind.as_str());
+            // Only send TYPE + HOOK + POLICY for base chains (with hook).
+            // Regular chains get only TABLE + NAME (matching pelagos/nft CLI).
             if let Some(hook) = chain.hook {
-                // NFTA_CHAIN_HOOK is a nested attribute containing
-                // NFTA_HOOK_HOOKNUM and NFTA_HOOK_PRIORITY.
+                b.put_str(NFTA_CHAIN_TYPE, chain.kind.as_str());
                 b.put_nested(NFTA_CHAIN_HOOK, |h| {
                     h.put_u32(NFTA_HOOK_HOOKNUM, hook.as_u32());
                     h.put_u32(NFTA_HOOK_PRIORITY, chain.priority as u32);
                 });
+                b.put_u32(NFTA_CHAIN_POLICY, chain.policy.as_u32());
             }
-            b.put_u32(NFTA_CHAIN_POLICY, chain.policy.as_u32());
             (NFT_MSG_NEWCHAIN, build_message(*family, b.finish()))
         }
         NetlinkOp::DelChain { family, table, name } => {
@@ -590,19 +593,16 @@ const NFT_SET_ANONYMOUS: u32 = 1;
 const NFT_SET_CONSTANT: u32 = 0x20;
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Netlink socket — uses nix (same as rustables) for open/bind/send/recv
+// Netlink socket — uses nix for open/bind, libc for sendmsg/recvmsg
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// A netlink socket bound to the NETLINK_NETFILTER protocol.
-/// Uses [`nix`] for open/bind/send/recv (same approach as the rustables
-/// crate, which is a known-working nftables implementation).
 pub struct NlSocket {
-    sock: OwnedFd,
+    sock: std::os::fd::OwnedFd,
 }
 
 impl NlSocket {
     /// Open a netlink socket bound to the NETLINK_NETFILTER protocol.
-    /// Requires CAP_NET_ADMIN.
     pub fn open() -> std::io::Result<Self> {
         let sock = socket::socket(
             AddressFamily::Netlink,
@@ -611,7 +611,6 @@ impl NlSocket {
             SockProtocol::NetlinkNetFilter,
         )
         .map_err(|e| std::io::Error::from_raw_os_error(e as i32))?;
-        // Bind to (pid=0, groups=0). pid=0 means "auto-assign" by the kernel.
         let addr = NetlinkAddr::new(0, 0);
         socket::bind(sock.as_raw_fd(), &addr)
             .map_err(|e| std::io::Error::from_raw_os_error(e as i32))?;
@@ -619,194 +618,226 @@ impl NlSocket {
     }
 
     /// Send a nftables message wrapped in a batch begin/end envelope.
-    /// Modern nftables kernels reject individual messages with EINVAL;
-    /// every op must be inside NFNL_MSG_BATCH_BEGIN .. NFNL_MSG_BATCH_END.
-    /// The single ACK is read after BATCH_END.
+    /// Opens a fresh socket per call.  Matches pelagos/nft CLI exactly:
+    /// - BATCH_BEGIN: NLM_F_REQUEST only (no ACK)
+    /// - Op:          NLM_F_REQUEST | NLM_F_CREATE | NLM_F_ACK
+    /// - BATCH_END:   NLM_F_REQUEST only
+    /// Uses libc::sendmsg/recvmsg with iovec.
     pub fn send(&self, op: &NetlinkOp) -> std::io::Result<Vec<u8>> {
+        let fd = open_netlink_fd()?;
         let (msg_type, body) = encode_op(op);
+        let seq = 1u32;
 
-        // ── Wire format note ──────────────────────────────────────────
-        // nft CLI uses nlmsg_pid=0 in every message of the batch. The
-        // kernel uses the *bound* pid (set by `bind()`) internally to
-        // route replies, not the nlmsg_pid in the message body. The body
-        // field is the source pid and should be 0 for userspace-originated
-        // messages.
-        //
-        // BATCH_BEGIN and BATCH_END also carry a 4-byte nfgenmsg after the
-        // nlmsghdr, with `res_id` set to the nftables subsys number (10).
-        // nlmsg_seq is sequential: 0, 1, 2 for the three messages.
-        //
-        // The op's flags are NLM_F_REQUEST only (NLM_F_ACK, NLM_F_CREATE,
-        // and NLM_F_EXCL are all stripped) — matching nft CLI exactly.
-        // The kernel sends one NLMSG_ERROR after the batch commits,
-        // regardless of NLM_F_ACK, because the batch is a transaction.
+        // Build op: NLM_F_REQUEST | NLM_F_CREATE | NLM_F_ACK (matching pelagos)
+        let op_flags = match op {
+            NetlinkOp::AddTable { .. }
+            | NetlinkOp::AddChain { .. }
+            | NetlinkOp::AddSet { .. }
+            | NetlinkOp::AddCounter { .. } => NLM_F_REQUEST | NLM_F_CREATE | NLM_F_ACK,
+            NetlinkOp::AddRule { .. } => NLM_F_REQUEST | NLM_F_CREATE | NLM_F_APPEND | NLM_F_ACK,
+            _ => NLM_F_REQUEST | NLM_F_ACK,
+        };
+        let op_msg = build_op_msg(msg_type, op_flags, &body, seq);
 
-        // Build BATCH_BEGIN: nlmsghdr(16) + nfgenmsg(4) = 20 bytes.
-        // Flags: NLM_F_REQUEST | NLM_F_ACK (rustables pattern — the kernel
-        // sends an ACK for BATCH_BEGIN because it carries NLM_F_ACK).
-        let begin_type = NFNL_MSG_BATCH_BEGIN;
-        let mut begin = Vec::with_capacity(20);
-        begin.extend_from_slice(&20u32.to_ne_bytes()); // nlmsg_len = 20
-        begin.extend_from_slice(&begin_type.to_ne_bytes());
-        begin.extend_from_slice(&(NLM_F_REQUEST | NLM_F_ACK).to_ne_bytes());
-        begin.extend_from_slice(&0u32.to_ne_bytes()); // nlmsg_seq = 0
-        begin.extend_from_slice(&0u32.to_ne_bytes()); // nlmsg_pid = 0
-        // nfgenmsg: family=AF_UNSPEC(0), version=0, res_id=10 (network byte order)
-        begin.extend_from_slice(&[0u8, 0, 0, 10]);
+        // Assemble batch: BATCH_BEGIN + op + BATCH_END
+        let mut batch = Vec::with_capacity(40 + op_msg.len());
+        push_batch_ctrl(&mut batch, NFNL_MSG_BATCH_BEGIN, 0);
+        batch.extend_from_slice(&op_msg);
+        push_batch_ctrl(&mut batch, NFNL_MSG_BATCH_END, 2); // seq=2 = num_acks+1
 
-        // Build the actual op message: nlmsghdr(16) + body.
-        // Use the correct flags for this specific op.
-        let op_flags = nlmsg_flags_for(op);
-        let total_len = (16 + body.len()) as u32;
-        let mut msg = Vec::with_capacity(16 + body.len());
-        msg.extend_from_slice(&total_len.to_ne_bytes());
-        msg.extend_from_slice(&nlmsg_type(msg_type).to_ne_bytes());
-        msg.extend_from_slice(&op_flags.to_ne_bytes());
-        msg.extend_from_slice(&1u32.to_ne_bytes()); // nlmsg_seq = 1
-        msg.extend_from_slice(&0u32.to_ne_bytes()); // nlmsg_pid = 0
-        msg.extend_from_slice(&body);
-        let pad = (4 - (msg.len() % 4)) % 4;
-        if pad > 0 {
-            msg.resize(msg.len() + pad, 0);
-        }
-
-        // Build BATCH_END: nlmsghdr(16) + nfgenmsg(4) = 20 bytes.
-        // Flags: NLM_F_REQUEST only (no NLM_F_ACK — rustables pattern).
-        // The kernel commits the batch after BATCH_END and the transaction
-        // is complete; no per-message ACK for BATCH_END.
-        let end_type = NFNL_MSG_BATCH_END;
-        let mut end = Vec::with_capacity(20);
-        end.extend_from_slice(&20u32.to_ne_bytes()); // nlmsg_len = 20
-        end.extend_from_slice(&end_type.to_ne_bytes());
-        end.extend_from_slice(&NLM_F_REQUEST.to_ne_bytes());
-        end.extend_from_slice(&2u32.to_ne_bytes()); // nlmsg_seq = 2
-        end.extend_from_slice(&0u32.to_ne_bytes()); // nlmsg_pid = 0
-        // nfgenmsg: family=AF_UNSPEC, version=0, res_id=10 (network byte order)
-        end.extend_from_slice(&[0u8, 0, 0, 10]);
-
-        // ── Critical: send all three messages in ONE sendmsg call ──────
-        // The kernel's nfnetlink_rcv processes messages one at a time.
-        // Three separate send() calls would be seen as three standalone
-        // ops outside any batch — exactly the EINVAL case. nft CLI uses
-        // a single sendmsg with one iovec containing all three messages
-        // concatenated. We do the same: combine into one Vec and send once.
-        let mut combined = Vec::with_capacity(begin.len() + msg.len() + end.len());
-        combined.extend_from_slice(&begin);
-        combined.extend_from_slice(&msg);
-        combined.extend_from_slice(&end);
-
-        let raw_fd = self.sock.as_raw_fd();
-        // Use nix::sendto (same as rustables) — bare send() on a bound
-        // netlink socket works, but sendto with an explicit NetlinkAddr
-        // is what rustables does and is the most portable.
-        let addr = NetlinkAddr::new(0, 0);
-        socket::sendto(raw_fd, &combined, &addr, MsgFlags::empty())
-            .map_err(|e| std::io::Error::from_raw_os_error(e as i32))?;
-
-        // Drain ACKs: 2 expected (BATCH_BEGIN has NLM_F_ACK, op has NLM_F_ACK,
-        // BATCH_END does NOT have NLM_F_ACK — matching rustables pattern).
-        // Only interpret bytes 16-19 as errno if the reply is NLMSG_ERROR
-        // (type 2); otherwise it's a notification or other message type.
-        let mut last_reply = Vec::new();
-        for _ in 0..2 {
-            let mut reply = vec![0u8; 8192];
-            let n = socket::recv(raw_fd, &mut reply, MsgFlags::empty())
-                .map_err(|e| std::io::Error::from_raw_os_error(e as i32))?;
-            reply.truncate(n);
-            if reply.len() >= 20 {
-                // nlmsghdr layout: len(4) | type(2) | flags(2) | seq(4) | pid(4)
-                let nlmsg_type = u16::from_ne_bytes([reply[4], reply[5]]);
-                if nlmsg_type == 2 {
-                    // NLMSG_ERROR: bytes 16-19 are the error code (i32)
-                    let errno = i32::from_ne_bytes([reply[16], reply[17], reply[18], reply[19]]);
-                    if errno != 0 {
-                        return Err(std::io::Error::from_raw_os_error(-errno));
-                    }
-                }
-            }
-            last_reply = reply;
-        }
-        Ok(last_reply)
+        send_and_drain_acks(fd, &batch, 1)?; // 1 ACK expected
+        Ok(vec![])
     }
 
     /// Raw fd.
     pub fn raw_fd(&self) -> i32 {
         self.sock.as_raw_fd()
     }
+}
 
-    /// Send multiple nftables ops in a single batch. More efficient than
-    /// calling `send()` for each op individually.
-    pub fn send_batch(&self, ops: &[NetlinkOp]) -> std::io::Result<()> {
-        if ops.is_empty() {
-            return Ok(());
-        }
-        // Build BATCH_BEGIN: nlmsghdr(16) + nfgenmsg(4) = 20 bytes.
-        let begin_type = NFNL_MSG_BATCH_BEGIN;
-        let mut begin = Vec::with_capacity(20);
-        begin.extend_from_slice(&20u32.to_ne_bytes());
-        begin.extend_from_slice(&begin_type.to_ne_bytes());
-        begin.extend_from_slice(&(NLM_F_REQUEST | NLM_F_ACK).to_ne_bytes());
-        begin.extend_from_slice(&0u32.to_ne_bytes()); // seq=0
-        begin.extend_from_slice(&0u32.to_ne_bytes()); // pid=0
-        begin.extend_from_slice(&[0u8, 0, 0, 10]); // nfgenmsg: family=0, res_id=10
-
-        let mut combined = begin;
-        for (i, op) in ops.iter().enumerate() {
-            let (msg_type, body) = encode_op(op);
-            let op_flags = nlmsg_flags_for(op);
-            let total_len = (16 + body.len()) as u32;
-            let mut msg = Vec::with_capacity(16 + body.len());
-            msg.extend_from_slice(&total_len.to_ne_bytes());
-            msg.extend_from_slice(&nlmsg_type(msg_type).to_ne_bytes());
-            msg.extend_from_slice(&op_flags.to_ne_bytes());
-            msg.extend_from_slice(&((i + 1) as u32).to_ne_bytes()); // seq=i+1
-            msg.extend_from_slice(&0u32.to_ne_bytes()); // pid=0
-            msg.extend_from_slice(&body);
-            let pad = (4 - (msg.len() % 4)) % 4;
-            if pad > 0 {
-                msg.resize(msg.len() + pad, 0);
-            }
-            combined.extend_from_slice(&msg);
-        }
-
-        // Build BATCH_END.
-        let end_type = NFNL_MSG_BATCH_END;
-        let end_seq = (ops.len() + 1) as u32;
-        let mut end = Vec::with_capacity(20);
-        end.extend_from_slice(&20u32.to_ne_bytes());
-        end.extend_from_slice(&end_type.to_ne_bytes());
-        end.extend_from_slice(&NLM_F_REQUEST.to_ne_bytes());
-        end.extend_from_slice(&end_seq.to_ne_bytes());
-        end.extend_from_slice(&0u32.to_ne_bytes());
-        end.extend_from_slice(&[0u8, 0, 0, 10]);
-        combined.extend_from_slice(&end);
-
-        // Send the entire batch as one contiguous buffer.
-        let raw_fd = self.sock.as_raw_fd();
-        let addr = NetlinkAddr::new(0, 0);
-        let mut sent = 0;
-        while sent < combined.len() {
-            let n = socket::sendto(raw_fd, &combined[sent..], &addr, MsgFlags::empty())
-                .map_err(|e| std::io::Error::from_raw_os_error(e as i32))?;
-            sent += n;
-        }
-
-        // Read one ACK for the batch (the kernel sends one NLMSG_ERROR after BATCH_END).
-        let mut reply = vec![0u8; 8192];
-        let n = socket::recv(raw_fd, &mut reply, MsgFlags::empty())
-            .map_err(|e| std::io::Error::from_raw_os_error(e as i32))?;
-        reply.truncate(n);
-        if reply.len() >= 20 {
-            let nlmsg_type = u16::from_ne_bytes([reply[4], reply[5]]);
-            if nlmsg_type == 2 {
-                let errno = i32::from_ne_bytes([reply[16], reply[17], reply[18], reply[19]]);
-                if errno != 0 {
-                    return Err(std::io::Error::from_raw_os_error(-errno));
-                }
-            }
-        }
-        Ok(())
+impl Drop for NlSocket {
+    fn drop(&mut self) {
+        // fd is closed by OwnedFd
     }
+}
+
+// ── Low-level batch helpers (matching pelagos nfnetlink.rs) ────────────────
+
+fn open_netlink_fd() -> std::io::Result<std::os::fd::RawFd> {
+    let fd = unsafe {
+        libc::socket(
+            libc::AF_NETLINK,
+            libc::SOCK_RAW | libc::SOCK_CLOEXEC,
+            libc::NETLINK_NETFILTER,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut sa: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
+    sa.nl_family = libc::AF_NETLINK as u16;
+    let rc = unsafe {
+        libc::bind(
+            fd,
+            &sa as *const _ as *const libc::sockaddr,
+            std::mem::size_of::<libc::sockaddr_nl>() as u32,
+        )
+    };
+    if rc < 0 {
+        unsafe { libc::close(fd) };
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(fd)
+}
+
+fn push_batch_ctrl(buf: &mut Vec<u8>, msg_type: u16, seq: u32) {
+    let start = buf.len();
+    buf.extend_from_slice(&0u32.to_ne_bytes()); // placeholder len
+    buf.extend_from_slice(&msg_type.to_ne_bytes());
+    buf.extend_from_slice(&NLM_F_REQUEST.to_ne_bytes());
+    buf.extend_from_slice(&seq.to_ne_bytes());
+    buf.extend_from_slice(&0u32.to_ne_bytes()); // pid
+    buf.push(0); // nfgenmsg: family=AF_UNSPEC
+    buf.push(0); // version
+    buf.extend_from_slice(&10u16.to_ne_bytes()); // res_id=10
+    let len = (buf.len() - start) as u32;
+    buf[start..start + 4].copy_from_slice(&len.to_ne_bytes());
+}
+
+fn build_op_msg(msg_type: u16, flags: u16, body: &[u8], seq: u32) -> Vec<u8> {
+    let mut msg = Vec::with_capacity(16 + body.len());
+    msg.extend_from_slice(&((16 + body.len()) as u32).to_ne_bytes());
+    msg.extend_from_slice(&nlmsg_type(msg_type).to_ne_bytes());
+    msg.extend_from_slice(&flags.to_ne_bytes());
+    msg.extend_from_slice(&seq.to_ne_bytes());
+    msg.extend_from_slice(&0u32.to_ne_bytes()); // pid
+    msg.extend_from_slice(body);
+    msg
+}
+
+fn align4(n: usize) -> usize {
+    (n + 3) & !3
+}
+
+/// Send a batch via libc::sendmsg and drain `num_ack` NLMSG_ERROR responses.
+fn send_and_drain_acks(
+    fd: std::os::fd::RawFd,
+    batch: &[u8],
+    num_ack: usize,
+) -> std::io::Result<()> {
+    // Send via sendmsg with single iovec (matching pelagos)
+    let mut sa: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
+    sa.nl_family = libc::AF_NETLINK as u16;
+    let iov = libc::iovec {
+        iov_base: batch.as_ptr() as *mut _,
+        iov_len: batch.len(),
+    };
+    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+    msg.msg_name = &sa as *const _ as *mut _;
+    msg.msg_namelen = std::mem::size_of::<libc::sockaddr_nl>() as u32;
+    msg.msg_iov = &iov as *const _ as *mut _;
+    msg.msg_iovlen = 1;
+
+    let sent = unsafe { libc::sendmsg(fd, &mut msg, 0) };
+    if sent < 0 {
+        let e = std::io::Error::last_os_error();
+        unsafe { libc::close(fd) };
+        return Err(e);
+    }
+
+    // Drain ACK responses (matching pelagos recvmsg loop)
+    let mut recv_buf = vec![0u8; 32768];
+    let mut remaining = num_ack;
+    eprintln!("[drain] num_ack={}, waiting for {} ACKs", num_ack, remaining);
+    while remaining > 0 {
+        let iov_recv = libc::iovec {
+            iov_base: recv_buf.as_mut_ptr() as *mut _,
+            iov_len: recv_buf.len(),
+        };
+        let mut rmsg: libc::msghdr = unsafe { std::mem::zeroed() };
+        rmsg.msg_iov = &iov_recv as *const _ as *mut _;
+        rmsg.msg_iovlen = 1;
+        let n = unsafe { libc::recvmsg(fd, &mut rmsg, 0) };
+        if n < 0 {
+            let e = std::io::Error::last_os_error();
+            if e.raw_os_error() == Some(libc::EAGAIN) || e.raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            unsafe { libc::close(fd) };
+            return Err(e);
+        }
+        let n = n as usize;
+        eprintln!("[drain] recvmsg returned {} bytes", n);
+        let mut offset = 0usize;
+        while offset + 16 <= n {
+            let msg_len =
+                u32::from_ne_bytes(recv_buf[offset..offset + 4].try_into().unwrap()) as usize;
+            let msg_type = u16::from_ne_bytes(recv_buf[offset + 4..offset + 6].try_into().unwrap());
+            if msg_len < 16 || offset + msg_len > n {
+                break;
+            }
+            if msg_type == NLMSG_ERROR_TYPE && offset + 20 <= n {
+                let error =
+                    i32::from_ne_bytes(recv_buf[offset + 16..offset + 20].try_into().unwrap());
+                eprintln!("[drain] NLMSG_ERROR errno={} remaining={}", error, remaining);
+                if error != 0 {
+                    unsafe { libc::close(fd) };
+                    return Err(std::io::Error::from_raw_os_error(-error));
+                }
+                remaining = remaining.saturating_sub(1);
+            } else if msg_type == NLMSG_DONE_TYPE {
+                eprintln!("[drain] NLMSG_DONE");
+                remaining = 0;
+                break;
+            } else {
+                eprintln!("[drain] other msg_type={}", msg_type);
+            }
+            offset += align4(msg_len);
+        }
+    }
+    unsafe { libc::close(fd) };
+    Ok(())
+}
+
+/// Send multiple nftables ops in a single batch using a fresh socket.
+/// Matches pelagos: NLM_F_ACK on each op, drains ACKs, one sendmsg call.
+pub fn send_batch(ops: &[NetlinkOp]) -> std::io::Result<()> {
+    if ops.is_empty() {
+        return Ok(());
+    }
+    let fd = open_netlink_fd()?;
+
+    let mut batch = Vec::with_capacity(40 + ops.len() * 128);
+    push_batch_ctrl(&mut batch, NFNL_MSG_BATCH_BEGIN, 0);
+
+    let mut num_acks = 0usize;
+    for (i, op) in ops.iter().enumerate() {
+        let (msg_type, body) = encode_op(op);
+        let op_flags = match op {
+            NetlinkOp::AddTable { .. }
+            | NetlinkOp::AddChain { .. }
+            | NetlinkOp::AddSet { .. }
+            | NetlinkOp::AddCounter { .. } => NLM_F_REQUEST | NLM_F_CREATE | NLM_F_ACK,
+            NetlinkOp::AddRule { .. } => NLM_F_REQUEST | NLM_F_CREATE | NLM_F_APPEND | NLM_F_ACK,
+            NetlinkOp::DelTable { .. }
+            | NetlinkOp::DelChain { .. }
+            | NetlinkOp::DelRule { .. }
+            | NetlinkOp::DelSet { .. }
+            | NetlinkOp::SetFlush { .. }
+            | NetlinkOp::DelCounter { .. } => NLM_F_REQUEST | NLM_F_ACK,
+            NetlinkOp::AddRoute { .. } | NetlinkOp::DelRoute { .. } => NLM_F_REQUEST,
+        };
+        let seq = (i + 1) as u32;
+        let msg = build_op_msg(msg_type, op_flags, &body, seq);
+        batch.extend_from_slice(&msg);
+        if op_flags & NLM_F_ACK != 0 {
+            num_acks += 1;
+        }
+    }
+
+    push_batch_ctrl(&mut batch, NFNL_MSG_BATCH_END, (num_acks + 1) as u32);
+
+    send_and_drain_acks(fd, &batch, num_acks)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -845,16 +876,17 @@ mod tests {
         assert_eq!(b.len(), 8);
         assert_eq!(&b.as_slice()[0..2], &8u16.to_ne_bytes());
         assert_eq!(&b.as_slice()[2..4], &1u16.to_ne_bytes());
-        assert_eq!(&b.as_slice()[4..8], &0xdeadbeefu32.to_ne_bytes());
+        assert_eq!(&b.as_slice()[4..8], &0xdeadbeefu32.to_be_bytes());
     }
 
     #[test]
     fn nlabuf_put_str_padded() {
         let mut b = NlaBuf::new();
         b.put_str(1, "hi");
-        // nla_len = 4 + 2 = 6, padded to 8
+        // "hi\0" = 3 bytes, nla_len = 4 + 3 = 7, padded to 8
         assert_eq!(b.len(), 8);
         assert_eq!(&b.as_slice()[4..6], b"hi");
+        assert_eq!(b.as_slice()[6], 0); // NUL terminator
     }
 
     #[test]
@@ -1075,7 +1107,6 @@ mod tests {
         assert!(flags & NLM_F_REQUEST != 0);
         assert!(flags & NLM_F_ACK != 0);
         assert!(flags & NLM_F_CREATE != 0);
-        assert!(flags & NLM_F_EXCL != 0);
     }
 
     #[test]
