@@ -85,7 +85,7 @@ fn nft_table_exists_family(family: &str, table: &str) -> bool {
 fn kernel_create_table_chain_rule() {
     cleanup_tables(&["z8s_test_basic"]);
 
-    let sock = NlSocket::open().expect("open netlink socket");
+    let _sock = NlSocket::open().expect("open netlink socket");
 
     let ops = vec![
         NetlinkOp::AddTable {
@@ -134,7 +134,7 @@ fn kernel_create_table_chain_rule() {
 fn kernel_batch_multiple_ops() {
     cleanup_tables(&["z8s_test_batch"]);
 
-    let sock = NlSocket::open().expect("open netlink socket");
+    let _sock = NlSocket::open().expect("open netlink socket");
 
     // Create table, chain, and rule in a single batch.
     let ops = vec![
@@ -727,7 +727,7 @@ async fn kernel_dns_server_e2e() {
     assert_eq!(u16::from_be_bytes([buf[0], buf[1]]), 0xABCD);
     assert_ne!(u16::from_be_bytes([buf[2], buf[3]]) & 0x8000, 0);
     assert_eq!(u16::from_be_bytes([buf[6], buf[7]]), 1);
-    assert!(buf.windows(4).any(|w| w == &[10, 96, 0, 10]));
+    assert!(buf.windows(4).any(|w| w == [10, 96, 0, 10]));
 
     // NXDOMAIN.
     let query2 = build_dns_query("nonexistent.cluster.local", 0x1234);

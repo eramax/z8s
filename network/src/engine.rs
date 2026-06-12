@@ -819,7 +819,7 @@ impl NetmuxBuilder {
         let table_name = format!("nsg_{}", sanitize(pod_uid));
         let mut table = NftTable::new(&table_name, family)
             .with_chain(NftChain::regular("ingress", NftChainKind::Filter));
-        for (i, r) in rules.iter().enumerate() {
+        for r in rules.iter() {
             let mut exprs = Vec::new();
             if r.action == NsgAction::Deny {
                 exprs.push(NftExpr::Drop);
@@ -906,7 +906,7 @@ mod tests {
             (NftFamily::Ip, "stale".to_string()),
             NftTable::new("stale", NftFamily::Ip),
         );
-        let mut desired = NetmuxState::new();
+        let desired = NetmuxState::new();
         let ops = reconcile(&desired, &current);
         assert!(ops.iter().any(|op| matches!(
             op,
@@ -1238,7 +1238,7 @@ mod tests {
 
     #[test]
     fn reconcile_pod_registered_then_removed() {
-        let mut desired = NetmuxState::new();
+        let desired = NetmuxState::new();
         let mut current = NetmuxState::new();
         let pod = PodNetwork {
             pod_uid: "u1".into(),

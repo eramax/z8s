@@ -67,7 +67,7 @@ fn deploy_three_pods_with_veth_and_netns() {
         ("z8s_test_pod2", "veth_test_host2", "10.244.2.2/24"),
         ("z8s_test_pod3", "veth_test_host3", "10.244.3.2/24"),
     ];
-    let pod_veths = ["veth_test_pod1", "veth_test_pod2", "veth_test_pod3"];
+    let _pod_veths = ["veth_test_pod1", "veth_test_pod2", "veth_test_pod3"];
 
     // 1. Create 3 network namespaces (simulating pod sandboxes).
     for (ns, _, _) in &pods {

@@ -66,7 +66,7 @@ fn kernel_apply_and_cleanup() {
 
     // ── Apply via the engine (real kernel) ─────────────────────────
     let mut engine = Netmux::connect().expect("connect netlink netfilter");
-    let ops = network::reconcile(&desired, &engine.current());
+    let ops = network::reconcile(&desired, engine.current());
     println!("applying {} vnet ops", ops.len());
     engine
         .apply(&ops, false)
@@ -108,7 +108,7 @@ fn kernel_apply_and_cleanup() {
         }],
     });
     let desired2 = b2.build();
-    let ops2 = network::reconcile(&desired2, &engine.current());
+    let ops2 = network::reconcile(&desired2, engine.current());
     println!("applying {} service ops", ops2.len());
     engine.apply(&ops2, false).expect("apply service ops");
 
@@ -146,7 +146,7 @@ fn kernel_apply_and_cleanup() {
         }],
     );
     let desired3 = b3.build();
-    let ops3 = network::reconcile(&desired3, &engine.current());
+    let ops3 = network::reconcile(&desired3, engine.current());
     println!("applying {} policy ops", ops3.len());
     engine.apply(&ops3, false).expect("apply policy ops");
 
@@ -169,7 +169,7 @@ fn kernel_apply_and_cleanup() {
 
     // ── Clean up: reconcile against empty state ───────────────────
     let empty = NetmuxState::new();
-    let cleanup_ops = network::reconcile(&empty, &engine.current());
+    let cleanup_ops = network::reconcile(&empty, engine.current());
     println!("cleaning up {} ops", cleanup_ops.len());
     engine.apply(&cleanup_ops, false).expect("cleanup");
 

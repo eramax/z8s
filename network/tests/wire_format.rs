@@ -10,7 +10,7 @@
 use std::net::Ipv4Addr;
 use network::ipam::Ipv4Cidr;
 use network::model::*;
-use network::nftables::{encode_op, nfgen_header, NlaBuf};
+use network::nftables::{encode_op, NlaBuf};
 use network::{reconcile, Netmux, NetmuxBuilder};
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
@@ -21,6 +21,7 @@ fn read_u16(buf: &[u8], pos: usize) -> u16 {
 }
 
 /// Read a u32 from `buf` at `pos` in native byte order.
+#[allow(dead_code)]
 fn read_u32(buf: &[u8], pos: usize) -> u32 {
     u32::from_ne_bytes([buf[pos], buf[pos + 1], buf[pos + 2], buf[pos + 3]])
 }
@@ -32,6 +33,7 @@ fn read_u32_be(buf: &[u8], pos: usize) -> u32 {
 }
 
 /// Read a u64 from `buf` at `pos` in native byte order.
+#[allow(dead_code)]
 fn read_u64(buf: &[u8], pos: usize) -> u64 {
     u64::from_ne_bytes([
         buf[pos],
@@ -51,6 +53,7 @@ struct ParsedAttr {
     /// Raw nla_type (may have NLA_F_NESTED set).
     nla_type: u16,
     /// Logical length (header + payload, not padded).
+    #[allow(dead_code)]
     nla_len: usize,
     /// Payload bytes (after the 4-byte header, before padding).
     payload: Vec<u8>,
@@ -65,6 +68,7 @@ impl ParsedAttr {
     }
 
     /// Advance past this attribute (header + payload + padding).
+    #[allow(dead_code)]
     fn total_padded(&self) -> usize {
         (self.nla_len + 3) & !3
     }
@@ -1077,7 +1081,7 @@ fn plan_filter_table_has_input_and_output_chains() {
 
 #[test]
 fn plan_nsg_creates_jump_from_forward() {
-    use std::collections::BTreeMap;
+    
     use z8s_core::store::StoreSnapshot;
     use z8s_core::types::{Namespace, ObjectMeta, ResourceRecord};
 
@@ -1690,7 +1694,7 @@ fn reconcile_report_empty() {
 fn list_veth_returns_vec() {
     let veths = network::rtnetlink::list_veth_interfaces();
     // Just verify it doesn't panic and returns a Vec.
-    assert!(veths.len() >= 0);
+    let _ = veths;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

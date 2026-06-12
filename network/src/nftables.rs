@@ -31,7 +31,7 @@
 use std::os::fd::AsRawFd;
 
 use nix::sys::socket::{
-    self, AddressFamily, MsgFlags, NetlinkAddr, SockFlag, SockProtocol, SockType,
+    self, AddressFamily, NetlinkAddr, SockFlag, SockProtocol, SockType,
 };
 
 use crate::model::*;
@@ -44,6 +44,7 @@ const NFNL_SUBSYS_NFTABLES: u16 = 10;
 
 // Nftables netlink message types (matching kernel enum nf_tables_msg_types)
 const NFT_MSG_NEWTABLE: u16 = 0;
+#[allow(dead_code)]
 const NFT_MSG_GETTABLE: u16 = 1;
 const NFT_MSG_DELTABLE: u16 = 2;
 const NFT_MSG_NEWCHAIN: u16 = 3;
@@ -78,6 +79,7 @@ const NFTA_SET_FLAGS: u16 = 3;
 const NFTA_SET_KEY_TYPE: u16 = 4;
 const NFTA_SET_KEY_LEN: u16 = 5;
 const NFTA_SET_DATA_LEN: u16 = 7;
+#[allow(dead_code)]
 const NFTA_SET_ELEMENTS: u16 = 13;
 const NFTA_SET_ELEM_KEY: u16 = 1;
 const NFTA_SET_ID: u16 = 10;
@@ -160,6 +162,7 @@ const NFT_REG_VERDICT: u32 = 0x00;
 const NLM_F_REQUEST: u16 = 0x01;
 const NLM_F_ACK: u16 = 0x04;
 const NLM_F_CREATE: u16 = 0x400;
+#[allow(dead_code)]
 const NLM_F_EXCL: u16 = 0x200;
 const NLM_F_APPEND: u16 = 0x800;
 
@@ -609,7 +612,9 @@ fn type_name_to_u32(name: &str) -> u32 {
 }
 
 /// Nftables set flags (bitmask).
+#[allow(dead_code)]
 const NFT_SET_ANONYMOUS: u32 = 1;
+#[allow(dead_code)]
 const NFT_SET_CONSTANT: u32 = 0x20;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -642,7 +647,7 @@ impl NlSocket {
     /// - BATCH_BEGIN: NLM_F_REQUEST only (no ACK)
     /// - Op:          NLM_F_REQUEST | NLM_F_CREATE | NLM_F_ACK
     /// - BATCH_END:   NLM_F_REQUEST only
-    /// Uses libc::sendmsg/recvmsg with iovec.
+    ///   Uses libc::sendmsg/recvmsg with iovec.
     pub fn send(&self, op: &NetlinkOp) -> std::io::Result<Vec<u8>> {
         let fd = open_netlink_fd()?;
         let (msg_type, body) = encode_op(op);
@@ -758,7 +763,7 @@ fn send_and_drain_acks(
     msg.msg_iov = &iov as *const _ as *mut _;
     msg.msg_iovlen = 1;
 
-    let sent = unsafe { libc::sendmsg(fd, &mut msg, 0) };
+    let sent = unsafe { libc::sendmsg(fd, &msg, 0) };
     if sent < 0 {
         let e = std::io::Error::last_os_error();
         unsafe { libc::close(fd) };

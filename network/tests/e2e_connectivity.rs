@@ -52,16 +52,15 @@ fn nft_table_exists(table: &str) -> bool {
 fn clean_everything() {
     let tables = run("nft", &["list", "tables"]);
     for line in tables.lines() {
-        if let Some(name) = line.strip_prefix("table ip ") {
-            if name.starts_with("z8s_")
+        if let Some(name) = line.strip_prefix("table ip ")
+            && (name.starts_with("z8s_")
                 || name.starts_with("vnet_")
-                || name.starts_with("nsg_")
+                || name.starts_with("nsg_"))
             {
                 let _ = Command::new("nft")
                     .args(["delete", "table", "ip", name])
                     .output();
             }
-        }
     }
     let netns_list = run("ip", &["netns", "list"]);
     for line in netns_list.lines() {
@@ -88,11 +87,10 @@ fn clean_everything() {
     }
     let links = run("ip", &["-br", "link", "show"]);
     for line in links.lines() {
-        if let Some(name) = line.split_whitespace().next() {
-            if name.starts_with("veth-e2") || name.starts_with("zeth-e2") {
+        if let Some(name) = line.split_whitespace().next()
+            && (name.starts_with("veth-e2") || name.starts_with("zeth-e2")) {
                 let _ = Command::new("ip").args(["link", "delete", name]).output();
             }
-        }
     }
 }
 
@@ -100,6 +98,7 @@ struct TestGuard {
     engine: Option<Netmux>,
     pods: Vec<(String, Ipv4Addr)>,
     netns_names: Vec<String>,
+    netns_children: Vec<std::process::Child>,
 }
 
 impl TestGuard {
@@ -112,16 +111,18 @@ impl TestGuard {
             ),
             pods: Vec::new(),
             netns_names: Vec::new(),
+            netns_children: Vec::new(),
         }
     }
 
     fn add_netns(&mut self, name: &str) -> u32 {
         run("ip", &["netns", "add", name]);
         run_in_netns(name, "ip", &["link", "set", "lo", "up"]);
-        let _child = Command::new("ip")
+        let child = Command::new("ip")
             .args(["netns", "exec", name, "sleep", "600"])
             .spawn()
             .unwrap_or_else(|e| panic!("spawn in {name}: {e}"));
+        self.netns_children.push(child);
         std::thread::sleep(std::time::Duration::from_millis(200));
     let pids = run("ip", &["netns", "pids", name]);
     let pid_line = pids.lines().find(|l| l.trim().parse::<u32>().is_ok())
@@ -455,6 +456,7 @@ fn diag_host_disruption_during_veth_ops() {
 
     let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
     let gw_str = gw.to_string();
+    #[allow(unused_assignments)]
     let mut drops: Vec<u32> = Vec::new();
 
     // Background pinger

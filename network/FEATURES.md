@@ -106,7 +106,7 @@
 | dnsmasq backend | ❌ | ✅ | pelagos only |
 | Upstream forwarding | 🔸 | ❌ | z8s implemented, not tested |
 | Per-network DNS config files | ❌ | ✅ | pelagos only |
-| DNS firewall rules (INPUT chain) | ❌ | ✅ | pelagos only |
+| DNS firewall rules (INPUT chain) | ✅ | ✅ | z8s dns-udp/dns-tcp accept on INPUT, kernel-tested |
 
 ## 5. Reconciliation / State Management
 
@@ -158,12 +158,12 @@
 
 | Test Suite | z8s | pelagos |
 |------------|-----|---------|
-| Unit tests (no kernel) | 85 | ~40 |
+| Unit tests (no kernel) | 86 | ~40 |
 | Wire-format tests (encode/decode) | 59 | ~8 |
-| Kernel integration tests (real nftables) | 24 | 0 direct |
+| Kernel integration tests (real nftables) | 25 | 0 direct |
 | Kernel apply test (full lifecycle) | 1 | manual/compose |
-| Pod deploy tests (veth + netns) | 2 | 1 (netns only) |
-| **Total** | **171** | **~50** |
+| E2e connectivity tests | 5 (2 pass, 3 fail pre-existing PID timing) | 1 (netns only) |
+| **Total (passing)** | **173** | **~50** |
 
 ---
 
