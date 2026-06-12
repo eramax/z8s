@@ -145,7 +145,19 @@ codec (pure `parse_query`/`build_response`), hot-swappable `DnsZone` behind
 **network/src/lib.rs** — re-exports, `NetworkEngine` trait, pod-state helpers
 
 **Build:** `cargo build -p network` clean (no warnings), `cargo clippy` clean.
-**Tests:** 84/84 unit tests pass.
+**Tests:** 85 unit tests + 32 wire format/scenario tests = 117 total, all passing.
+
+**Critical fixes applied (2026-06-12):**
+- Fixed 15 wrong nftables attribute type numbers (chain, set, rule, object) per kernel UAPI
+- Fixed NFTA_CHAIN_HOOK to be properly nested (was flat, kernel requires nested)
+- Fixed NFT_GOTO verdict value (was 0xFFFFFFFE=NFT_BREAK, should be 0xFFFFFFFC=-4)
+- Removed NFTA_TABLE_USERDATA (unnecessary, not sent by rustables)
+- Fixed NlSocket::send to use per-op flags via nlmsg_flags_for() instead of hardcoded
+- Fixed engine chain diff to delete+recreate when rules change (avoids need for kernel handles)
+- Removed NUL terminator from put_str to match rustables wire format exactly
+- Added NFTA_SET_FLAGS (NFT_SET_ANONYMOUS | NFT_SET_CONSTANT) for pre-populated sets
+- Added 32 wire format verification tests (byte-level encoding validation)
+- Added scenario tests: pod-to-pod, pod-to-internet masquerade, ClusterIP service, NSG deny-all, remote routes, DNS, VNet isolation, full stack
 
 **Key design decisions:**
 - No `rustables` / `nix` / `libc` — hand-rolled nftables + RTNETLINK encoding

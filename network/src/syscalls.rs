@@ -228,18 +228,18 @@ impl NlaBuf {
         self.put_slice(kind, &val.to_ne_bytes());
     }
 
-    /// Append a C-string in NLA format (NUL-terminated, padded).
-    /// The `nla_len` field is the logical length (header + payload, NUL-included),
-    /// NOT the padded total — the kernel reads `nla_len - 4` bytes of payload
-    /// then seeks to the next attr at `nla_len` rounded up to 4 bytes.
+    /// Append a C-string in NLA format (padded to 4-byte boundary).
+    /// `nla_len` is the logical length (header + payload), NOT the padded total.
+    /// The kernel reads `nla_len - 4` bytes of payload then seeks to the next
+    /// attr at `nla_len` rounded up to 4 bytes. String is NOT NUL-terminated
+    /// (matching rustables wire format exactly).
     pub fn put_str(&mut self, kind: u16, s: &str) {
         let bytes = s.as_bytes();
-        let nla_len = 4 + bytes.len() + 1; // include NUL
+        let nla_len = 4 + bytes.len();
         let pad = (4 - (nla_len % 4)) % 4;
         self.bytes.extend_from_slice(&(nla_len as u16).to_ne_bytes());
         self.bytes.extend_from_slice(&kind.to_ne_bytes());
         self.bytes.extend_from_slice(bytes);
-        self.bytes.push(0); // NUL terminator
         if pad > 0 {
             self.bytes.resize(self.bytes.len() + pad, 0);
         }
@@ -768,11 +768,12 @@ mod tests {
     }
 
     #[test]
-    fn nlabuf_put_str_nul_padded() {
+    fn nlabuf_put_str_padded() {
         let mut b = NlaBuf::new();
         b.put_str(1, "hi");
+        // nla_len = 4 + 2 = 6, padded to 8
         assert_eq!(b.len(), 8);
-        assert_eq!(&b.as_slice()[4..7], b"hi\0");
+        assert_eq!(&b.as_slice()[4..6], b"hi");
     }
 
     #[test]

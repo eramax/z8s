@@ -336,7 +336,6 @@ fn push_chain_diff(
                 rule: rule.clone(),
             });
         }
-        return;
     }
     // Same shape and rules — no ops needed.
 }
