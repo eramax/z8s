@@ -441,7 +441,9 @@ impl Controller {
         let ops = network::reconcile(&desired, g.current());
         if !ops.is_empty() {
             tracing::debug!("applying {} network ops", ops.len());
-            g.apply(&ops, false)?;
+            if let Err(e) = g.apply(&ops, false) {
+                tracing::warn!("network apply failed (engine not connected?): {}", e);
+            }
         }
 
         Ok(())

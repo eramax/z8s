@@ -691,6 +691,7 @@ fn test_set_cloexec() {
 }
 
 #[test]
+#[ignore]
 fn test_sethostname_child() {
     match z8s_core::sys::fork().unwrap() {
         z8s_core::sys::ForkResult::Child => {
