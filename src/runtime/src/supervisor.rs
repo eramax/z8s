@@ -450,6 +450,7 @@ impl ContainerSupervisor {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn spawn_root_ns_child(
         &self,
         entrypoint: &str, args: &[String], env: &[(String, String)],
@@ -496,6 +497,7 @@ impl ContainerSupervisor {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn spawn_userns_child(
         &self,
         entrypoint: &str, args: &[String], env: &[(String, String)],

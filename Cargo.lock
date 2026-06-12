@@ -146,6 +146,15 @@ dependencies = [
 [[package]]
 name = "controller"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "network",
+ "runtime",
+ "tokio",
+ "tracing",
+ "z8s_core",
+]
 
 [[package]]
 name = "core-foundation"

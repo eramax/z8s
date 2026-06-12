@@ -1,0 +1,14 @@
+[package]
+name = "controller"
+version = "0.1.0"
+edition = "2024"
+description = "Control loop: pod assignment (least-loaded) and reconciliation (start/stop containers)"
+
+[dependencies]
+z8s_core = { path = "../core" }
+runtime = { path = "../runtime" }
+network = { path = "../network" }
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "sync", "time"] }
+anyhow = "1.0.102"
+tracing = "0.1.44"
+async-trait = "0.1.89"

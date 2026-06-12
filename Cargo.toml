@@ -1,12 +1,12 @@
 [workspace]
 members = [
-    "core",
-    "runtime",
-    "network",
-    "sync",
-    "controller",
-    "api",
-    "z8s",
-    "z8s-node",
+    "src/core",
+    "src/runtime",
+    "src/network",
+    "src/sync",
+    "src/controller",
+    "src/api",
+    "src/z8s",
+    "src/z8s-node",
 ]
 resolver = "2"
