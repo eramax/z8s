@@ -2,12 +2,13 @@
 
 ## Sources
 
-| Codebase | Location | Role | Lines |
-|----------|----------|------|-------|
-| **Pelagos** | `/home/abb/dev/pelagos/src/` | Battle-tested container runtime (v0.65.31) | ~25,000 |
-| **z8s-old (src2)** | `/home/abb/dev/z8s/src2/` | Monolithic orchestrator (previous iteration) | ~15,000 (149 files) |
-| **z8s-new (src)** | `/home/abb/dev/z8s/src/` | Modular 8-crate orchestrator (in progress) | ~8,000 (49 files, mostly stubs) |
-| **Refactoring plan** | `/home/abb/dev/z8s/docs/refactoring-plan.md` | Target architecture for z8s | 2,049 lines |
+| Codebase | Location | Role | Lines | Status |
+|----------|----------|------|-------|--------|
+| **Pelagos** | `/home/abb/dev/pelagos/src/` | Battle-tested container runtime (v0.65.31) | ~43,500 | Production |
+| **z8s-old (src2)** | `/home/abb/dev/z8s/src2/` | Monolithic orchestrator (previous iteration) | ~15,000 | Archived (src2/) |
+| **z8s-new (src)** | `/home/abb/dev/z8s/src/` | Modular 8-crate orchestrator (active dev) | ~11,500 | Active — 4 crates real, 4 stubs |
+| **smolvm** | `/home/abb/dev/smolvm/src/` | OCI-native microVM runtime (v1.0.3) | ~15,000 | Production |
+| **Refactoring plan** | `/home/abb/dev/z8s/docs/refactoring-plan.md` | Target architecture for z8s | 2,049 lines | Plan |
 
 ## Mode Legend
 
@@ -15,11 +16,15 @@
 |------|------|-------------|-------------|
 | **Root** | 👑 | Requires root / CAP_SYS_ADMIN | Namespace ops, cgroups, nftables |
 | **Rootless** | 👤 | Works without root | User namespaces, fuse-overlayfs, pasta |
-| **Init (PID 1)** | 🔱 | Runs as PID 1  | Signal handling, zombie reaping, subreaper |
+| **Init (PID 1)** | 🔱 | Runs as PID 1 | Signal handling, zombie reaping, subreaper |
+| **VM** | 💻 | Hardware-level isolation (hypervisor) | KVM (Linux) or Hypervisor.framework (macOS) |
 
 > z8s operates primarily in **Root 👑** mode and **Init 🔱** mode (it is a PID 1 container
 > init tool). Rootless mode was attempted but not successfully implemented — features
 > marked 👤 are aspirational.
+>
+> smolvm operates in **VM 💻** mode — each workload gets its own kernel via libkrun VMM.
+> smolvm also uses 👑 for KVM access and 👤 for rootless Landlock/seccomp hardening.
 
 ---
 
@@ -29,10 +34,11 @@ Each feature includes:
 - ✅**Pelagos status** — is it implemented in Pelagos?
 - ✅**z8s-old (src2) status** — was it implemented in the old codebase?
 - ✅**z8s-new (src) status** — is it implemented in the new modular codebase?
+- ✅**smolvm status** — is it implemented in smolvm? (only for relevant categories)
 - **Description** — what the feature does (for non-obvious features)
 - **Benefits** — why we want it
 - **Effort** — estimated implementation effort
-- **Mode** — 👑 Root / 👤 Rootless / 🔱 Init
+- **Mode** — 👑 Root / 👤 Rootless / 🔱 Init / 💻 VM
 
 ---
 
@@ -40,23 +46,33 @@ Each feature includes:
 
 This is the **highest priority** category. z8s-new's `runtime` crate has a
 `ContainerSupervisor` that wraps Pelagos-like functionality but is missing 60+
-features that both Pelagos and src2 have.
+features that both Pelagos and src2 have. The `runtime` crate has ~2,700 lines
+of working code across image pull, rootfs, cgroup, supervisor, exec, and health
+probes.
+
+smolvm is a **microVM runtime** — it provides hardware-level isolation via
+libkrun/KVM/Hypervisor.framework rather than Linux namespaces. Most container
+runtime features are handled by the guest kernel inside the VM. smolvm's
+in-VM agent provides container-like execution via OCI images and overlays.
 
 ### 1.1 Namespace Isolation
 
-| # | Feature | Pelagos | z8s-old | z8s-new | Mode | Effort | Desc & Benefits |
-|---|---------|---------|---------|---------|------|--------|-----------------|
-| 1.1.1 | PID namespace | ✅ | ✅ | ✅ | 👑 | Done | Isolates process tree. Required for init mode. |
-| 1.1.2 | Mount namespace | ✅ | ✅ | ✅ | 👑 | Done | Isolates filesystem mounts. Required for chroot. |
-| 1.1.3 | UTS namespace | ✅ | ✅ | ✅ | 👑 | 1d | Isolates hostname + domain. Benefits: per-pod hostnames, DNS integration. |
-| 1.1.4 | IPC namespace | ✅ | ✅ | ✅ | 👑 | 1d | Isolates System V IPC + POSIX message queues. Benefits: prevents container escape via /dev/shm, required for pod sandbox. |
-| 1.1.5 | NET namespace | ✅ | ✅ | ✅ | 👑 | Done | Isolates network stack. Each pod gets own IP. |
-| 1.1.6 | USER namespace | ✅ | ✅ | Partial | 👤 | 3d | Maps container uid 0 to unprivileged host uid. Benefits: rootless containers, reduced attack surface. z8s attempted but failed. |
-| 1.1.7 | CGROUP namespace | ✅ | ❌ | ❌ | 👑 | 1d | Isolates cgroup hierarchy view. Benefits: prevents container from seeing host cgroups, required for CRI compliance. |
-| 1.1.8 | Namespace joining (setns) | ✅ | ✅ | Partial | 👑 | 1d | Join existing namespaces instead of creating new ones. Benefits: container exec, pod sandbox, network namespace joining, debugging. |
-| 1.1.9 | Rootless auto user-ns | ✅ | ❌ | ❌ | 👤 | 5d | Auto-create USER namespace when non-root. Benefits: rootless containers without `sudo`. Pelagos probes kernel 5.11+ support. z8s failed here before. |
+| # | Feature | Pelagos | z8s-old | z8s-new | smolvm | Mode | Effort | Desc & Benefits |
+|---|---------|---------|---------|---------|--------|------|--------|-----------------|
+| 1.1.1 | PID namespace | ✅ | ✅ | ✅ | N/A (💻) | 👑 | Done | Isolates process tree. Required for init mode. |
+| 1.1.2 | Mount namespace | ✅ | ✅ | ✅ | N/A (💻) | 👑 | Done | Isolates filesystem mounts. Required for chroot. |
+| 1.1.3 | UTS namespace | ✅ | ✅ | ✅ | N/A (💻) | 👑 | 1d | Isolates hostname + domain. Benefits: per-pod hostnames, DNS integration. |
+| 1.1.4 | IPC namespace | ✅ | ✅ | ✅ | N/A (💻) | 👑 | 1d | Isolates System V IPC + POSIX message queues. Benefits: prevents container escape via /dev/shm, required for pod sandbox. |
+| 1.1.5 | NET namespace | ✅ | ✅ | ✅ | N/A (💻) | 👑 | Done | Isolates network stack. Each pod gets own IP. |
+| 1.1.6 | USER namespace | ✅ | ✅ | Partial | N/A (💻) | 👤 | 3d | Maps container uid 0 to unprivileged host uid. Benefits: rootless containers, reduced attack surface. z8s attempted but failed. |
+| 1.1.7 | CGROUP namespace | ✅ | ❌ | ❌ | N/A (💻) | 👑 | 1d | Isolates cgroup hierarchy view. Benefits: prevents container from seeing host cgroups, required for CRI compliance. |
+| 1.1.8 | Namespace joining (setns) | ✅ | ✅ | Partial | N/A (💻) | 👑 | 1d | Join existing namespaces instead of creating new ones. Benefits: container exec, pod sandbox, network namespace joining, debugging. |
+| 1.1.9 | Rootless auto user-ns | ✅ | ❌ | ❌ | N/A (💻) | 👤 | 5d | Auto-create USER namespace when non-root. Benefits: rootless containers without `sudo`. Pelagos probes kernel 5.11+ support. z8s failed here before. |
 
 ### 1.2 Filesystem Isolation
+
+> smolvm: N/A — VM has its own kernel with built-in filesystem isolation. Guest
+> filesystem is provided via virtiofs or DAX, not namespace-based mounts.
 
 | # | Feature | Pelagos | z8s-old | z8s-new | Mode | Effort | Desc & Benefits |
 |---|---------|---------|---------|---------|------|--------|-----------------|
@@ -73,6 +89,8 @@ features that both Pelagos and src2 have.
 
 ### 1.3 Overlay Filesystem
 
+> smolvm: N/A — VM has its own kernel with hardware isolation. These features don't apply.
+
 | # | Feature | Pelagos | z8s-old | z8s-new | Mode | Effort | Desc & Benefits |
 |---|---------|---------|---------|---------|------|--------|-----------------|
 | 1.3.1 | Single overlay (upper+work) | ✅ | ❌ | ❌ | 👑 | 2d | Basic overlayfs: upper dir for writes, work dir for metadata. Benefits: copy-on-write rootfs, base image stays clean. |
@@ -85,6 +103,8 @@ features that both Pelagos and src2 have.
 
 ### 1.4 Bind Mounts & Volumes
 
+> smolvm: N/A — VM has its own kernel with hardware isolation. These features don't apply.
+
 | # | Feature | Pelagos | z8s-old | z8s-new | Mode | Effort | Desc & Benefits |
 |---|---------|---------|---------|---------|------|--------|-----------------|
 | 1.4.1 | Bind mount (RW) | ✅ | ✅ | ❌ | 👑 | 1d | Mount host dir into container read-write. Benefits: shared data between host and container. |
@@ -96,16 +116,18 @@ features that both Pelagos and src2 have.
 
 ### 1.5 Security (Seccomp)
 
-| # | Feature | Pelagos | z8s-old | z8s-new | Mode | Effort | Desc & Benefits |
-|---|---------|---------|---------|---------|------|--------|-----------------|
-| 1.5.1 | Docker default seccomp profile | ✅ | ❌ | ❌ | 👑👤 | 2d | Blocks ~44 dangerous syscalls (mount, ptrace, bpf, etc.). Benefits: defense-in-depth, industry standard, prevents container escape. |
-| 1.5.2 | Minimal seccomp profile | ✅ | ❌ | ❌ | 👑👤 | 1d | ~40 essential syscalls only. Benefits: maximum restriction for untrusted code. |
-| 1.5.3 | Docker + io_uring profile | ✅ | ❌ | ❌ | 👑👤 | 1d | Docker profile but allow io_uring syscalls. Benefits: database workloads need async I/O. |
-| 1.5.4 | Custom BPF program | ✅ | ❌ | ❌ | 👑👤 | 1d | Apply arbitrary seccompiler BpfProgram. Benefits: fine-grained syscall whitelisting. |
-| 1.5.5 | seccomp applied last in pre_exec | ✅ | ❌ | ❌ | 👑👤 | 1d | Seccomp filter installed after all setup (mount, setuid). Benefits: setup syscalls not blocked. |
-| 1.5.6 | SECCOMP_RET_USER_NOTIF | ✅ | ❌ | ❌ | 👑 | 5d | Userspace syscall interception (Linux 5.0+). Benefits: proxy connect/mount without CAP_SYS_ADMIN, audit sensitive syscalls. |
+| # | Feature | Pelagos | z8s-old | z8s-new | smolvm | Mode | Effort | Desc & Benefits |
+|---|---------|---------|---------|---------|--------|------|--------|-----------------|
+| 1.5.1 | Docker default seccomp profile | ✅ | ❌ | ❌ | ✅ | 👑👤 | 2d | Blocks ~44 dangerous syscalls (mount, ptrace, bpf, etc.). Benefits: defense-in-depth, industry standard, prevents container escape. |
+| 1.5.2 | Minimal seccomp profile | ✅ | ❌ | ❌ | ✅ | 👑👤 | 1d | ~40 essential syscalls only. Benefits: maximum restriction for untrusted code. |
+| 1.5.3 | Docker + io_uring profile | ✅ | ❌ | ❌ | ✅ | 👑👤 | 1d | Docker profile but allow io_uring syscalls. Benefits: database workloads need async I/O. |
+| 1.5.4 | Custom BPF program | ✅ | ❌ | ❌ | ✅ | 👑👤 | 1d | Apply arbitrary seccompiler BpfProgram. Benefits: fine-grained syscall whitelisting. |
+| 1.5.5 | seccomp applied last in pre_exec | ✅ | ❌ | ❌ | ✅ | 👑👤 | 1d | Seccomp filter installed after all setup (mount, setuid). Benefits: setup syscalls not blocked. |
+| 1.5.6 | SECCOMP_RET_USER_NOTIF | ✅ | ❌ | ❌ | ✅ | 👑 | 5d | Userspace syscall interception (Linux 5.0+). Benefits: proxy connect/mount without CAP_SYS_ADMIN, audit sensitive syscalls. |
 
 ### 1.6 Security (Capabilities & Privileges)
+
+> smolvm: N/A — VM has its own kernel with hardware isolation. These features don't apply.
 
 | # | Feature | Pelagos | z8s-old | z8s-new | Mode | Effort | Desc & Benefits |
 |---|---------|---------|---------|---------|------|--------|-----------------|
@@ -120,13 +142,15 @@ features that both Pelagos and src2 have.
 
 ### 1.7 Security (LSM & Labels)
 
-| # | Feature | Pelagos | z8s-old | z8s-new | Mode | Effort | Desc & Benefits |
-|---|---------|---------|---------|---------|------|--------|-----------------|
-| 1.7.1 | Landlock LSM rules | ✅ | ❌ | ❌ | 👤 | 3d | Path-based access control (Linux 5.13+). Benefits: sandbox filesystem without root, self-contained (no external profiles), survives exec. Landlock has 4 ABI versions (5.13, 5.19, 6.2, 6.7). |
-| 1.7.2 | AppArmor profiles | ✅ | ❌ | ❌ | 👑 | 1d | Write profile name to /proc/self/attr/apparmor/exec. Benefits: MAC on top of DAC, matches Docker security model. |
-| 1.7.3 | SELinux labels | ✅ | ❌ | ❌ | 👑 | 1d | Write label to /proc/self/attr/exec. Benefits: MAC for RHEL/CentOS systems. |
+| # | Feature | Pelagos | z8s-old | z8s-new | smolvm | Mode | Effort | Desc & Benefits |
+|---|---------|---------|---------|---------|--------|------|--------|-----------------|
+| 1.7.1 | Landlock LSM rules | ✅ | ❌ | ❌ | ✅ | 👤 | 3d | Path-based access control (Linux 5.13+). Benefits: sandbox filesystem without root, self-contained (no external profiles), survives exec. Landlock has 4 ABI versions (5.13, 5.19, 6.2, 6.7). |
+| 1.7.2 | AppArmor profiles | ✅ | ❌ | ❌ | ❌ | 👑 | 1d | Write profile name to /proc/self/attr/apparmor/exec. Benefits: MAC on top of DAC, matches Docker security model. |
+| 1.7.3 | SELinux labels | ✅ | ❌ | ❌ | ❌ | 👑 | 1d | Write label to /proc/self/attr/exec. Benefits: MAC for RHEL/CentOS systems. |
 
 ### 1.8 Resource Limits (rlimits)
+
+> smolvm: N/A — VM has its own kernel with hardware isolation. These features don't apply.
 
 | # | Feature | Pelagos | z8s-old | z8s-new | Mode | Effort | Desc & Benefits |
 |---|---------|---------|---------|---------|------|--------|-----------------|
@@ -136,6 +160,8 @@ features that both Pelagos and src2 have.
 | 1.8.4 | All rlimit types | ✅ | ❌ | ❌ | 👑👤 | 1d | Generic interface for any rlimit. Benefits: RLIMIT_NPROC, RLIMIT_STACK, etc. |
 
 ### 1.9 Resource Limits (cgroups v2)
+
+> smolvm: N/A — VM has its own kernel with hardware isolation. These features don't apply.
 
 | # | Feature | Pelagos | z8s-old | z8s-new | Mode | Effort | Desc & Benefits |
 |---|---------|---------|---------|---------|------|--------|-----------------|
@@ -156,21 +182,23 @@ features that both Pelagos and src2 have.
 
 ### 1.10 Process Execution
 
-| # | Feature | Pelagos | z8s-old | z8s-new | Mode | Effort | Desc & Benefits |
-|---|---------|---------|---------|---------|------|--------|-----------------|
-| 1.10.1 | PTY/Interactive session | ✅ | ❌ | ❌ | 👑👤 | 3d | Full pty.rs: openpty, raw mode relay, SIGWINCH, TerminalGuard RAII. Benefits: `kubectl exec -it`, interactive shells. |
-| 1.10.2 | stdio capture (stdout/stderr) | ✅ | ✅ | ❌ | 👑👤 | 1d | Pipe stdout/stderr to parent. Benefits: logging, `kubectl logs`. |
-| 1.10.3 | Working directory (chroot-relative) | ✅ | ✅ | ❌ | 👑👤 | 0.5d | Set CWD inside container. Benefits: OCI process.cwd support. |
-| 1.10.4 | Hostname (sethostname) | ✅ | ✅ | Partial | 👑 | 0.5d | Set hostname via UTS namespace. Benefits: pod identity. |
-| 1.10.5 | UID/GID inside container | ✅ | ✅ | ❌ | 👑👤 | 1d | Run as specific uid/gid. Benefits: security (don't run as root). |
-| 1.10.6 | Supplementary groups | ✅ | ❌ | ❌ | 👑 | 0.5d | AdditionalGIDs from OCI spec. Benefits: group-based file access. |
-| 1.10.7 | umask | ✅ | ❌ | ❌ | 👑👤 | 0.5d | Set file creation mask. Benefits: OCI process.user.umask. |
-| 1.10.8 | Environment variable control | ✅ | ✅ | ❌ | 👑👤 | 1d | env_clear(), env(), merge patterns. Benefits: OCI ENV support. |
-| 1.10.9 | Sysctl (kernel params) | ✅ | ❌ | ❌ | 👑 | 1d | Write /proc/sys values. Benefits: networking tuning per container. |
-| 1.10.10 | Device nodes (mknod) | ✅ | ❌ | ❌ | 👑 | 1d | Create device nodes inside container. Benefits: /dev/fuse, /dev/net/tun. |
-| 1.10.11 | /dev symlinks | ✅ | ❌ | ❌ | 👑 | 0.5d | Create symlinks in /dev. Benefits: compatibility with apps expecting specific device paths. |
+| # | Feature | Pelagos | z8s-old | z8s-new | smolvm | Mode | Effort | Desc & Benefits |
+|---|---------|---------|---------|---------|--------|------|--------|-----------------|
+| 1.10.1 | PTY/Interactive session | ✅ | ❌ | ❌ | ✅ | 👑👤 | 3d | Full pty.rs: openpty, raw mode relay, SIGWINCH, TerminalGuard RAII. Benefits: `kubectl exec -it`, interactive shells. |
+| 1.10.2 | stdio capture (stdout/stderr) | ✅ | ✅ | ❌ | ✅ | 👑👤 | 1d | Pipe stdout/stderr to parent. Benefits: logging, `kubectl logs`. |
+| 1.10.3 | Working directory (chroot-relative) | ✅ | ✅ | ❌ | ✅ | 👑👤 | 0.5d | Set CWD inside container. Benefits: OCI process.cwd support. |
+| 1.10.4 | Hostname (sethostname) | ✅ | ✅ | Partial | ✅ | 👑 | 0.5d | Set hostname via UTS namespace. Benefits: pod identity. |
+| 1.10.5 | UID/GID inside container | ✅ | ✅ | ❌ | ✅ | 👑👤 | 1d | Run as specific uid/gid. Benefits: security (don't run as root). |
+| 1.10.6 | Supplementary groups | ✅ | ❌ | ❌ | ❌ | 👑 | 0.5d | AdditionalGIDs from OCI spec. Benefits: group-based file access. |
+| 1.10.7 | umask | ✅ | ❌ | ❌ | ❌ | 👑👤 | 0.5d | Set file creation mask. Benefits: OCI process.user.umask. |
+| 1.10.8 | Environment variable control | ✅ | ✅ | ❌ | ✅ | 👑👤 | 1d | env_clear(), env(), merge patterns. Benefits: OCI ENV support. |
+| 1.10.9 | Sysctl (kernel params) | ✅ | ❌ | ❌ | ❌ | 👑 | 1d | Write /proc/sys values. Benefits: networking tuning per container. |
+| 1.10.10 | Device nodes (mknod) | ✅ | ❌ | ❌ | ❌ | 👑 | 1d | Create device nodes inside container. Benefits: /dev/fuse, /dev/net/tun. |
+| 1.10.11 | /dev symlinks | ✅ | ❌ | ❌ | ❌ | 👑 | 0.5d | Create symlinks in /dev. Benefits: compatibility with apps expecting specific device paths. |
 
 ### 1.11 Wasm/WASI Runtime
+
+> smolvm: N/A — VM has its own kernel with hardware isolation. These features don't apply.
 
 | # | Feature | Pelagos | z8s-old | z8s-new | Mode | Effort | Desc & Benefits |
 |---|---------|---------|---------|---------|------|--------|-----------------|
@@ -178,6 +206,8 @@ features that both Pelagos and src2 have.
 | 1.11.2 | wasmtime/WasmEdge backend | ✅ | ❌ | ❌ | 👑👤 | N/A | Wasm subprocess execution. z8s doesn't need Wasm support. |
 
 ### 1.12 OCI Lifecycle (config.json format)
+
+> smolvm: N/A — VM has its own kernel with hardware isolation. These features don't apply.
 
 | # | Feature | Pelagos | z8s-old | z8s-new | Mode | Effort | Desc & Benefits |
 |---|---------|---------|---------|---------|------|--------|-----------------|
@@ -200,21 +230,21 @@ z8s-new has a `Netmux`-based networking crate but it's simpler than both Pelagos
 
 ### 2.1 Core Networking
 
-| # | Feature | Pelagos | z8s-old | z8s-new | Mode | Effort | Desc & Benefits |
-|---|---------|---------|---------|---------|------|--------|-----------------|
-| 2.1.1 | Loopback (lo up, 127.0.0.1) | ✅ | ✅ | ✅ | 👑👤 | Done | Bring up loopback via ioctl. Required for localhost. |
-| 2.1.2 | veth pair creation | ✅ | ✅ | ✅ | 👑 | Done | Create virtual ethernet pair. Required for bridge networking. |
-| 2.1.3 | Bridge create/manage | ✅ | ✅ | ✅ | 👑 | Done | Linux bridge via netlink. Required for pod networking. |
-| 2.1.4 | Named network namespace | ✅ | ✅ | ❌ | 👑 | 1d | Named netns at /run/netns/{name}. Benefits: debuggable via `ip netns list`, no PID race. |
-| 2.1.5 | Default bridge (pelagos0) | ✅ | ❌ | ❌ | 👑 | 1d | Auto-bootstrap default bridge network. Benefits: out-of-box networking. |
-| 2.1.6 | Network definition persistence | ✅ | ✅ | ❌ | 👑 | 2d | NetworkDef with name/subnet/gateway saved to JSON. Benefits: named networks survive reboot. |
-| 2.1.7 | Auto subnet allocation from pool | ✅ | ✅ | ❌ | 👑 | 2d | Carve /24 from 10.99.0.0/16 pool. Benefits: automatic network creation. |
-| 2.1.8 | Per-network IPAM (flock) | ✅ | ✅ | ❌ | 👑 | 2d | File-locked next-IP file per network. Benefits: no IP conflicts between concurrent spawns. |
+| # | Feature | Pelagos | z8s-old | z8s-new | smolvm | Mode | Effort | Desc & Benefits |
+|---|---------|---------|---------|---------|--------|------|--------|-----------------|
+| 2.1.1 | Loopback (lo up, 127.0.0.1) | ✅ | ✅ | ✅ | N/A (💻) | 👑👤 | Done | Bring up loopback via ioctl. Required for localhost. |
+| 2.1.2 | veth pair creation | ✅ | ✅ | ✅ | N/A (💻) | 👑 | Done | Create virtual ethernet pair. Required for bridge networking. |
+| 2.1.3 | Bridge create/manage | ✅ | ✅ | ✅ | N/A (💻) | 👑 | Done | Linux bridge via netlink. Required for pod networking. |
+| 2.1.4 | Named network namespace | ✅ | ✅ | ❌ | N/A (💻) | 👑 | 1d | Named netns at /run/netns/{name}. Benefits: debuggable via `ip netns list`, no PID race. |
+| 2.1.5 | Default bridge (pelagos0) | ✅ | ❌ | ❌ | N/A (💻) | 👑 | 1d | Auto-bootstrap default bridge network. Benefits: out-of-box networking. |
+| 2.1.6 | Network definition persistence | ✅ | ✅ | ❌ | ❌ | 👑 | 2d | NetworkDef with name/subnet/gateway saved to JSON. Benefits: named networks survive reboot. |
+| 2.1.7 | Auto subnet allocation from pool | ✅ | ✅ | ❌ | N/A (💻) | 👑 | 2d | Carve /24 from 10.99.0.0/16 pool. Benefits: automatic network creation. |
+| 2.1.8 | Per-network IPAM (flock) | ✅ | ✅ | ❌ | N/A (💻) | 👑 | 2d | File-locked next-IP file per network. Benefits: no IP conflicts between concurrent spawns. |
 
 ### 2.2 Advanced Networking
 
-| # | Feature | Pelagos | z8s-old | z8s-new | Mode | Effort | Desc & Benefits |
-|---|---------|---------|---------|---------|------|--------|-----------------|
+| # | Feature | Pelagos | z8s-old | z8s-new | smolvm | Mode | Effort | Desc & Benefits |
+|---|---------|---------|---------|---------|--------|------|--------|-----------------|
 | 2.2.1 | IPv6 dual-stack (ULA /64) | ✅ | ✅ | ❌ | 👑 | 5d | Deterministic fd00::/8 per network. Benefits: IPv6-only clusters, dual-stack workloads. |
 | 2.2.2 | IPv6 NDP pre-seed | ✅ | ❌ | ❌ | 👑 | 1d | Pre-seed neighbor cache for bridge MAC. Benefits: prevents first-packet loss on IPv6. |
 | 2.2.3 | NAT (MASQUERADE) nftables | ✅ | ✅ | ❌ | 👑 | 3d | nftables MASQUERADE rule. Benefits: internet access from containers. |
@@ -229,8 +259,8 @@ z8s-new has a `Netmux`-based networking crate but it's simpler than both Pelagos
 
 ### 2.3 DNS
 
-| # | Feature | Pelagos | z8s-old | z8s-new | Mode | Effort | Desc & Benefits |
-|---|---------|---------|---------|---------|------|--------|-----------------|
+| # | Feature | Pelagos | z8s-old | z8s-new | smolvm | Mode | Effort | Desc & Benefits |
+|---|---------|---------|---------|---------|--------|------|--------|-----------------|
 | 2.3.1 | /etc/resolv.conf injection (bind-mount) | ✅ | ✅ | ✅ | 👑 | 1d | Write per-container resolv.conf. Benefits: container DNS config. |
 | 2.3.2 | DNS search domains | ✅ | ✅ | ❌ | 👑 | 0.5d | `search` line in resolv.conf. Benefits: short-name resolution like `svc.cluster.local`. |
 | 2.3.3 | DNS resolver options | ✅ | ❌ | ❌ | 👑 | 0.5d | `options` line (ndots:5, etc.). Benefits: DNS resolution tuning. |
@@ -242,8 +272,8 @@ z8s-new has a `Netmux`-based networking crate but it's simpler than both Pelagos
 
 ### 2.4 Netlink & nftables (low-level)
 
-| # | Feature | Pelagos | z8s-old | z8s-new | Mode | Effort | Desc & Benefits |
-|---|---------|---------|---------|---------|------|--------|-----------------|
+| # | Feature | Pelagos | z8s-old | z8s-new | smolvm | Mode | Effort | Desc & Benefits |
+|---|---------|---------|---------|---------|--------|------|--------|-----------------|
 | 2.4.1 | Netlink bridge management | ✅ | ✅ | ✅ | 👑 | Done | Direct rtnetlink sockets. Benefits: no `ip` CLI dependency. |
 | 2.4.2 | Netlink veth management | ✅ | ✅ | ✅ | 👑 | Done | |
 | 2.4.3 | Netlink addr add/remove | ✅ | ✅ | ✅ | 👑 | Done | |
@@ -262,8 +292,8 @@ z8s-new has a `Netmux`-based networking crate but it's simpler than both Pelagos
 
 ### 2.5 Network Policy & Services
 
-| # | Feature | Pelagos | z8s-old | z8s-new | Mode | Effort | Desc & Benefits |
-|---|---------|---------|---------|---------|------|--------|-----------------|
+| # | Feature | Pelagos | z8s-old | z8s-new | smolvm | Mode | Effort | Desc & Benefits |
+|---|---------|---------|---------|---------|--------|------|--------|-----------------|
 | 2.5.1 | Service (ClusterIP) | ❌ | ✅ | ❌ | 👑 | 5d | Virtual IP with pod backend resolution. Benefits: stable service endpoint. |
 | 2.5.2 | TCP service proxy | ❌ | ✅ | ❌ | 👑 | 3d | Userspace TCP proxy for ClusterIP. Benefits: service backend load balancing. |
 | 2.5.3 | Endpoints/EndpointSlices | ❌ | ✅ | ❌ | 👑 | 3d | Track healthy pod backends per service. Benefits: dynamic routing. |
@@ -341,6 +371,8 @@ z8s-new has a `Netmux`-based networking crate but it's simpler than both Pelagos
 
 ## 5. CONTROLLER / SCHEDULER (z8s: `controller/crate`, Pelagos: minimal (compose only), src2: `scheduler/`)
 
+> smolvm: N/A — VM has its own kernel with hardware isolation. These features don't apply.
+
 | # | Feature | Pelagos | z8s-old | z8s-new | Mode | Effort | Desc & Benefits |
 |---|---------|---------|---------|---------|------|--------|-----------------|
 | 5.1 | Event-driven reconciliation | ❌ | ✅ | ❌ | 👑 | 5d | StoreEventHub subscriptions react to changes instantly. Benefits: no polling delay. |
@@ -395,6 +427,8 @@ z8s-new has a `Netmux`-based networking crate but it's simpler than both Pelagos
 
 ## 7. AUTH & RBAC (z8s: none, Pelagos: none, src2: `bootstrap/`, `api/auth/`)
 
+> smolvm: N/A — VM has its own kernel with hardware isolation. These features don't apply.
+
 | # | Feature | Pelagos | z8s-old | z8s-new | Mode | Effort | Desc & Benefits |
 |---|---------|---------|---------|---------|------|--------|-----------------|
 | 7.1 | Role / ClusterRole | ❌ | ✅ | ❌ | 👑 | 5d | RBAC role definitions. Benefits: access control. |
@@ -409,6 +443,8 @@ z8s-new has a `Netmux`-based networking crate but it's simpler than both Pelagos
 ---
 
 ## 8. DISTRIBUTED STORE (z8s: `core/src/store/`, Pelagos: none, src2: `store/`)
+
+> smolvm: N/A — VM has its own kernel with hardware isolation. These features don't apply.
 
 | # | Feature | Pelagos | z8s-old | z8s-new | Mode | Effort | Desc & Benefits |
 |---|---------|---------|---------|---------|------|--------|-----------------|
@@ -429,6 +465,8 @@ z8s-new has a `Netmux`-based networking crate but it's simpler than both Pelagos
 ## 9. INIT MODE (PID 1) (z8s: `src2/init.rs`, `src2/node.rs`, Pelagos: none)
 
 These are features unique to z8s's role as PID 1.
+
+> smolvm: N/A — VM has its own kernel with hardware isolation. These features don't apply.
 
 | # | Feature | Pelagos | z8s-old | z8s-new | Mode | Effort | Desc & Benefits |
 |---|---------|---------|---------|---------|------|--------|-----------------|
@@ -466,6 +504,8 @@ These are features unique to z8s's role as PID 1.
 ---
 
 ## 11. COMPOSE (z8s: none, Pelagos: `compose.rs`, `sexpr.rs`)
+
+> smolvm: N/A — VM has its own kernel with hardware isolation. These features don't apply.
 
 | # | Feature | Pelagos | z8s-old | z8s-new | Mode | Effort | Desc & Benefits |
 |---|---------|---------|---------|---------|------|--------|-----------------|
