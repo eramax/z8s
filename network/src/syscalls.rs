@@ -57,26 +57,28 @@ const NFT_MSG_DELOBJ: u16 = 13;
 // Nftables attribute types
 const NFTA_TABLE_NAME: u16 = 1;
 const NFTA_TABLE_FLAGS: u16 = 2;
-const NFTA_TABLE_USERDATA: u16 = 6;
-const NFTA_CHAIN_NAME: u16 = 1;
-const NFTA_CHAIN_TABLE: u16 = 2;
-const NFTA_CHAIN_HOOKNUM: u16 = 4;
-const NFTA_CHAIN_PRIORITY: u16 = 5;
-const NFTA_CHAIN_POLICY: u16 = 7;
-const NFTA_CHAIN_TYPE: u16 = 6;
+const NFTA_CHAIN_TABLE: u16 = 1;
+const NFTA_CHAIN_NAME: u16 = 3;
+const NFTA_CHAIN_HOOK: u16 = 4;
+const NFTA_CHAIN_POLICY: u16 = 5;
+const NFTA_CHAIN_TYPE: u16 = 7;
+// Hook sub-attributes (inside the nested NFTA_CHAIN_HOOK)
+const NFTA_HOOK_HOOKNUM: u16 = 1;
+const NFTA_HOOK_PRIORITY: u16 = 2;
 const NFTA_RULE_TABLE: u16 = 1;
 const NFTA_RULE_CHAIN: u16 = 2;
+const NFTA_RULE_HANDLE: u16 = 3;
 const NFTA_RULE_EXPRESSIONS: u16 = 4;
-const NFTA_RULE_HANDLE: u16 = 5;
-const NFTA_SET_NAME: u16 = 1;
-const NFTA_SET_TABLE: u16 = 2;
-const NFTA_SET_KEY_TYPE: u16 = 3;
-const NFTA_SET_KEY_LEN: u16 = 4;
-const NFTA_SET_DATA_LEN: u16 = 6;
-const NFTA_SET_ELEMENTS: u16 = 9;
+const NFTA_SET_TABLE: u16 = 1;
+const NFTA_SET_NAME: u16 = 2;
+const NFTA_SET_FLAGS: u16 = 3;
+const NFTA_SET_KEY_TYPE: u16 = 4;
+const NFTA_SET_KEY_LEN: u16 = 5;
+const NFTA_SET_DATA_LEN: u16 = 7;
+const NFTA_SET_ELEMENTS: u16 = 13;
 const NFTA_SET_ELEM_KEY: u16 = 1;
-const NFTA_OBJ_NAME: u16 = 1;
-const NFTA_OBJ_TABLE: u16 = 2;
+const NFTA_OBJ_TABLE: u16 = 1;
+const NFTA_OBJ_NAME: u16 = 2;
 const NFTA_OBJ_TYPE: u16 = 3;
 const NFTA_OBJ_DATA: u16 = 4;
 const NFTA_COUNTER_BYTES: u16 = 1;
@@ -103,7 +105,7 @@ const NFTA_VERDICT_CHAIN: u16 = 2;
 const NF_DROP: u32 = 0;
 const NF_ACCEPT: u32 = 1;
 const NFT_JUMP: u32 = 0xFFFF_FFFD; // -3
-const NFT_GOTO: u32 = 0xFFFF_FFFE; // -2
+const NFT_GOTO: u32 = 0xFFFF_FFFC; // -4
 const NFT_RETURN: u32 = 0xFFFF_FFFB; // -5
 
 // Expression attrs.
@@ -164,11 +166,11 @@ const NFNL_MSG_BATCH_END: u16 = 2;
 pub fn nlmsg_flags_for(op: &NetlinkOp) -> u16 {
     let base = NLM_F_REQUEST | NLM_F_ACK;
     match op {
-        NetlinkOp::AddTable { .. }
-        | NetlinkOp::AddChain { .. }
-        | NetlinkOp::AddSet { .. }
-        | NetlinkOp::AddCounter { .. } => base | NLM_F_CREATE | NLM_F_EXCL,
-        NetlinkOp::AddRule { .. } => base | NLM_F_CREATE | NLM_F_EXCL | NLM_F_APPEND,
+        NetlinkOp::AddTable { .. } => base | NLM_F_CREATE | NLM_F_EXCL,
+        NetlinkOp::AddChain { .. } | NetlinkOp::AddSet { .. } | NetlinkOp::AddCounter { .. } => {
+            base | NLM_F_CREATE | NLM_F_EXCL
+        }
+        NetlinkOp::AddRule { .. } => base | NLM_F_CREATE | NLM_F_APPEND,
         NetlinkOp::DelTable { .. }
         | NetlinkOp::DelChain { .. }
         | NetlinkOp::DelRule { .. }
@@ -434,14 +436,7 @@ pub fn encode_op(op: &NetlinkOp) -> (u16, Vec<u8>) {
         NetlinkOp::AddTable { family, name } => {
             let mut b = NlaBuf::new();
             b.put_str(NFTA_TABLE_NAME, name);
-            // NFTA_TABLE_FLAGS is required by the kernel (value 0 = no flags).
-            // Both nft CLI and rustables send this; without it the kernel
-            // rejects the op with EINVAL.
             b.put_u32(NFTA_TABLE_FLAGS, 0);
-            // NFTA_TABLE_USERDATA (16 bytes of zeros) — nft CLI sends this
-            // for its own internal bookkeeping. The kernel accepts an empty
-            // value, but sending it matches nft CLI's wire format exactly.
-            b.put_slice(NFTA_TABLE_USERDATA, &[0u8; 16]);
             (NFT_MSG_NEWTABLE, build_message(*family, b.finish()))
         }
         NetlinkOp::DelTable { family, name } => {
@@ -455,8 +450,12 @@ pub fn encode_op(op: &NetlinkOp) -> (u16, Vec<u8>) {
             b.put_str(NFTA_CHAIN_NAME, &chain.name);
             b.put_str(NFTA_CHAIN_TYPE, chain.kind.as_str());
             if let Some(hook) = chain.hook {
-                b.put_u32(NFTA_CHAIN_HOOKNUM, hook.as_u32());
-                b.put_u32(NFTA_CHAIN_PRIORITY, chain.priority as u32);
+                // NFTA_CHAIN_HOOK is a nested attribute containing
+                // NFTA_HOOK_HOOKNUM and NFTA_HOOK_PRIORITY.
+                b.put_nested(NFTA_CHAIN_HOOK, |h| {
+                    h.put_u32(NFTA_HOOK_HOOKNUM, hook.as_u32());
+                    h.put_u32(NFTA_HOOK_PRIORITY, chain.priority as u32);
+                });
             }
             b.put_u32(NFTA_CHAIN_POLICY, chain.policy.as_u32());
             (NFT_MSG_NEWCHAIN, build_message(*family, b.finish()))
@@ -492,6 +491,12 @@ pub fn encode_op(op: &NetlinkOp) -> (u16, Vec<u8>) {
             let mut b = NlaBuf::new();
             b.put_str(NFTA_SET_TABLE, table);
             b.put_str(NFTA_SET_NAME, &set.name);
+            // Set flags: anonymous (created inline), constant (pre-populated elements).
+            let mut flags = NFT_SET_ANONYMOUS;
+            if !set.elements.is_empty() {
+                flags |= NFT_SET_CONSTANT;
+            }
+            b.put_u32(NFTA_SET_FLAGS, flags);
             b.put_u32(NFTA_SET_KEY_TYPE, type_name_to_u32(&set.key_type));
             b.put_u32(NFTA_SET_KEY_LEN, set.key_len);
             if set.data_len > 0 {
@@ -573,6 +578,10 @@ fn type_name_to_u32(name: &str) -> u32 {
     }
 }
 
+/// Nftables set flags (bitmask).
+const NFT_SET_ANONYMOUS: u32 = 1;
+const NFT_SET_CONSTANT: u32 = 0x20;
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Netlink socket — uses nix (same as rustables) for open/bind/send/recv
 // ═══════════════════════════════════════════════════════════════════════════
@@ -639,9 +648,8 @@ impl NlSocket {
         begin.extend_from_slice(&[0u8, 0, 0, 10]);
 
         // Build the actual op message: nlmsghdr(16) + body.
-        // Flags: NLM_F_REQUEST | NLM_F_CREATE | NLM_F_ACK (rustables pattern).
-        // The kernel sends an ACK for the op because it carries NLM_F_ACK.
-        let op_flags = NLM_F_REQUEST | NLM_F_CREATE | NLM_F_ACK;
+        // Use the correct flags for this specific op.
+        let op_flags = nlmsg_flags_for(op);
         let total_len = (16 + body.len()) as u32;
         let mut msg = Vec::with_capacity(16 + body.len());
         msg.extend_from_slice(&total_len.to_ne_bytes());
@@ -729,6 +737,26 @@ mod tests {
     use super::*;
     use std::net::Ipv4Addr;
 
+    /// Scan `body` (nfgenmsg + attrs) for a top-level nlattr with the given
+    /// type. Returns `Some(nla_type)` if found, `None` otherwise.
+    fn find_attr_type(body: &[u8], target_type: u16) -> Option<u16> {
+        // body starts with nfgenmsg (4 bytes), then attributes.
+        let mut pos = 4;
+        while pos + 4 <= body.len() {
+            let nla_len = u16::from_ne_bytes([body[pos], body[pos + 1]]) as usize;
+            let nla_type = u16::from_ne_bytes([body[pos + 2], body[pos + 3]]);
+            if nla_len < 4 {
+                break;
+            }
+            let base_type = nla_type & !NLA_F_NESTED;
+            if base_type == target_type {
+                return Some(nla_type);
+            }
+            pos += (nla_len + 3) & !3; // 4-byte align
+        }
+        None
+    }
+
     #[test]
     fn nlabuf_put_u32_padded() {
         let mut b = NlaBuf::new();
@@ -784,8 +812,9 @@ mod tests {
         };
         let (msg_type, body) = encode_op(&op);
         assert_eq!(msg_type, NFT_MSG_NEWTABLE);
-        // body = nfgenmsg(4) + NLA TABLE_NAME(12) + NLA TABLE_FLAGS(8) + NLA TABLE_USERDATA(20) = 44
-        assert_eq!(body.len(), 44);
+        // body = nfgenmsg(4) + NLA TABLE_NAME("filter\0" padded to 12) + NLA TABLE_FLAGS(8)
+        // = 4 + 12 + 8 = 24
+        assert_eq!(body.len(), 24);
         assert_eq!(body[0], 2);
     }
 
@@ -804,7 +833,26 @@ mod tests {
         };
         let (msg_type, body) = encode_op(&op);
         assert_eq!(msg_type, NFT_MSG_NEWCHAIN);
-        assert!(body.len() > 32);
+        // The chain should have nested hook attribute (NFTA_CHAIN_HOOK)
+        // which contains NFTA_HOOK_HOOKNUM and NFTA_HOOK_PRIORITY.
+        // Verify the hook attribute is nested (high bit set in type field).
+        let hook_attr_type = find_attr_type(&body, NFTA_CHAIN_HOOK);
+        assert!(hook_attr_type.is_some(), "NFTA_CHAIN_HOOK not found in chain body");
+        let hook_type = hook_attr_type.unwrap();
+        assert_ne!(hook_type & NLA_F_NESTED, 0, "NFTA_CHAIN_HOOK should be nested");
+    }
+
+    #[test]
+    fn encode_add_chain_without_hook() {
+        // Regular (non-hook) chains should not have NFTA_CHAIN_HOOK
+        let op = NetlinkOp::AddChain {
+            family: NftFamily::Ip,
+            table: "filter".into(),
+            chain: NftChain::regular("mychain", NftChainKind::Filter),
+        };
+        let (msg_type, body) = encode_op(&op);
+        assert_eq!(msg_type, NFT_MSG_NEWCHAIN);
+        assert!(find_attr_type(&body, NFTA_CHAIN_HOOK).is_none());
     }
 
     #[test]

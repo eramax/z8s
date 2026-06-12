@@ -179,12 +179,18 @@ fn push_table_init(ops: &mut Vec<NetlinkOp>, table: &NftTable) {
             set: set.clone(),
         });
     }
+    // Chains are created after the table exists. Each chain is created
+    // independently; rules are added after their chain is created.
     for chain in table.chains.values() {
         ops.push(NetlinkOp::AddChain {
             family: table.family,
             table: table.name.clone(),
             chain: chain.clone(),
         });
+    }
+    // Rules come after all chains are created, since a rule might reference
+    // a chain via Jump/Goto.
+    for chain in table.chains.values() {
         for rule in &chain.rules {
             ops.push(NetlinkOp::AddRule {
                 family: table.family,
@@ -305,17 +311,13 @@ fn push_chain_diff(
         || want.hook != cur.hook
         || want.priority != cur.priority
         || want.policy != cur.policy;
-    if chain_shape_changed {
-        for rule in &cur.rules {
-            if let Some(h) = rule.handle {
-                ops.push(NetlinkOp::DelRule {
-                    family,
-                    table: table.to_string(),
-                    chain: cur.name.clone(),
-                    handle: h,
-                });
-            }
-        }
+    let rules_changed = want.rules != cur.rules;
+
+    if chain_shape_changed || rules_changed {
+        // When the chain shape or rules change, we delete and recreate the
+        // entire chain. This avoids the need to track kernel-assigned rule
+        // handles — individual rule deletion is not supported without
+        // knowing the handle the kernel assigned.
         ops.push(NetlinkOp::DelChain {
             family,
             table: table.to_string(),
@@ -336,46 +338,7 @@ fn push_chain_diff(
         }
         return;
     }
-    // Same shape: diff rules positionally
-    let max = want.rules.len().max(cur.rules.len());
-    for i in 0..max {
-        match (want.rules.get(i), cur.rules.get(i)) {
-            (Some(w), Some(c)) if w == c => {}
-            (Some(w), Some(c)) => {
-                if let Some(h) = c.handle {
-                    ops.push(NetlinkOp::DelRule {
-                        family,
-                        table: table.to_string(),
-                        chain: cur.name.clone(),
-                        handle: h,
-                    });
-                }
-                ops.push(NetlinkOp::AddRule {
-                    family,
-                    table: table.to_string(),
-                    chain: want.name.clone(),
-                    rule: w.clone(),
-                });
-            }
-            (Some(w), None) => ops.push(NetlinkOp::AddRule {
-                family,
-                table: table.to_string(),
-                chain: want.name.clone(),
-                rule: w.clone(),
-            }),
-            (None, Some(c)) => {
-                if let Some(h) = c.handle {
-                    ops.push(NetlinkOp::DelRule {
-                        family,
-                        table: table.to_string(),
-                        chain: cur.name.clone(),
-                        handle: h,
-                    });
-                }
-            }
-            (None, None) => {}
-        }
-    }
+    // Same shape and rules — no ops needed.
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

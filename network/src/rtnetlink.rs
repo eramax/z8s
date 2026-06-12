@@ -20,7 +20,7 @@
 //! (routes). Attributes use the standard `rtattr` layout (4-byte aligned).
 
 use std::net::Ipv4Addr;
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 
 use anyhow::{anyhow, Context, Result};
 use nix::sys::socket::{
