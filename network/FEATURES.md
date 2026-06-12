@@ -40,8 +40,8 @@
 | Expression: masquerade | ✅ | ✅ | |
 | Expression: numgen (LB) | ✅ | ❌ | z8s only |
 | Expression: conntrack (ct state) | ✅ | ❌ | z8s only |
-| Expression: goto | 🔶 | ❌ | z8s encoded, never used |
-| Expression: return | 🔶 | ❌ | z8s encoded, never used |
+| Expression: goto | ✅ | ❌ | z8s goto rule kernel-tested |
+| Expression: return | ✅ | ❌ | z8s return rule kernel-tested |
 | NFTA_RULE_USERDATA (comments) | ✅ | ❌ | z8s uses libnftnl udata TLV format |
 | Response parsing (jump handle detection) | ❌ | ✅ | pelagos only |
 
@@ -160,10 +160,10 @@
 |------------|-----|---------|
 | Unit tests (no kernel) | 85 | ~40 |
 | Wire-format tests (encode/decode) | 59 | ~8 |
-| Kernel integration tests (real nftables) | 18 | 0 direct |
+| Kernel integration tests (real nftables) | 24 | 0 direct |
 | Kernel apply test (full lifecycle) | 1 | manual/compose |
 | Pod deploy tests (veth + netns) | 2 | 1 (netns only) |
-| **Total** | **165** | **~50** |
+| **Total** | **171** | **~50** |
 
 ---
 
@@ -171,10 +171,10 @@
 
 | Feature | Status | Why |
 |---------|--------|-----|
-| `NftExpr::Goto` | 🔶 Encoded, unused | No rule builder uses goto yet |
-| `NftExpr::Return` | 🔶 Encoded, unused | No rule builder uses return yet |
-| `NftFamily::Ip6/Inet/Netdev` | 🔶 Encoded, untested | All kernel tests use IPv4 only |
-| `SNAT` (nat_type=0) | ❌ Not tested | Only DNAT (nat_type=1) tested |
+| `NftExpr::Goto` | ✅ Kernel-tested | goto rule verified with real kernel |
+| `NftExpr::Return` | ✅ Kernel-tested | return rule verified with real kernel |
+| `NftFamily::Ip6/Inet/Netdev` | ✅ Kernel-tested | Ip6, Inet, Netdev tables+chains verified |
+| `SNAT` (nat_type=0) | ✅ Kernel-tested | SNAT with addr+port verified with real kernel |
 | `NftChainKind::Route` | 🔸 Defined, unused | Never used in any plan or rule |
 
 ---
@@ -205,7 +205,7 @@
 - **Chain flush** (delete all rules from chain)
 
 ### Neither implements:
-- Full IPv6 nftables rules (only pelagos has IPv6 routes/addresses)
+- Full IPv6 nftables rules (z8s supports Ip6 tables/chains; pelagos has IPv6 routes/addresses)
 
 ---
 

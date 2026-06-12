@@ -26,7 +26,13 @@ fn nft(args: &[&str]) -> String {
         .args(args)
         .output()
         .expect("nft binary missing");
-    String::from_utf8_lossy(&out.stdout).into_owned()
+    let mut s = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if !stderr.is_empty() {
+        s.push_str("\n[stderr] ");
+        s.push_str(&stderr);
+    }
+    s
 }
 
 fn nft_table_exists(table: &str) -> bool {
@@ -53,6 +59,22 @@ fn safe_cleanup(engine: &mut Netmux) {
     if !ops.is_empty() {
         let _ = engine.apply(&ops, false);
     }
+}
+
+/// Delete a table for a specific family. Ignores errors.
+fn cleanup_table_family(family: &str, table: &str) {
+    let _ = Command::new("nft")
+        .args(["delete", "table", family, table])
+        .output();
+}
+
+/// Check if a table exists for a specific family.
+fn nft_table_exists_family(family: &str, table: &str) -> bool {
+    Command::new("nft")
+        .args(["-n", "list", "table", family, table])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -843,4 +865,256 @@ fn kernel_add_chain_to_existing_table() {
     let _ = Command::new("nft")
         .args(["delete", "table", "ip", "z8s_chain_test"])
         .output();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Test 19: Goto rule — sends to chain, doesn't return
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn kernel_goto_rule() {
+    cleanup_tables(&["z8s_test_goto"]);
+
+    let mut desired = NetmuxState::new();
+    let mut table = NftTable::new("z8s_test_goto", NftFamily::Ip);
+    table.chains.insert(
+        "helper".into(),
+        NftChain::regular("helper", NftChainKind::Filter)
+            .with_rule(NftRule::accept()),
+    );
+    table.chains.insert(
+        "forward".into(),
+        NftChain::base(
+            "forward",
+            NftChainKind::Filter,
+            NftHook::Forward,
+            0,
+            NftPolicy::Accept,
+        )
+        .with_rule(NftRule::goto("helper")),
+    );
+    desired.tables.insert((NftFamily::Ip, "z8s_test_goto".into()), table);
+
+    let mut engine = Netmux::connect().expect("connect");
+    let ops = reconcile(&desired, engine.current());
+    engine.apply(&ops, false).expect("apply goto rule");
+
+    let listing = nft(&["-n", "list", "table", "ip", "z8s_test_goto"]);
+    println!("goto listing:\n{}", listing);
+    assert!(listing.contains("helper"), "helper chain missing");
+    assert!(listing.contains("goto"), "goto verdict missing");
+    assert!(listing.contains("accept"), "accept rule in helper missing");
+
+    // Cleanup.
+    let empty = NetmuxState::new();
+    let ops = reconcile(&empty, engine.current());
+    engine.apply(&ops, false).expect("cleanup");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Test 20: Return rule — returns from current chain
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn kernel_return_rule() {
+    cleanup_tables(&["z8s_test_return"]);
+
+    let mut desired = NetmuxState::new();
+    let mut table = NftTable::new("z8s_test_return", NftFamily::Ip);
+    table.chains.insert(
+        "forward".into(),
+        NftChain::base(
+            "forward",
+            NftChainKind::Filter,
+            NftHook::Forward,
+            0,
+            NftPolicy::Accept,
+        )
+        .with_rule(NftRule::r#return())
+        .with_rule(NftRule::drop()),
+    );
+    desired.tables.insert((NftFamily::Ip, "z8s_test_return".into()), table);
+
+    let mut engine = Netmux::connect().expect("connect");
+    let ops = reconcile(&desired, engine.current());
+    engine.apply(&ops, false).expect("apply return rule");
+
+    let listing = nft(&["-n", "list", "table", "ip", "z8s_test_return"]);
+    println!("return listing:\n{}", listing);
+    assert!(listing.contains("return"), "return verdict missing");
+    assert!(listing.contains("drop"), "drop rule after return missing");
+
+    // Cleanup.
+    let empty = NetmuxState::new();
+    let ops = reconcile(&empty, engine.current());
+    engine.apply(&ops, false).expect("cleanup");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Test 21: SNAT rule (nat_type=0)
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn kernel_snat_rule() {
+    cleanup_tables(&["z8s_test_snat"]);
+
+    let pod_cidr = Ipv4Cidr::parse("10.42.0.0/16").unwrap();
+    let snat_ip = Ipv4Addr::new(192, 168, 1, 100);
+    let snat_port: u16 = 10000;
+
+    let rule = NftRule::from_exprs({
+        let mut exprs = Vec::new();
+        exprs.extend(match_cidr(12, &pod_cidr));
+        exprs.extend(snat_to(snat_ip, snat_port));
+        exprs
+    });
+
+    let mut desired = NetmuxState::new();
+    let mut table = NftTable::new("z8s_test_snat", NftFamily::Ip);
+    table.chains.insert(
+        "postrouting".into(),
+        NftChain::base(
+            "postrouting",
+            NftChainKind::Nat,
+            NftHook::Postrouting,
+            100,
+            NftPolicy::Accept,
+        )
+        .with_rule(rule),
+    );
+    desired.tables.insert((NftFamily::Ip, "z8s_test_snat".into()), table);
+
+    let mut engine = Netmux::connect().expect("connect");
+    let ops = reconcile(&desired, engine.current());
+    engine.apply(&ops, false).expect("apply SNAT rule");
+
+    let listing = nft(&["-n", "list", "table", "ip", "z8s_test_snat"]);
+    println!("snat listing:\n{}", listing);
+    assert!(listing.contains("snat"), "snat missing");
+    assert!(listing.contains("192.168.1.100"), "SNAT IP missing");
+    assert!(listing.contains("10000"), "SNAT port missing");
+
+    // Cleanup.
+    let empty = NetmuxState::new();
+    let ops = reconcile(&empty, engine.current());
+    engine.apply(&ops, false).expect("cleanup");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Test 22: IPv6 table + chain (NftFamily::Ip6)
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn kernel_ip6_table_chain() {
+    cleanup_table_family("ip6", "z8s_test_ip6");
+
+    let mut desired = NetmuxState::new();
+    let mut table = NftTable::new("z8s_test_ip6", NftFamily::Ip6);
+    table.chains.insert(
+        "input".into(),
+        NftChain::base(
+            "input",
+            NftChainKind::Filter,
+            NftHook::Input,
+            0,
+            NftPolicy::Accept,
+        )
+        .with_rule(NftRule::accept()),
+    );
+    desired.tables.insert((NftFamily::Ip6, "z8s_test_ip6".into()), table);
+
+    let mut engine = Netmux::connect().expect("connect");
+    let ops = reconcile(&desired, engine.current());
+    engine.apply(&ops, false).expect("apply ip6 table");
+
+    let listing = nft(&["-n", "list", "table", "ip6", "z8s_test_ip6"]);
+    println!("ip6 listing:\n{}", listing);
+    assert!(listing.contains("input"), "input chain missing in ip6");
+    assert!(listing.contains("accept"), "accept rule missing in ip6");
+    assert!(nft_table_exists_family("ip6", "z8s_test_ip6"));
+
+    // Cleanup.
+    let empty = NetmuxState::new();
+    let ops = reconcile(&empty, engine.current());
+    engine.apply(&ops, false).expect("cleanup");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Test 23: inet family table + chain (NftFamily::Inet)
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn inet_table_chain() {
+    cleanup_table_family("inet", "z8s_test_inet");
+
+    let mut desired = NetmuxState::new();
+    let mut table = NftTable::new("z8s_test_inet", NftFamily::Inet);
+    table.chains.insert(
+        "forward".into(),
+        NftChain::base(
+            "forward",
+            NftChainKind::Filter,
+            NftHook::Forward,
+            0,
+            NftPolicy::Accept,
+        )
+        .with_rule(NftRule::accept())
+        .with_rule(NftRule::drop()),
+    );
+    desired.tables.insert((NftFamily::Inet, "z8s_test_inet".into()), table);
+
+    let mut engine = Netmux::connect().expect("connect");
+    let ops = reconcile(&desired, engine.current());
+    engine.apply(&ops, false).expect("apply inet table");
+
+    let listing = nft(&["-n", "list", "table", "inet", "z8s_test_inet"]);
+    println!("inet listing:\n{}", listing);
+    assert!(listing.contains("forward"), "forward chain missing in inet");
+    assert!(listing.contains("accept"), "accept rule missing in inet");
+    assert!(listing.contains("drop"), "drop rule missing in inet");
+    assert!(nft_table_exists_family("inet", "z8s_test_inet"));
+
+    // Cleanup.
+    let empty = NetmuxState::new();
+    let ops = reconcile(&empty, engine.current());
+    engine.apply(&ops, false).expect("cleanup");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Test 24: netdev family table (NftFamily::Netdev)
+//
+// NOTE: netdev ingress hooks require interface binding via
+// NFTA_CHAIN_INGRESS_DEV which our model doesn't support yet.
+// We verify that the table itself can be created and that a non-hooked
+// (regular) chain works. Full ingress hook support needs IFLA_CHAIN_* attrs.
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn netdev_table_chain() {
+    cleanup_table_family("netdev", "z8s_test_netdev");
+
+    let mut desired = NetmuxState::new();
+    let mut table = NftTable::new("z8s_test_netdev", NftFamily::Netdev);
+    // Use a regular chain (no hook) since netdev ingress needs interface binding.
+    table.chains.insert(
+        "filters".into(),
+        NftChain::regular("filters", NftChainKind::Filter)
+            .with_rule(NftRule::accept()),
+    );
+    desired.tables.insert((NftFamily::Netdev, "z8s_test_netdev".into()), table);
+
+    let mut engine = Netmux::connect().expect("connect");
+    let ops = reconcile(&desired, engine.current());
+    engine.apply(&ops, false).expect("apply netdev table");
+
+    let listing = nft(&["-n", "list", "table", "netdev", "z8s_test_netdev"]);
+    println!("netdev listing:\n{}", listing);
+    assert!(listing.contains("filters"), "filters chain missing in netdev");
+    assert!(listing.contains("accept"), "accept rule missing in netdev");
+    assert!(nft_table_exists_family("netdev", "z8s_test_netdev"));
+
+    // Cleanup.
+    let empty = NetmuxState::new();
+    let ops = reconcile(&empty, engine.current());
+    engine.apply(&ops, false).expect("cleanup");
 }

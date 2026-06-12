@@ -200,7 +200,7 @@ pub enum NftExpr {
     },
     /// NAT — DNAT or SNAT.
     Nat {
-        /// 0=DNAT, 1=SNAT.
+        /// 0=SNAT, 1=DNAT.
         nat_type: u32,
         /// Address register (or 0xFFFFFFFF for none).
         sreg_addr: u32,
@@ -294,6 +294,24 @@ impl NftRule {
         Self {
             handle: None,
             exprs: vec![NftExpr::Jump(chain.into())],
+            comment: None,
+        }
+    }
+
+    /// Create a goto rule (like jump, but doesn't return to the calling chain).
+    pub fn goto(chain: impl Into<String>) -> Self {
+        Self {
+            handle: None,
+            exprs: vec![NftExpr::Goto(chain.into())],
+            comment: None,
+        }
+    }
+
+    /// Create a return rule (returns from the current chain).
+    pub fn r#return() -> Self {
+        Self {
+            handle: None,
+            exprs: vec![NftExpr::Return],
             comment: None,
         }
     }
@@ -451,6 +469,26 @@ pub fn dnat_to(ip: Ipv4Addr, port: u16) -> Vec<NftExpr> {
         },
         NftExpr::Nat {
             nat_type: NAT_DNAT,
+            sreg_addr: 1,
+            sreg_port: 2,
+        },
+    ]
+}
+
+/// Expressions performing a SNAT to `ip:port`. Loads the address into reg 1
+/// and the port into reg 2, then issues the NAT verdict.
+pub fn snat_to(ip: Ipv4Addr, port: u16) -> Vec<NftExpr> {
+    vec![
+        NftExpr::Immediate {
+            dreg: 1,
+            data: ip.octets().to_vec(),
+        },
+        NftExpr::Immediate {
+            dreg: 2,
+            data: port.to_be_bytes().to_vec(),
+        },
+        NftExpr::Nat {
+            nat_type: NAT_SNAT,
             sreg_addr: 1,
             sreg_port: 2,
         },
