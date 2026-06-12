@@ -206,3 +206,76 @@
 
 ### Neither implements:
 - Full IPv6 nftables rules (only pelagos has IPv6 routes/addresses)
+
+---
+
+## z8s Network Engine: Prioritized Feature Needs
+
+Based on the old `src2/netmux/` implementation audit. All P0/P1 features are already covered by the new `network/` module.
+
+### P0 — Critical Path (node startup, pod create/delete) — 19/19 DONE
+
+| # | Feature | New Module Location | Status |
+|---|---------|-------------------|--------|
+| 1 | IPAM: IPv4 pool (allocate/release) | `ipam.rs` | ✅ |
+| 2 | Veth pair create + move to pod netns | `rtnetlink.rs::attach_pod` | ✅ |
+| 3 | Veth bring-up + IP assign + default route in pod netns | `rtnetlink.rs::configure_pod_netns` | ✅ |
+| 4 | Host /32 route install/remove for pod IP | `rtnetlink.rs::attach_pod/detach_pod` | ✅ |
+| 5 | Veth delete (pod detach) | `rtnetlink.rs::detach_pod` | ✅ |
+| 6 | nftables init (table + chain creation) | `engine.rs::reconcile` + `syscalls.rs` | ✅ |
+| 7 | nftables cleanup (table deletion) | `engine.rs::reconcile` (auto-diff) | ✅ |
+| 8 | Forward catch-all (accept pod CIDR traffic) | `plan.rs::plan_catch_all` | ✅ |
+| 9 | SNAT/masquerade for pod internet access | `plan.rs::plan_masquerade` | ✅ |
+| 10 | Service CIDR local route on loopback | `rtnetlink.rs::add_local_service_cidr` | ✅ |
+| 11 | IP forwarding + sysctl hardening | `lib.rs::enable_ip_forward/harden_sysctl` | ✅ |
+| 12 | Loopback interface bring-up | `rtnetlink.rs::ensure_loopback_up` | ✅ |
+| 13 | Orphan veth cleanup at startup | `engine.rs::clean_orphan_veths` | ✅ |
+| 14 | DNS server startup | `dns.rs::DnsServer::serve` | ✅ |
+| 15 | DNS service resolution | `dns.rs::DnsServer::handle_packet` | ✅ |
+| 16 | ClusterIP DNAT (service load balancing) | `plan.rs::plan_services` | ✅ |
+| 17 | Veth naming convention (uid-based) | `rtnetlink.rs::host_veth_name/peer_veth_name` | ✅ |
+| 18 | NetworkEngine trait (controller abstraction) | `lib.rs::NetworkEngine` | ✅ |
+| 19 | Gateway derivation from pod CIDR | `ipam.rs::Ipv4Cidr::gateway` | ✅ |
+
+### P1 — Per-Reconcile (every sync cycle) — 10/10 DONE
+
+| # | Feature | New Module Location | Status |
+|---|---------|-------------------|--------|
+| 20 | Planner: pure state from StoreSnapshot | `plan.rs::plan()` | ✅ |
+| 21 | Service DNAT planning (ClusterIP + NodePort) | `plan.rs::plan_services` | ✅ |
+| 22 | DNS record planning (service + ingress) | `plan.rs::plan_dns` | ✅ |
+| 23 | NSG rule planning | `plan.rs::plan_nsgs` | ✅ |
+| 24 | Remote pod route planning | `plan.rs::plan_remote_routes` | ✅ |
+| 25 | VNet isolation rules | `plan.rs::plan_vnets` | ✅ |
+| 26 | Subnet pool registration | `plan.rs::plan_subnets` | ✅ |
+| 27 | RouteTable application | `plan.rs::plan_route_tables` | ✅ |
+| 28 | Pure reconcile diff (desired vs current) | `engine.rs::reconcile()` | ✅ |
+| 29 | ReconcileReport (op counts) | `engine.rs::ReconcileReport` | ✅ |
+
+### P2 — Event-Triggered (service/policy create/delete) — 5/6 DONE
+
+| # | Feature | New Module Location | Status |
+|---|---------|-------------------|--------|
+| 30 | Service delete: remove DNAT | auto-handled by declarative diff | ✅ |
+| 31 | Ingress L7 proxy (TCP Host-header routing) | **NOT IMPLEMENTED** | ❌ |
+| 32 | NetworkPolicy apply (pod selector + nft sets) | `plan.rs::plan_network_policies` | ✅ |
+| 33 | NetworkPolicy: pod set update/remove | handled by reconcile diff | ✅ |
+| 34 | NodePort DNAT | `plan.rs::plan_services` | ✅ |
+| 35 | Ingress DNS records | `plan.rs::plan_dns` | ✅ |
+
+### P3 — Dead Code / Edge Cases — Not carried forward (13 features)
+
+IPv6 pool (unused), subnet allocation (unused), pool expansion (unused), count_free (observability), prefix getter, setup_loopback (redundant), apply_rules batch (dead), apply_service_dnat/apply_nodeport facade (dead), remove_nodeport facade (dead), apply_nsg facade (dead), compute_endpoints/endpointslices (dead), APPLY_ORDER/CHAIN_LAYOUT constants (docs only).
+
+---
+
+## Remaining Gap: L7 HTTP Ingress Proxy
+
+**What it does:** Listens on TCP `:80`, parses HTTP `Host:` header, routes to correct backend service via tokio TCP proxy.
+
+**Why P2:** Only activated when Ingress resources exist. Dormant for clusters without Ingress.
+
+**Options:**
+1. Add as `network/src/ingress.rs` (separate from nftables/netlink)
+2. Keep in CRI/API layer as standalone component
+3. Defer if no Ingress resources needed initially
