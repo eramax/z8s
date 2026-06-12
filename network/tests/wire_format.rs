@@ -251,10 +251,16 @@ fn encode_chain_without_hook_has_no_hook_attr() {
         !attrs.iter().any(|a| a.base_type() == 4),
         "NFTA_CHAIN_HOOK should not be present for regular chain"
     );
-    // NFTA_CHAIN_POLICY = 5 should still be present.
-    assert!(attrs.iter().any(|a| a.base_type() == 5));
-    // NFTA_CHAIN_TYPE = 7 should be present.
-    assert!(attrs.iter().any(|a| a.base_type() == 7));
+    // NFTA_CHAIN_POLICY = 5 should NOT be present for regular chains.
+    assert!(
+        !attrs.iter().any(|a| a.base_type() == 5),
+        "NFTA_CHAIN_POLICY should not be present for regular chain"
+    );
+    // NFTA_CHAIN_TYPE = 7 should NOT be present for regular chains.
+    assert!(
+        !attrs.iter().any(|a| a.base_type() == 7),
+        "NFTA_CHAIN_TYPE should not be present for regular chain"
+    );
 }
 
 // ─── Rule Tests ───────────────────────────────────────────────────────────
@@ -588,8 +594,7 @@ fn encode_add_set_with_elements() {
     // NFTA_SET_FLAGS = 3
     let flags = attrs.iter().find(|a| a.base_type() == 3).unwrap();
     let flags_val = read_u32_be(&flags.payload, 0);
-    assert_eq!(flags_val & 1, 1, "NFT_SET_ANONYMOUS should be set");
-    assert_eq!(flags_val & 0x20, 0x20, "NFT_SET_CONSTANT should be set for pre-populated set");
+    assert_eq!(flags_val, 0, "flags should be 0 (element flags are per-element)");
 
     // NFTA_SET_KEY_TYPE = 4
     let key_type = attrs.iter().find(|a| a.base_type() == 4).unwrap();
@@ -599,10 +604,12 @@ fn encode_add_set_with_elements() {
     let key_len = attrs.iter().find(|a| a.base_type() == 5).unwrap();
     assert_eq!(read_u32_be(&key_len.payload, 0), 4);
 
-    // NFTA_SET_ELEMENTS = 13 (nested)
-    let elements = attrs.iter().find(|a| a.base_type() == 13);
-    assert!(elements.is_some(), "NFTA_SET_ELEMENTS not found (type 13)");
-    assert!(elements.unwrap().is_nested);
+    // Elements are NOT inline — they are sent as separate AddSetElements ops
+    // (NFT_MSG_NEWSETELEM). The NEWSET message should have no NFTA_SET_ELEMENTS.
+    assert!(
+        !attrs.iter().any(|a| a.base_type() == 13),
+        "NFTA_SET_ELEMENTS should not be present in AddSet"
+    );
 }
 
 // ─── Batch Envelope Tests ─────────────────────────────────────────────────
