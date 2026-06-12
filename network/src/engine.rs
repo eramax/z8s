@@ -7,7 +7,7 @@
 //!
 //! - **Pure diff** — [`reconcile`] takes `desired` and `current` and returns
 //!   a list of [`NetlinkOp`]s. No IO, no side effects, fully testable.
-//! - **Side-effecting apply** — [`Netmux`] holds an [`NlSocket`](crate::syscalls::NlSocket)
+//! - **Side-effecting apply** — [`Netmux`] holds an [`NlSocket`](crate::nftables::NlSocket)
 //!   and executes ops in order, tracking the last-applied `current` state for
 //!   the next tick.
 //! - **Auto-cleanup** — when a resource is removed from the DB and the desired
@@ -35,7 +35,7 @@ use tracing::{debug, info};
 
 use crate::model::*;
 use crate::rtnetlink::RouteSocket;
-use crate::syscalls::NlSocket;
+use crate::nftables::NlSocket;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ReconcileReport — per-resource-type op counts

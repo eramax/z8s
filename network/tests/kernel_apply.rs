@@ -16,7 +16,7 @@ use std::process::Command;
 
 use network::ipam::Ipv4Cidr;
 use network::model::*;
-use network::syscalls::NlSocket;
+use network::nftables::NlSocket;
 use network::{Netmux, NetmuxBuilder};
 
 /// Run `nft` and return its stdout (empty on error).

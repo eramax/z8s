@@ -39,7 +39,7 @@ pub mod ipam;
 pub mod model;
 pub mod plan;
 pub mod rtnetlink;
-pub mod syscalls;
+pub mod nftables;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Re-exports — the public API
@@ -55,7 +55,7 @@ pub use model::{
 };
 pub use plan::{plan, PlanConfig};
 pub use rtnetlink::{host_veth_name, peer_veth_name, RouteSocket};
-pub use syscalls::{encode_op, nfgen_header, send_batch, NlSocket, NlaBuf};
+pub use nftables::{encode_op, nfgen_header, send_batch, NlSocket, NlaBuf};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // NetworkEngine trait — controllers/services depend on this

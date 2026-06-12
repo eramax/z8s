@@ -10,7 +10,7 @@
 use std::net::Ipv4Addr;
 use network::ipam::Ipv4Cidr;
 use network::model::*;
-use network::syscalls::{encode_op, nfgen_header, NlaBuf};
+use network::nftables::{encode_op, nfgen_header, NlaBuf};
 use network::{reconcile, Netmux, NetmuxBuilder};
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
@@ -380,7 +380,7 @@ fn encode_jump_rule_verdict_chain_name() {
 #[test]
 fn encode_meta_expr() {
     let mut b = NlaBuf::new();
-    network::syscalls::encode_expr(
+    network::nftables::encode_expr(
         &NftExpr::Meta {
             kind: 16, // L4PROTO
             op: 0,
@@ -409,7 +409,7 @@ fn encode_meta_expr() {
 #[test]
 fn encode_cmp_expr() {
     let mut b = NlaBuf::new();
-    network::syscalls::encode_expr(
+    network::nftables::encode_expr(
         &NftExpr::Cmp {
             sreg: 1,
             op: 0, // EQ
@@ -439,7 +439,7 @@ fn encode_cmp_expr() {
 #[test]
 fn encode_payload_expr() {
     let mut b = NlaBuf::new();
-    network::syscalls::encode_expr(
+    network::nftables::encode_expr(
         &NftExpr::Payload {
             dreg: 1,
             base: 1, // NETWORK
@@ -466,7 +466,7 @@ fn encode_payload_expr() {
 #[test]
 fn encode_nat_expr() {
     let mut b = NlaBuf::new();
-    network::syscalls::encode_expr(
+    network::nftables::encode_expr(
         &NftExpr::Nat {
             nat_type: 1, // DNAT
             sreg_addr: 1,
@@ -496,7 +496,7 @@ fn encode_nat_expr() {
 #[test]
 fn encode_bitwise_expr() {
     let mut b = NlaBuf::new();
-    network::syscalls::encode_expr(
+    network::nftables::encode_expr(
         &NftExpr::Bitwise {
             sreg: 1,
             dreg: 1,
@@ -529,7 +529,7 @@ fn encode_bitwise_expr() {
 #[test]
 fn encode_numgen_expr() {
     let mut b = NlaBuf::new();
-    network::syscalls::encode_expr(
+    network::nftables::encode_expr(
         &NftExpr::Numgen {
             dreg: 9,
             modulus: 3,
@@ -559,7 +559,7 @@ fn encode_numgen_expr() {
 #[test]
 fn encode_masquerade_expr() {
     let mut b = NlaBuf::new();
-    network::syscalls::encode_expr(&NftExpr::Masquerade, &mut b);
+    network::nftables::encode_expr(&NftExpr::Masquerade, &mut b);
     let attrs = parse_nested_attrs(b.as_slice());
     let elem_attrs = parse_nested_attrs(&attrs[0].payload);
     assert_eq!(elem_attrs[0].payload, b"masq\0");
@@ -984,7 +984,7 @@ fn scenario_full_stack() {
 #[test]
 fn encode_conntrack_expr() {
     let mut b = NlaBuf::new();
-    network::syscalls::encode_expr(
+    network::nftables::encode_expr(
         &NftExpr::Conntrack {
             dreg: 1,
             key: 3, // NFT_CT_STATE
@@ -1746,7 +1746,7 @@ fn service_cidr_route_functions_exist() {
 fn send_batch_signature_compiles() {
     // Verify the method signature compiles. Actual calls need CAP_NET_ADMIN.
     fn _check(ops: &[network::NetlinkOp]) -> std::io::Result<()> {
-        network::syscalls::send_batch(ops)
+        network::nftables::send_batch(ops)
     }
     let _ = _check;
 }

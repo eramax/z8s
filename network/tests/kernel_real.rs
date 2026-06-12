@@ -16,7 +16,7 @@ use std::process::Command;
 use network::engine::ReconcileReport;
 use network::ipam::Ipv4Cidr;
 use network::model::*;
-use network::syscalls::NlSocket;
+use network::nftables::NlSocket;
 use network::{reconcile, Netmux};
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
@@ -89,7 +89,7 @@ fn kernel_create_table_chain_rule() {
         },
     ];
 
-    network::syscalls::send_batch(&ops).expect("send batch");
+    network::nftables::send_batch(&ops).expect("send batch");
 
     // Verify with nft CLI.
     let listing = nft(&["-n", "list", "table", "ip", "z8s_test_basic"]);
@@ -139,7 +139,7 @@ fn kernel_batch_multiple_ops() {
         },
     ];
 
-    network::syscalls::send_batch(&ops).expect("send batch");
+    network::nftables::send_batch(&ops).expect("send batch");
 
     // Verify all three resources exist.
     let listing = nft(&["-n", "list", "table", "ip", "z8s_test_batch"]);
@@ -354,7 +354,7 @@ fn kernel_lookup_rule() {
     let ops = reconcile(&desired, engine.current());
     // Send all ops in a single batch so the lookup can reference the set
     let nft_ops: Vec<_> = ops.iter().filter(|op| !op.is_route()).cloned().collect();
-    network::syscalls::send_batch(&nft_ops).expect("apply lookup rule batch");
+    network::nftables::send_batch(&nft_ops).expect("apply lookup rule batch");
 
     // Seed the engine state so cleanup works
     let desired2 = desired.clone();
@@ -815,7 +815,7 @@ fn kernel_add_chain_to_existing_table() {
         family: NftFamily::Ip,
         name: "z8s_chain_test".into(),
     };
-    match network::syscalls::send_batch(&[table_op]) {
+    match network::nftables::send_batch(&[table_op]) {
         Ok(()) => eprintln!("Step 1 OK"),
         Err(e) => eprintln!("Step 1 ERROR: {}", e),
     }
@@ -831,7 +831,7 @@ fn kernel_add_chain_to_existing_table() {
         table: "z8s_chain_test".into(),
         chain: NftChain::regular("testchain", NftChainKind::Filter),
     };
-    match network::syscalls::send_batch(&[chain_op]) {
+    match network::nftables::send_batch(&[chain_op]) {
         Ok(()) => eprintln!("Step 2 OK"),
         Err(e) => eprintln!("Step 2 ERROR: {}", e),
     }
