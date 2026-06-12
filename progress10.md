@@ -44,132 +44,101 @@
 
 **Package rename:** `core` → `z8s_core` (prevents shadowing Rust's `core` crate which breaks `async_trait`)
 
-**Warnings fixed:**
-- helpers.rs: removed unnecessary `mut`
-- network.rs: fixed snake_case naming (srcCIDRs → src_cidrs, etc.)
-- redb.rs: fixed unused variable, fixed redb API compatibility
-
 ### T3: runtime — Container Lifecycle ✅
 
 **runtime/src/lib.rs** — RuntimeProvider trait (async, object-safe)
+**runtime/src/spec.rs** — ContainerSpec, ContainerConfig, ResolvedVolume, ContainerConfigBuilder
+**runtime/src/health.rs** — HealthChecker, ProbeConfig, ProbeAction, HealthStatus
+**runtime/src/cgroup.rs** — CgroupManager (cgroups v2), apply_limits()
+**runtime/src/rootfs.rs** — Filesystem isolation (Pivot/Chroot/Degraded)
+**runtime/src/image.rs** — ImageManager (OCI pull via oci-distribution 0.11, layer cache, overlay)
+**runtime/src/exec.rs** — Container exec (namespace entry, PTY support)
+**runtime/src/supervisor.rs** — ContainerSupervisor (spawn lifecycle orchestration)
 
-**runtime/src/spec.rs** — ContainerSpec, ContainerConfig, ResolvedVolume, ContainerConfigBuilder (fluent builder)
+**Tests:** 23 core + 22 store + 45 runtime = 90+ total, all passing
 
-**runtime/src/health.rs** — HealthChecker, ProbeConfig, ProbeAction (Exec/HTTPGet/TCPSocket), HealthStatus
-
-**runtime/src/cgroup.rs** — CgroupManager (cgroups v2: memory.max, memory.low, cpu.max, pids.max, cgroup.procs), apply_limits()
-
-**runtime/src/rootfs.rs** — Filesystem isolation (Pivot/Chroot/Degraded):
-- prepare_rootfs, setup_container_rootfs, child_enter_ns_fork
-- drop_capabilities (OCI default set), apply_landlock (LSM)
-- resolve_exec_path, build_container_argv, wrap_dynamic_linker
-- bind_mount_volumes
-- mount propagation via MountPropagationFlags (DOWNSTREAM/PRIVATE)
-
-**runtime/src/image.rs** — ImageManager (OCI pull via oci-distribution 0.11, layer cache, overlay mount, OCI config save/read/guess)
-
-**runtime/src/exec.rs** — Container exec (build_command with namespace entry, set_winsize via ioctl, PTY support)
-
-**runtime/src/supervisor.rs** — ContainerSupervisor (orchestrates spawn lifecycle):
-- spawn_isolated (double-fork root / single-fork userns)
-- write_userns_maps (newuidmap/subid/direct fallback)
-- RunningContainer tracking, log collection, probe management
-- Pure functions: merge_env, is_pid_alive, spawn_container_probes
-
-**Overlay (no fallback):**
-- Removed copy_dir fallback — overlay mount now required
-- If mount fails, error propagates (no degraded mode)
-- Tests use `sudo` with CAP_SYS_ADMIN
-- Overlay only works on ext4 paths (`/home/abb`), not on container overlay root (`/tmp`)
-
-**Tests:**
-- 23 core unit tests + 22 store tests + 45 runtime tests = 90+ total
-- Integration tests: alpine, ubuntu, python, postgres, nginx, http-echo, busybox
-- All tests passing (image tests require network, ignored in CI)
-
-**Key design decisions:**
-- Renamed `core` → `z8s_core` to avoid Rust `core` shadowing
-- All syscalls use rustix 1.1.4 except: fork, ioctl, setuid, setgid, mknod, dup2 (raw asm for missing APIs)
-- Mount propagation uses `MountPropagationFlags` + `mount_change()` (not `MountFlags`)
-- `execve` via `rustix::runtime::execve` (returns Errno, not Result)
-- Signal names: `Signal::KILL`/`Signal::TERM` (not SIGKILL/SIGTERM)
-- `LinkNameSpaceType::User`/`Mount`/`Network`/`ProcessID` (PascalCase)
-- No `libc` crate — zero external C dependencies
-
-## Not Started
+---
 
 ### T4: network — Veth, nftables, DNS, IPAM ✅
 
-**7 modules**, functional core / imperative shell. Everything is expressed as
-immutable structs (tables → chains → rules → sets) that a pure `reconcile`
-diffs into the minimal set of kernel ops. No `rustables` / `libc` / `nix` —
-only `rustix` + `neli` for socket plumbing.
+**8 source files**, functional core / imperative shell. No `rustables` / `libc` / `nix` —
+hand-rolled nftables + RTNETLINK encoding over `rustix` + `nix` sockets.
 
-**network/src/ipam.rs** — IpPool (BTreeSet free-list), Ipv4Cidr parse/normalize,
-subnet allocation, gateway/broadcast reservation; Ipv6Pool from /64 prefix
+**network/src/ipam.rs** — IpPool (BTreeSet free-list with `expand()`), Ipv4Cidr
+parse/normalize, subnet allocation, gateway/broadcast reservation; Ipv6Pool from /64 prefix
 
-**network/src/model.rs** — the declarative model: `NftFamily/Chain/Hook/Policy`,
-`NftExpr` (Meta/Cmp/Payload/Lookup/Immediate/Nat/Masquerade/Bitwise/Numgen/
-verdicts), `NftRule` + pure rule builders (`match_cidr`, `match_l4proto`,
-`match_dport`, `dnat_to`, `clusterip_dnat_rule`, `nodeport_dnat_rule`,
-`masquerade_rule`, `nsg_filter_rule`), `NftTable/Chain/Set/Counter`, `RouteSpec`,
-`NetmuxState`, and `NetlinkOp` (incl. `AddRoute`/`DelRoute`)
+**network/src/model.rs** — declarative model:
+- `NftFamily/Chain/Hook/Policy` enums
+- `NftExpr` (Meta/Cmp/Payload/Lookup/Immediate/Nat/Masquerade/Bitwise/Numgen/Conntrack/verdicts)
+- `NftRule` + pure rule builders: `match_cidr`, `match_l4proto`, `match_dport`, `dnat_to`,
+  `clusterip_dnat_rule`, `nodeport_dnat_rule`, `masquerade_rule`, `nsg_filter_rule`,
+  `established_related_rule`
+- `NftTable/Chain/Set/Counter`, `RouteSpec`, `NetmuxState`, `NetlinkOp`
 
 **network/src/syscalls.rs** — nftables wire encoding over `NETLINK_NETFILTER`:
-`NlaBuf` attribute builder (nested + padding), batch envelopes, correct
-`NFTA_LIST_ELEM`/`EXPR_NAME`/`EXPR_DATA` + typed `DATA_VALUE`/`DATA_VERDICT`,
-`NlSocket` send/ACK
+- `NlaBuf` attribute builder (nested + padding), batch envelopes
+- Correct `NFTA_LIST_ELEM`/`EXPR_NAME`/`EXPR_DATA` + typed `DATA_VALUE`/`DATA_VERDICT`
+- `NlSocket::send()` (single op) + `NlSocket::send_batch()` (multi-op batch)
+- All attribute type numbers verified against kernel UAPI (v6.1)
 
-**network/src/rtnetlink.rs** — `RouteSocket` over `NETLINK_ROUTE` (fresh socket
-per call so it binds to the current netns): veth pair (`IFLA_NET_NS_PID` so the
-peer lands in the pod netns directly), get_ifindex, set_up, del_link, add_addr,
-add_route/del_route, `NetnsGuard` (rustix `move_into_link_name_space`),
-`attach_pod`/`detach_pod`/`clean_orphan_veths`, `veth-<uid8>`/`zeth-<uid8>` naming
+**network/src/rtnetlink.rs** — `RouteSocket` over `NETLINK_ROUTE`:
+- veth pair (`IFLA_NET_NS_PID` so peer lands in pod netns directly)
+- get_ifindex, set_up, del_link, add_addr, add_route/del_route
+- `NetnsGuard` (rustix `move_into_link_name_space`)
+- `attach_pod`/`detach_pod`/`clean_orphan_veths`
+- `configure_pod_netns()` (standalone netns reconfiguration)
+- `add_local_service_cidr()` (RTN_LOCAL route for ClusterIP)
+- `ensure_loopback_up()`, `list_veth_interfaces()`, `conntrack_available()`
 
 **network/src/engine.rs** — `Netmux` facade + pure `reconcile(desired, current)`:
-table/chain/rule/set/route diff with automatic `Del*` cleanup, route ops routed
-to `RouteSocket` vs nft ops to `NlSocket`, imperative `attach_pod`/`detach_pod`
-hot path, `NetmuxBuilder`
+- table/chain/rule/set/route diff with automatic `Del*` cleanup
+- Chain diff: delete+recreate when rules change (no kernel handle tracking needed)
+- `ReconcileReport` for observability (per-resource-type op counts)
+- `attach_pod`/`detach_pod` hot path, `NetmuxBuilder`
 
-**network/src/plan.rs** — pure `plan(snapshot, PlanConfig) -> NetmuxState` from
-z8s_core DB types: per-node `z8s_nat_{node}` / `z8s_filter_{node}` tables,
-ClusterIP/NodePort DNAT with cluster-wide backend resolution + numgen LB,
-pod-CIDR masquerade, NSG allow/deny + whitelist default-deny, VNet isolation +
-pools, NetworkPolicy pod-selector IP sets, remote pod routes via peer gateways,
-DNS records
+**network/src/plan.rs** — pure `plan(snapshot, PlanConfig) -> NetmuxState`:
+- `z8s_nat_{node}` table: ClusterIP/NodePort DNAT + numgen LB, pod-CIDR masquerade
+- `z8s_filter_{node}` table: established/related rule, input/output chains,
+  nsg-rules chain (with default-deny), catch-all chain for pod CIDR
+- VNet isolation + pools, NetworkPolicy pod-selector IP sets + lookup rules
+- Remote pod `/32` routes via peer gateways
+- DNS records: `svc.ns.svc.cluster.local`, `kubernetes.default.svc.cluster.local`
+- RouteTable resources → state.routes, Subnet resources → state.ip_pools
 
-**network/src/dns.rs** — compact tokio UDP DNS server: hand-rolled RFC 1035
-codec (pure `parse_query`/`build_response`), hot-swappable `DnsZone` behind
-`RwLock`, A-record answers + NXDOMAIN for the cluster domain + upstream forward
+**network/src/dns.rs** — compact tokio UDP DNS server:
+- Hand-rolled RFC 1035 codec (pure `parse_query`/`build_response`)
+- Hot-swappable `DnsZone` behind `RwLock`
+- A-record answers + NXDOMAIN for cluster domain + upstream forward
 
-**network/src/lib.rs** — re-exports, `NetworkEngine` trait, pod-state helpers
+**network/src/lib.rs** — re-exports, `NetworkEngine` trait, pod-state helpers,
+sysctl helpers (`enable_ip_forward`, `enable_rp_filter`, `enable_arp_announce`, `harden_sysctl`)
 
 **Build:** `cargo build -p network` clean (no warnings), `cargo clippy` clean.
-**Tests:** 85 unit tests + 32 wire format/scenario tests = 117 total, all passing.
+**Tests:** 85 unit + 59 integration = 144 total, all passing.
 
-**Critical fixes applied (2026-06-12):**
-- Fixed 15 wrong nftables attribute type numbers (chain, set, rule, object) per kernel UAPI
-- Fixed NFTA_CHAIN_HOOK to be properly nested (was flat, kernel requires nested)
-- Fixed NFT_GOTO verdict value (was 0xFFFFFFFE=NFT_BREAK, should be 0xFFFFFFFC=-4)
-- Removed NFTA_TABLE_USERDATA (unnecessary, not sent by rustables)
-- Fixed NlSocket::send to use per-op flags via nlmsg_flags_for() instead of hardcoded
-- Fixed engine chain diff to delete+recreate when rules change (avoids need for kernel handles)
-- Removed NUL terminator from put_str to match rustables wire format exactly
-- Added NFTA_SET_FLAGS (NFT_SET_ANONYMOUS | NFT_SET_CONSTANT) for pre-populated sets
-- Added 32 wire format verification tests (byte-level encoding validation)
-- Added scenario tests: pod-to-pod, pod-to-internet masquerade, ClusterIP service, NSG deny-all, remote routes, DNS, VNet isolation, full stack
+**Wire encoding verified against kernel UAPI (v6.1):**
+- Chain attributes: TABLE=1, NAME=3, HOOK=4(nested), POLICY=5, TYPE=7
+- Set attributes: TABLE=1, NAME=2, FLAGS=3, KEY_TYPE=4, KEY_LEN=5, DATA_LEN=7, ELEMENTS=13
+- Rule attributes: TABLE=1, CHAIN=2, HANDLE=3, EXPRESSIONS=4
+- Object attributes: TABLE=1, NAME=2, TYPE=3, DATA=4
+- NAT attributes: TYPE=1, FAMILY=2, ADDR_MIN=3, ADDR_MAX=4, PROTO_MIN=5, PROTO_MAX=6
+- Verdict values: NF_DROP=0, NF_ACCEPT=1, NFT_JUMP=-3, NFT_GOTO=-4, NFT_RETURN=-5
+- Strings: NOT NUL-terminated (matching rustables wire format)
+- Batch: single sendmsg per batch (BATCH_BEGIN + ops + BATCH_END)
+- Conntrack: CT_DREG=1, CT_KEY=2 (NFT_CT_STATE=3)
 
 **Key design decisions:**
 - No `rustables` / `nix` / `libc` — hand-rolled nftables + RTNETLINK encoding
-  over `rustix` + `neli` sockets
 - Functional core (`reconcile`, `plan`, rule builders, DNS codec all pure) +
   imperative shell (`Netmux::apply`, `RouteSocket`, `DnsServer::serve`)
 - `plan(snapshot, cfg)` patches DB structs straight into the engine; the diff
   emits the minimal ops and cleans up removed/stale resources automatically
 - Multi-node fabric: per-node tables, remote pod `/32` routes via peer gateways
 - veth created with `IFLA_NET_NS_PID`; `NetnsGuard` restores host netns on drop
-- Note: `NetworkPolicyIngressRule`/`EgressRule` are empty stubs in z8s_core, so
-  the planner emits pod-selector sets but no ingress/egress match rules yet
+
+---
+
+## Not Started
 
 ### T5: sync — Gossip, anti-entropy, vector clocks
 ### T6: controller — Reconcile loop (assign + reconcile)
@@ -177,8 +146,25 @@ codec (pure `parse_query`/`build_response`), hot-swappable `DnsZone` behind
 ### T8: z8s CLI binary
 ### T9: z8s-node binary
 
+---
+
+## Known Gaps (see NETWORK-GAPS.md for full details)
+
+**Not yet implementable (missing core types):**
+- L7 HTTP Ingress (IngressSpec is empty stub)
+- Namespace selector in NetworkPolicy (NetworkPolicyIngressRule is empty stub)
+- IP block with except in NetworkPolicy
+- matchExpressions operators (In, NotIn, Exists, DoesNotExist)
+- Dynamic runtime set membership updates (requires controller integration)
+- CNAME records / ExternalName services (DNS only has A records)
+- DNS compression pointer support
+- DNS AAAA/ANY query handling
+- DNS upstream auto-detection from /etc/resolv.conf
+- IpPool::expand() for non-adjacent ranges
+
 ## Files
 - Plan: `REFACTOR-PLAN.md` (architecture, types, DB design, events)
+- Gaps: `NETWORK-GAPS.md` (remaining network features)
 - Performance: `PERFORMANCE-PLAN.md` (bottlenecks, optimizations)
 - Old code: `src2/` (reference)
 - New code: `src/` (in progress)

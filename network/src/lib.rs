@@ -153,6 +153,22 @@ pub fn enable_rp_filter() -> anyhow::Result<()> {
 pub fn harden_sysctl() -> anyhow::Result<()> {
     enable_ip_forward()?;
     enable_rp_filter()?;
+    enable_arp_announce()?;
+    Ok(())
+}
+
+/// Enable ARP announce on all interfaces. Prevents IP spoofing by restricting
+/// ARP announcements to the interface's own address range.
+pub fn enable_arp_announce() -> anyhow::Result<()> {
+    for param in &[
+        "net/ipv4/conf/all/arp_announce",
+        "net/ipv4/conf/default/arp_announce",
+    ] {
+        let path = format!("/proc/sys/{}", param);
+        if let Err(e) = std::fs::write(&path, b"2\n") {
+            tracing::warn!("failed to set {}: {}", path, e);
+        }
+    }
     Ok(())
 }
 

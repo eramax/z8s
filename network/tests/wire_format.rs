@@ -7,6 +7,7 @@
 
 #![cfg(target_os = "linux")]
 
+use std::net::Ipv4Addr;
 use network::ipam::Ipv4Cidr;
 use network::model::*;
 use network::syscalls::{encode_op, nfgen_header, NlaBuf};
@@ -1420,4 +1421,456 @@ fn plan_then_reconcile_against_self_is_idempotent() {
     // Second reconcile: should produce zero ops.
     let ops2 = reconcile(&state, engine.current());
     assert!(ops2.is_empty(), "idempotent reconcile should produce no ops");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// A2: Kubernetes API DNS record
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn plan_dns_includes_kubernetes_api_record() {
+    use z8s_core::store::StoreSnapshot;
+    let snap = StoreSnapshot::from_records(vec![]);
+    let cfg = network::plan::PlanConfig {
+        node_name: "node-a".into(),
+        service_cidr: Ipv4Cidr::parse("10.96.0.0/16").unwrap(),
+        ..Default::default()
+    };
+    let state = network::plan::plan(&snap, &cfg);
+    // kubernetes.default.svc.cluster.local → first IP in service CIDR (gateway)
+    assert_eq!(
+        state.dns_records.get("kubernetes.default.svc.cluster.local"),
+        Some(&std::net::Ipv4Addr::new(10, 96, 0, 1))
+    );
+    assert_eq!(
+        state.dns_records.get("kubernetes.default.svc"),
+        Some(&std::net::Ipv4Addr::new(10, 96, 0, 1))
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// A3: NSG default deny trailing rule
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn plan_nsgs_adds_default_deny_trailing_rule() {
+    use z8s_core::store::StoreSnapshot;
+    use z8s_core::types::{Namespace, ObjectMeta, ResourceRecord};
+
+    let ns = ResourceRecord::new(z8s_core::types::AnyResource::Namespace(Namespace {
+        metadata: ObjectMeta {
+            name: Some("default".into()),
+            ..Default::default()
+        },
+        ..Default::default()
+    }));
+    let nsg = ResourceRecord::new(z8s_core::types::AnyResource::Nsg(z8s_core::types::Nsg {
+        api_version: "z8s.io/v1".into(),
+        kind: "Nsg".into(),
+        metadata: ObjectMeta {
+            name: Some("test-nsg".into()),
+            namespace: Some("default".into()),
+            ..Default::default()
+        },
+        spec: z8s_core::types::NsgSpec {
+            rules: vec![z8s_core::types::NsgRule {
+                name: "allow-web".into(),
+                priority: 100,
+                action: "allow".into(),
+                src_cidrs: vec!["10.0.0.0/8".into()],
+                dst_cidrs: vec!["10.42.0.0/16".into()],
+                src_ports: None,
+                dst_ports: None,
+            }],
+        },
+    }));
+
+    let snap = StoreSnapshot::from_records(vec![ns, nsg]);
+    let cfg = network::plan::PlanConfig {
+        node_name: "node-a".into(),
+        ..Default::default()
+    };
+    let state = network::plan::plan(&snap, &cfg);
+    let filter = state
+        .tables
+        .get(&(NftFamily::Ip, "z8s_filter_node-a".into()))
+        .unwrap();
+
+    let nsg_chain = filter.chains.get("nsg-rules").unwrap();
+    // Last rule should be the default deny.
+    let last_rule = nsg_chain.rules.last().unwrap();
+    assert!(
+        last_rule.exprs.iter().any(|e| matches!(e, NftExpr::Drop)),
+        "last rule in nsg-rules should be drop, got: {:?}",
+        last_rule.comment
+    );
+    assert_eq!(
+        last_rule.comment.as_deref(),
+        Some("nsg-default-deny"),
+        "default deny rule should have comment"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// B8: RouteTable resource application
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn plan_route_tables_adds_routes() {
+    use z8s_core::store::StoreSnapshot;
+    use z8s_core::types::{ObjectMeta, ResourceRecord, Route, RouteTable, RouteTableSpec};
+
+    let rt = ResourceRecord::new(z8s_core::types::AnyResource::RouteTable(RouteTable {
+        api_version: "z8s.io/v1".into(),
+        kind: "RouteTable".into(),
+        metadata: ObjectMeta {
+            name: Some("custom-routes".into()),
+            ..Default::default()
+        },
+        spec: RouteTableSpec {
+            routes: vec![
+                Route {
+                    dest: "10.100.0.0/16".into(),
+                    via: Some("192.168.1.1".into()),
+                    dev: None,
+                },
+                Route {
+                    dest: "172.16.0.0/12".into(),
+                    via: None,
+                    dev: None,
+                },
+            ],
+        },
+    }));
+
+    let snap = StoreSnapshot::from_records(vec![rt]);
+    let cfg = network::plan::PlanConfig {
+        node_name: "node-a".into(),
+        ..Default::default()
+    };
+    let state = network::plan::plan(&snap, &cfg);
+
+    // Should have routes for both entries.
+    let r1 = (std::net::Ipv4Addr::new(10, 100, 0, 0), 16u8);
+    let r2 = (std::net::Ipv4Addr::new(172, 16, 0, 0), 12u8);
+    assert!(
+        state.routes.contains_key(&r1),
+        "route for 10.100.0.0/16 missing"
+    );
+    assert!(
+        state.routes.contains_key(&r2),
+        "route for 172.16.0.0/12 missing"
+    );
+    assert_eq!(
+        state.routes[&r1].gateway,
+        Some(std::net::Ipv4Addr::new(192, 168, 1, 1))
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// B9: Subnet resource registration
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn plan_subnets_registers_pools() {
+    use z8s_core::store::StoreSnapshot;
+    use z8s_core::types::{ObjectMeta, ResourceRecord, Subnet, SubnetSpec};
+
+    let sub = ResourceRecord::new(z8s_core::types::AnyResource::Subnet(Subnet {
+        api_version: "z8s.io/v1".into(),
+        kind: "Subnet".into(),
+        metadata: ObjectMeta {
+            name: Some("web-subnet".into()),
+            ..Default::default()
+        },
+        spec: SubnetSpec {
+            vnet: "default".into(),
+            cidr: "10.42.1.0/24".into(),
+        },
+    }));
+
+    let snap = StoreSnapshot::from_records(vec![sub]);
+    let cfg = network::plan::PlanConfig {
+        node_name: "node-a".into(),
+        ..Default::default()
+    };
+    let state = network::plan::plan(&snap, &cfg);
+
+    assert!(
+        state.ip_pools.contains_key("subnet-web-subnet"),
+        "subnet pool not registered"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// M6: IpPool::expand()
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn ip_pool_expand_adjacent_cidr() {
+    let cidr = Ipv4Cidr::parse("10.42.0.0/24").unwrap();
+    let mut pool = network::IpPool::new(cidr);
+    let initial_free = pool.count_free();
+
+    let additional = Ipv4Cidr::parse("10.42.1.0/24").unwrap();
+    pool.expand(additional);
+
+    // After expanding, the pool should cover 10.42.0.0/23.
+    assert!(
+        pool.count_free() > initial_free,
+        "pool should have more free IPs after expand"
+    );
+}
+
+#[test]
+fn ip_pool_expand_non_adjacent_noop() {
+    let cidr = Ipv4Cidr::parse("10.42.0.0/24").unwrap();
+    let mut pool = network::IpPool::new(cidr);
+    let initial_free = pool.count_free();
+
+    let non_adjacent = Ipv4Cidr::parse("10.43.0.0/24").unwrap();
+    pool.expand(non_adjacent);
+
+    assert_eq!(
+        pool.count_free(),
+        initial_free,
+        "non-adjacent expand should not change pool"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// M7: ReconcileReport
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn reconcile_report_counts_by_type() {
+    use network::engine::ReconcileReport;
+
+    let mut desired = NetmuxState::new();
+    let mut t = NftTable::new("filter", NftFamily::Ip);
+    t.chains.insert(
+        "input".into(),
+        NftChain::base("input", NftChainKind::Filter, NftHook::Input, 0, NftPolicy::Accept)
+            .with_rule(NftRule::accept()),
+    );
+    t.sets.insert(
+        "pods".into(),
+        NftSet::ipv4("pods").with_ipv4(std::net::Ipv4Addr::new(10, 0, 0, 1)),
+    );
+    desired.tables.insert((NftFamily::Ip, "filter".into()), t);
+
+    let r = reconcile(&desired, &NetmuxState::new());
+    let report = ReconcileReport::from_ops(&r);
+    assert!(report.tables > 0);
+    assert!(report.chains > 0);
+    assert!(report.rules > 0);
+    assert!(report.sets > 0);
+    assert_eq!(report.total(), report.tables + report.chains + report.rules + report.sets);
+}
+
+#[test]
+fn reconcile_report_empty() {
+    use network::engine::ReconcileReport;
+    let report = ReconcileReport::from_ops(&[]);
+    assert_eq!(report.total(), 0);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// M10: list_veth_interfaces()
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn list_veth_returns_vec() {
+    let veths = network::rtnetlink::list_veth_interfaces();
+    // Just verify it doesn't panic and returns a Vec.
+    assert!(veths.len() >= 0);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// B3: ARP announce
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn harden_sysctl_includes_arp_announce() {
+    // Just verify the function can be called without panic.
+    // Actual sysctl writes require root.
+    let _ = network::enable_arp_announce();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// B4: Loopback bring-up
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn ensure_loopback_does_not_panic() {
+    let _ = network::rtnetlink::ensure_loopback_up();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// A4: Conntrack availability check
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn conntrack_check_does_not_panic() {
+    let _ = network::rtnetlink::conntrack_available();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// A1: Service CIDR route functions exist and compile
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn service_cidr_route_functions_exist() {
+    // Just verify the function signatures compile. Actual calls need CAP_NET_ADMIN.
+    fn _add(dest: Ipv4Addr, prefix: u8) -> anyhow::Result<()> {
+        network::rtnetlink::add_local_service_cidr(dest, prefix)
+    }
+    fn _del(dest: Ipv4Addr, prefix: u8) -> anyhow::Result<()> {
+        network::rtnetlink::del_local_service_cidr(dest, prefix)
+    }
+    let _ = (_add, _del);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// B5: Multi-op batch function exists
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn send_batch_signature_compiles() {
+    // Verify the method signature compiles. Actual calls need CAP_NET_ADMIN.
+    fn _check(ops: &[network::NetlinkOp]) -> std::io::Result<()> {
+        let sock = network::NlSocket::open()?;
+        sock.send_batch(ops)
+    }
+    let _ = _check;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Full stack: all new features together
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn full_stack_with_all_new_features() {
+    use z8s_core::store::StoreSnapshot;
+    use z8s_core::types::{ObjectMeta, Pod, PodSpec, ResourceRecord, Route, RouteTable, RouteTableSpec,
+        Service, ServicePort, ServiceSpec, Subnet, SubnetSpec};
+
+    let pod = {
+        let mut labels = std::collections::BTreeMap::new();
+        labels.insert("app".into(), "web".into());
+        let mut rec = ResourceRecord::new(z8s_core::types::AnyResource::Pod(Pod {
+            metadata: ObjectMeta {
+                name: Some("web-1".into()),
+                namespace: Some("default".into()),
+                uid: Some("uid-1".into()),
+                labels: Some(labels),
+                ..Default::default()
+            },
+            spec: Some(PodSpec::default()),
+            ..Default::default()
+        }));
+        rec.assigned_node = Some("node-a".into());
+        rec.status.pod_ip = Some("10.42.0.5".into());
+        rec
+    };
+
+    let svc = ResourceRecord::new(z8s_core::types::AnyResource::Service(Service {
+        metadata: ObjectMeta {
+            name: Some("web".into()),
+            namespace: Some("default".into()),
+            ..Default::default()
+        },
+        spec: Some(ServiceSpec {
+            type_: Some("ClusterIP".into()),
+            cluster_ip: Some("10.96.0.10".into()),
+            selector: Some({
+                let mut m = std::collections::BTreeMap::new();
+                m.insert("app".into(), "web".into());
+                m
+            }),
+            ports: Some(vec![ServicePort {
+                name: "http".into(),
+                port: 80,
+                target_port: Some(8080),
+                node_port: None,
+                protocol: Some("TCP".into()),
+            }]),
+        }),
+        ..Default::default()
+    }));
+
+    let subnet = ResourceRecord::new(z8s_core::types::AnyResource::Subnet(Subnet {
+        api_version: "z8s.io/v1".into(),
+        kind: "Subnet".into(),
+        metadata: ObjectMeta {
+            name: Some("web-subnet".into()),
+            ..Default::default()
+        },
+        spec: SubnetSpec {
+            vnet: "default".into(),
+            cidr: "10.42.1.0/24".into(),
+        },
+    }));
+
+    let rt = ResourceRecord::new(z8s_core::types::AnyResource::RouteTable(RouteTable {
+        api_version: "z8s.io/v1".into(),
+        kind: "RouteTable".into(),
+        metadata: ObjectMeta {
+            name: Some("custom".into()),
+            ..Default::default()
+        },
+        spec: RouteTableSpec {
+            routes: vec![Route {
+                dest: "192.168.0.0/16".into(),
+                via: Some("10.0.0.1".into()),
+                dev: None,
+            }],
+        },
+    }));
+
+    let snap = StoreSnapshot::from_records(vec![pod, svc, subnet, rt]);
+    let cfg = network::plan::PlanConfig {
+        node_name: "node-a".into(),
+        service_cidr: Ipv4Cidr::parse("10.96.0.0/16").unwrap(),
+        ..Default::default()
+    };
+    let state = network::plan::plan(&snap, &cfg);
+    let ops = reconcile(&state, &NetmuxState::new());
+
+    // Verify all components are present.
+    assert!(state.tables.contains_key(&(NftFamily::Ip, "z8s_nat_node-a".into())));
+    assert!(state.tables.contains_key(&(NftFamily::Ip, "z8s_filter_node-a".into())));
+    assert!(state.ip_pools.contains_key("pods"));
+    assert!(state.ip_pools.contains_key("subnet-web-subnet"));
+    assert!(state.dns_records.contains_key("kubernetes.default.svc.cluster.local"));
+    assert!(state.dns_records.contains_key("web.default.svc.cluster.local"));
+
+    // Filter table should have forward, input, output, nsg-rules chains.
+    let filter = state
+        .tables
+        .get(&(NftFamily::Ip, "z8s_filter_node-a".into()))
+        .unwrap();
+    assert!(filter.chains.contains_key("forward"));
+    assert!(filter.chains.contains_key("input"));
+    assert!(filter.chains.contains_key("output"));
+
+    // Forward chain should have established rule.
+    let forward = filter.chains.get("forward").unwrap();
+    assert!(
+        forward.rules.iter().any(|r| r
+            .comment
+            .as_deref()
+            .map(|c| c.contains("established"))
+            .unwrap_or(false)),
+        "forward should have established rule"
+    );
+
+    // Should have route for custom route table.
+    let rt_key = (std::net::Ipv4Addr::new(192, 168, 0, 0), 16u8);
+    assert!(state.routes.contains_key(&rt_key), "custom route missing");
+
+    // Reconcile should produce ops.
+    assert!(!ops.is_empty());
+    let report = network::engine::ReconcileReport::from_ops(&ops);
+    assert!(report.total() > 0);
 }

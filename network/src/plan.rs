@@ -99,6 +99,8 @@ pub fn plan(snap: &StoreSnapshot, cfg: &PlanConfig) -> NetmuxState {
     plan_network_policies(snap, &pods, &mut state, &filter.name);
     plan_catch_all(&pods, cfg, &mut filter);
     plan_remote_routes(&pods, cfg, &mut state);
+    plan_route_tables(snap, &mut state);
+    plan_subnets(snap, &mut state);
     plan_dns(snap, cfg, &mut state);
 
     state
@@ -323,6 +325,10 @@ fn plan_nsgs(snap: &StoreSnapshot, filter: &mut NftTable) {
     let mut nsg_chain = NftChain::regular("nsg-rules", NftChainKind::Filter);
     rules.sort_by_key(|(p, _)| *p);
     nsg_chain.rules = rules.into_iter().map(|(_, r)| r).collect();
+    // Whitelist semantics: default-deny at the end of the chain.
+    nsg_chain.rules.push(
+        NftRule::drop().with_comment("nsg-default-deny"),
+    );
     filter.chains.insert("nsg-rules".into(), nsg_chain);
     // Add a jump from the forward chain to nsg-rules (after established).
     if let Some(forward) = filter.chains.get_mut("forward") {
@@ -481,6 +487,17 @@ fn plan_remote_routes(pods: &[&ResourceRecord], cfg: &PlanConfig, state: &mut Ne
 // ═══════════════════════════════════════════════════════════════════════════
 
 fn plan_dns(snap: &StoreSnapshot, cfg: &PlanConfig, state: &mut NetmuxState) {
+    // Kubernetes API server DNS record.
+    // The API server is typically at the first IP in the service CIDR.
+    let api_server_ip = cfg.service_cidr.gateway();
+    state.dns_records.insert(
+        format!("kubernetes.default.svc.{}", cfg.cluster_domain),
+        api_server_ip,
+    );
+    state
+        .dns_records
+        .insert("kubernetes.default.svc".into(), api_server_ip);
+
     for rec in records_of_kind(snap, "Service") {
         let AnyResource::Service(svc) = &rec.spec else {
             continue;
@@ -503,6 +520,57 @@ fn plan_dns(snap: &StoreSnapshot, cfg: &PlanConfig, state: &mut NetmuxState) {
             .dns_records
             .insert(format!("{name}.{ns}.svc.{}", cfg.cluster_domain), ip);
         state.dns_records.insert(format!("{name}.{ns}.svc"), ip);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// RouteTable — custom route resources
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn plan_route_tables(snap: &StoreSnapshot, state: &mut NetmuxState) {
+    for rec in records_of_kind(snap, "RouteTable") {
+        let AnyResource::RouteTable(rt) = &rec.spec else {
+            continue;
+        };
+        for route in &rt.spec.routes {
+            // Parse dest as "IP/prefix" or just "IP" (defaults to /32).
+            let (ip_str, prefix) = if let Some((ip_s, pfx_s)) = route.dest.split_once('/') {
+                (ip_s, pfx_s.parse::<u8>().unwrap_or(32))
+            } else {
+                (route.dest.as_str(), 32)
+            };
+            let dest = match ip_str.parse::<Ipv4Addr>() {
+                Ok(ip) => ip,
+                Err(_) => continue,
+            };
+            let gateway = route.via.as_deref().and_then(|s| s.parse::<Ipv4Addr>().ok());
+            let route_spec = RouteSpec {
+                dest,
+                prefix,
+                gateway,
+                oif: None,
+            };
+            state.routes.insert(route_spec.key(), route_spec);
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Subnet — named subnet pool registration
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn plan_subnets(snap: &StoreSnapshot, state: &mut NetmuxState) {
+    for rec in records_of_kind(snap, "Subnet") {
+        let AnyResource::Subnet(sub) = &rec.spec else {
+            continue;
+        };
+        let name = rec.name().to_string();
+        if let Some(cidr) = Ipv4Cidr::parse(&sub.spec.cidr) {
+            state
+                .ip_pools
+                .entry(format!("subnet-{}", sanitize(&name)))
+                .or_insert_with(|| IpPool::new(cidr));
+        }
     }
 }
 

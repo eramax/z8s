@@ -190,6 +190,26 @@ impl IpPool {
         }
         None
     }
+
+    /// Expand the pool by adding an adjacent CIDR range. The new CIDR must be
+    /// contiguous with the existing pool and have the same prefix length. This
+    /// is used for VNet CIDR expansion at runtime.
+    pub fn expand(&mut self, additional: Ipv4Cidr) {
+        // Only expand if adjacent and same prefix length.
+        let my_end = self.cidr.network_u32() + (1u32 << (32 - self.cidr.prefix as u32));
+        let add_start = additional.network_u32();
+        let add_bits = 32u32 - additional.prefix as u32;
+        let add_total = 1u32 << add_bits;
+
+        if additional.prefix == self.cidr.prefix && add_start == my_end {
+            // Adjacent and same size: add all hosts from the new range.
+            for i in 2..(add_total - 1) {
+                self.free.insert(add_start + i);
+            }
+            // Expand the CIDR to cover both ranges.
+            self.cidr = Ipv4Cidr::new(self.cidr.network, self.cidr.prefix - 1);
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

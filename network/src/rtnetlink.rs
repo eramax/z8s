@@ -50,7 +50,9 @@ const NLM_F_CREATE: u16 = 0x400;
 const NLMSG_ERROR: u16 = 2;
 
 const RTN_UNICAST: u8 = 1;
+const RTN_LOCAL: u8 = 2;
 const RT_TABLE_MAIN: u8 = 254;
+const RT_SCOPE_HOST: u8 = 254;
 const RT_SCOPE_UNIVERSE: u8 = 0;
 const RT_SCOPE_LINK: u8 = 253;
 const RTPROT_BOOT: u8 = 3;
@@ -307,6 +309,16 @@ fn route_body(route: &RouteSpec) -> Vec<u8> {
     body
 }
 
+/// Build an rtmsg body for a LOCAL route (used for service CIDR on loopback).
+fn local_route_body(dest: Ipv4Addr, prefix: u8) -> Vec<u8> {
+    let mut attrs = Vec::new();
+    attrs.extend_from_slice(&rtattr(RTA_DST, &dest.octets()));
+    let mut body = vec![AF_INET, prefix, 0, 0, RT_TABLE_MAIN, RTPROT_BOOT, RT_SCOPE_HOST, RTN_LOCAL];
+    body.extend_from_slice(&0u32.to_ne_bytes()); // flags = 0
+    body.extend_from_slice(&attrs);
+    body
+}
+
 /// Install a route.
 fn add_route(route: &RouteSpec) -> Result<()> {
     let body = route_body(route);
@@ -384,6 +396,55 @@ pub fn host_veth_name(pod_uid: &str) -> String {
 /// Pod-side veth name for a pod.
 pub fn peer_veth_name(pod_uid: &str) -> String {
     format!("zeth-{}", uid_suffix(pod_uid))
+}
+
+/// Install a RTN_LOCAL route for the service CIDR on the loopback interface.
+/// This makes ClusterIP addresses (e.g. 10.96.0.10) locally routable so that
+/// DNAT from prerouting can deliver packets to the local socket.
+pub fn add_local_service_cidr(dest: Ipv4Addr, prefix: u8) -> Result<()> {
+    let body = local_route_body(dest, prefix);
+    let flags = NLM_F_REQUEST | NLM_F_CREATE | NLM_F_ACK;
+    txn(|pid| nlmsghdr(RTM_NEWROUTE, flags, 1, pid, &body), "add_local_service_cidr")?;
+    info!(dest = %dest, prefix, "service CIDR local route installed");
+    Ok(())
+}
+
+/// Remove a local route for the service CIDR.
+pub fn del_local_service_cidr(dest: Ipv4Addr, prefix: u8) -> Result<()> {
+    let body = local_route_body(dest, prefix);
+    let flags = NLM_F_REQUEST | NLM_F_ACK;
+    txn(|pid| nlmsghdr(RTM_DELROUTE, flags, 1, pid, &body), "del_local_service_cidr")?;
+    Ok(())
+}
+
+/// Bring up the loopback interface (ifindex=1). Uses RTNETLINK RTM_NEWLINK.
+pub fn ensure_loopback_up() -> Result<()> {
+    // ifindex for loopback is always 1.
+    set_link_up(1).context("loopback bring-up")?;
+    debug!("loopback interface is up");
+    Ok(())
+}
+
+/// List all veth-* interface names from /sys/class/net.
+pub fn list_veth_interfaces() -> Vec<String> {
+    let mut veths = Vec::new();
+    let dir = match std::fs::read_dir("/sys/class/net") {
+        Ok(d) => d,
+        Err(_) => return veths,
+    };
+    for entry in dir.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with("veth-") {
+            veths.push(name);
+        }
+    }
+    veths
+}
+
+/// Check if the nf_conntrack module is loaded. Required for `ct state` matching.
+pub fn conntrack_available() -> bool {
+    std::fs::read_to_string("/proc/net/nf_conntrack").is_ok()
+        || std::fs::read_to_string("/proc/net/stat/nf_conntrack").is_ok()
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -504,6 +565,36 @@ impl RouteSocket {
                     }
         }
         Ok(removed)
+    }
+
+    /// Configure an existing pod's network namespace. This is a standalone
+    /// method that can be called independently of attach_pod (e.g. for
+    /// reconfiguration after a restart). It enters the pod's netns, resolves
+    /// the peer interface, assigns the IP, brings it up, and adds a default
+    /// route via the gateway.
+    pub fn configure_pod_netns(
+        &self,
+        container_pid: u32,
+        peer_name: &str,
+        pod_ip: Ipv4Addr,
+        gateway: Ipv4Addr,
+    ) -> Result<()> {
+        let _guard = NetnsGuard::enter(container_pid)?;
+        let idx = get_ifindex(peer_name)
+            .context("resolve peer in pod netns")?;
+        add_addr(idx, pod_ip, 32)
+            .context("assign pod IP in netns")?;
+        set_link_up(idx)
+            .context("pod veth up in netns")?;
+        add_route(&RouteSpec {
+            dest: Ipv4Addr::UNSPECIFIED,
+            prefix: 0,
+            gateway: Some(gateway),
+            oif: Some(idx),
+        })
+        .context("pod default route in netns")?;
+        info!(peer = peer_name, ip = %pod_ip, "pod netns configured");
+        Ok(())
     }
 }
 

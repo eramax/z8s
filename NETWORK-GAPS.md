@@ -1,9 +1,23 @@
 # Network Module — Remaining Gaps & TODO
 
-## Status: 129 tests passing, clippy clean
+## Status: 144 tests passing (85 unit + 59 integration), clippy clean
 
-The network crate is architecturally complete with correct wire encoding, but has
-feature gaps vs the old `src2/netmux/` code. This file tracks everything remaining.
+## Completed Items
+
+- [x] A1: Service CIDR local route (RTN_LOCAL) — `rtnetlink.rs:add_local_service_cidr()`
+- [x] A2: Kubernetes API DNS record — `plan.rs:plan_dns()` adds `kubernetes.default.svc.cluster.local`
+- [x] A3: NSG default deny trailing rule — `plan.rs:plan_nsgs()` appends drop rule
+- [x] A4: Conntrack module check — `rtnetlink.rs:conntrack_available()`
+- [x] B3: ARP announce hardening — `lib.rs:enable_arp_announce()`
+- [x] B4: Loopback bring-up — `rtnetlink.rs:ensure_loopback_up()`
+- [x] B5: Multi-op batch sending — `syscalls.rs:NlSocket::send_batch()`
+- [x] B7: Named port resolution — `target_port` is already `Option<u16>` in core types
+- [x] B8: RouteTable resource application — `plan.rs:plan_route_tables()`
+- [x] B9: Subnet resource registration — `plan.rs:plan_subnets()`
+- [x] M6: IpPool::expand() — `ipam.rs:IpPool::expand()`
+- [x] M7: ReconcileReport — `engine.rs:ReconcileReport::from_ops()`
+- [x] M9: configure_pod_netns() standalone — `rtnetlink.rs:RouteSocket::configure_pod_netns()`
+- [x] M10: list_veth_interfaces() public — `rtnetlink.rs:list_veth_interfaces()`
 
 ---
 

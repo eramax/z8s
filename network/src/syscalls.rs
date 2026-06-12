@@ -733,6 +733,80 @@ impl NlSocket {
     pub fn raw_fd(&self) -> i32 {
         self.sock.as_raw_fd()
     }
+
+    /// Send multiple nftables ops in a single batch. More efficient than
+    /// calling `send()` for each op individually.
+    pub fn send_batch(&self, ops: &[NetlinkOp]) -> std::io::Result<()> {
+        if ops.is_empty() {
+            return Ok(());
+        }
+        // Build BATCH_BEGIN: nlmsghdr(16) + nfgenmsg(4) = 20 bytes.
+        let begin_type = NFNL_MSG_BATCH_BEGIN;
+        let mut begin = Vec::with_capacity(20);
+        begin.extend_from_slice(&20u32.to_ne_bytes());
+        begin.extend_from_slice(&begin_type.to_ne_bytes());
+        begin.extend_from_slice(&(NLM_F_REQUEST | NLM_F_ACK).to_ne_bytes());
+        begin.extend_from_slice(&0u32.to_ne_bytes()); // seq=0
+        begin.extend_from_slice(&0u32.to_ne_bytes()); // pid=0
+        begin.extend_from_slice(&[0u8, 0, 0, 10]); // nfgenmsg: family=0, res_id=10
+
+        let mut combined = begin;
+        for (i, op) in ops.iter().enumerate() {
+            let (msg_type, body) = encode_op(op);
+            let op_flags = nlmsg_flags_for(op);
+            let total_len = (16 + body.len()) as u32;
+            let mut msg = Vec::with_capacity(16 + body.len());
+            msg.extend_from_slice(&total_len.to_ne_bytes());
+            msg.extend_from_slice(&nlmsg_type(msg_type).to_ne_bytes());
+            msg.extend_from_slice(&op_flags.to_ne_bytes());
+            msg.extend_from_slice(&((i + 1) as u32).to_ne_bytes()); // seq=i+1
+            msg.extend_from_slice(&0u32.to_ne_bytes()); // pid=0
+            msg.extend_from_slice(&body);
+            let pad = (4 - (msg.len() % 4)) % 4;
+            if pad > 0 {
+                msg.resize(msg.len() + pad, 0);
+            }
+            combined.extend_from_slice(&msg);
+        }
+
+        // Build BATCH_END.
+        let end_type = NFNL_MSG_BATCH_END;
+        let end_seq = (ops.len() + 1) as u32;
+        let mut end = Vec::with_capacity(20);
+        end.extend_from_slice(&20u32.to_ne_bytes());
+        end.extend_from_slice(&end_type.to_ne_bytes());
+        end.extend_from_slice(&NLM_F_REQUEST.to_ne_bytes());
+        end.extend_from_slice(&end_seq.to_ne_bytes());
+        end.extend_from_slice(&0u32.to_ne_bytes());
+        end.extend_from_slice(&[0u8, 0, 0, 10]);
+        combined.extend_from_slice(&end);
+
+        // Send the entire batch as one contiguous buffer.
+        let raw_fd = self.sock.as_raw_fd();
+        let addr = NetlinkAddr::new(0, 0);
+        let mut sent = 0;
+        while sent < combined.len() {
+            let n = socket::sendto(raw_fd, &combined[sent..], &addr, MsgFlags::empty())
+                .map_err(|e| std::io::Error::from_raw_os_error(e as i32))?;
+            sent += n;
+        }
+
+        // Read one ACK for the batch (the kernel sends one NLMSG_ERROR after BATCH_END).
+        let mut reply = vec![0u8; 8192];
+        let n = socket::recv(raw_fd, &mut reply, MsgFlags::empty())
+            .map_err(|e| std::io::Error::from_raw_os_error(e as i32))?;
+        reply.truncate(n);
+        if reply.len() >= 20 {
+            let nlmsg_type = u16::from_ne_bytes([reply[4], reply[5]]);
+            if nlmsg_type == 2 {
+                let errno = i32::from_ne_bytes([reply[16], reply[17], reply[18], reply[19]]);
+                if errno != 0 {
+                    return Err(std::io::Error::from_raw_os_error(-errno));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

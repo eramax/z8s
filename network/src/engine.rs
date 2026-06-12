@@ -38,6 +38,44 @@ use crate::rtnetlink::RouteSocket;
 use crate::syscalls::NlSocket;
 
 // ═══════════════════════════════════════════════════════════════════════════
+// ReconcileReport — per-resource-type op counts
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Breakdown of reconcile ops by resource type. Useful for observability.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReconcileReport {
+    pub tables: usize,
+    pub chains: usize,
+    pub rules: usize,
+    pub sets: usize,
+    pub counters: usize,
+    pub routes: usize,
+}
+
+impl ReconcileReport {
+    /// Count ops by resource type from a list of NetlinkOps.
+    pub fn from_ops(ops: &[NetlinkOp]) -> Self {
+        let mut r = Self::default();
+        for op in ops {
+            match op {
+                NetlinkOp::AddTable { .. } | NetlinkOp::DelTable { .. } => r.tables += 1,
+                NetlinkOp::AddChain { .. } | NetlinkOp::DelChain { .. } => r.chains += 1,
+                NetlinkOp::AddRule { .. } | NetlinkOp::DelRule { .. } => r.rules += 1,
+                NetlinkOp::AddSet { .. } | NetlinkOp::DelSet { .. } | NetlinkOp::SetFlush { .. } => r.sets += 1,
+                NetlinkOp::AddCounter { .. } | NetlinkOp::DelCounter { .. } => r.counters += 1,
+                NetlinkOp::AddRoute { .. } | NetlinkOp::DelRoute { .. } => r.routes += 1,
+            }
+        }
+        r
+    }
+
+    /// Total number of ops.
+    pub fn total(&self) -> usize {
+        self.tables + self.chains + self.rules + self.sets + self.counters + self.routes
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Pure diff
 // ═══════════════════════════════════════════════════════════════════════════
 
