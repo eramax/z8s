@@ -57,3 +57,11 @@ z8s node start --tls-cert /tmp/z8s-cert.pem --tls-key /tmp/z8s-key.pem
 kubectl get pods
 
  sudo chmod 0644 /var/lib/z8s/admin-token
+
+
+sudo nft delete table ip z8s_test_set2 2>&1
+sudo nft delete table ip comment_test2 2>&1
+sudo nft delete table ip vnet_inet 2>&1
+sudo nft delete table ip nsg_e2nsg-a 2>&1
+sudo nft delete table ip vnet_default 2>&1
+sudo nft list tables 
