@@ -137,6 +137,9 @@ const NFTA_NG_DREG: u16 = 1;
 const NFTA_NG_MODULUS: u16 = 2;
 const NFTA_NG_TYPE: u16 = 3;
 const NFTA_NG_OFFSET: u16 = 4;
+// Conntrack expression attributes
+const NFTA_CT_DREG: u16 = 1;
+const NFTA_CT_KEY: u16 = 2;
 
 // Numgen type: pseudo-random.
 const NFT_NG_RANDOM: u32 = 1;
@@ -420,6 +423,10 @@ pub fn encode_expr(expr: &NftExpr, out: &mut NlaBuf) {
         NftExpr::Goto(chain) => put_expr(out, "immediate", |d| {
             d.put_u32(NFTA_IMMEDIATE_DREG, NFT_REG_VERDICT);
             put_verdict(d, NFTA_IMMEDIATE_DATA, NFT_GOTO, Some(chain));
+        }),
+        NftExpr::Conntrack { dreg, key } => put_expr(out, "ct", |d| {
+            d.put_u32(NFTA_CT_DREG, *dreg);
+            d.put_u32(NFTA_CT_KEY, *key);
         }),
     }
 }

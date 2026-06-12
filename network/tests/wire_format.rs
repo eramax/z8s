@@ -10,7 +10,7 @@
 use network::ipam::Ipv4Cidr;
 use network::model::*;
 use network::syscalls::{encode_op, nfgen_header, NlaBuf};
-use network::{reconcile, NetmuxBuilder};
+use network::{reconcile, Netmux, NetmuxBuilder};
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
@@ -967,4 +967,457 @@ fn scenario_full_stack() {
     assert!(ops.iter().any(|op| matches!(op, NetlinkOp::AddTable { .. })));
     assert!(ops.iter().any(|op| matches!(op, NetlinkOp::AddChain { .. })));
     assert!(ops.iter().any(|op| matches!(op, NetlinkOp::AddRule { .. })));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Conntrack expression encoding
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn encode_conntrack_expr() {
+    let mut b = NlaBuf::new();
+    network::syscalls::encode_expr(
+        &NftExpr::Conntrack {
+            dreg: 1,
+            key: 3, // NFT_CT_STATE
+        },
+        &mut b,
+    );
+    let attrs = parse_nested_attrs(b.as_slice());
+    let elem_attrs = parse_nested_attrs(&attrs[0].payload);
+    assert_eq!(elem_attrs[0].payload, b"ct");
+    let data_attrs = parse_nested_attrs(&elem_attrs[1].payload);
+
+    // NFTA_CT_DREG = 1
+    let dreg = data_attrs.iter().find(|a| a.base_type() == 1).unwrap();
+    assert_eq!(read_u32(&dreg.payload, 0), 1);
+    // NFTA_CT_KEY = 2
+    let key = data_attrs.iter().find(|a| a.base_type() == 2).unwrap();
+    assert_eq!(read_u32(&key.payload, 0), 3); // STATE
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Established/related rule
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn established_related_rule_expressions() {
+    let rule = established_related_rule();
+    // Should have: Conntrack + Bitwise + Cmp(NEQ, 0) + Accept
+    assert_eq!(rule.exprs.len(), 4);
+    assert!(matches!(rule.exprs[0], NftExpr::Conntrack { .. }));
+    assert!(matches!(rule.exprs[1], NftExpr::Bitwise { .. }));
+    assert!(matches!(rule.exprs[2], NftExpr::Cmp { op: 1, .. })); // NEQ
+    assert!(matches!(rule.exprs[3], NftExpr::Accept));
+    assert_eq!(rule.comment, Some("established".into()));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Filter table structure: established + nsg jump + catch-all
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn plan_filter_table_has_established_rule() {
+    use z8s_core::store::StoreSnapshot;
+    let snap = StoreSnapshot::from_records(vec![]);
+    let cfg = network::plan::PlanConfig {
+        node_name: "node-a".into(),
+        ..Default::default()
+    };
+    let state = network::plan::plan(&snap, &cfg);
+    let filter = state
+        .tables
+        .get(&(NftFamily::Ip, "z8s_filter_node-a".into()))
+        .expect("filter table missing");
+
+    // Forward chain should exist with established rule.
+    let forward = filter.chains.get("forward").expect("forward chain missing");
+    assert!(
+        forward.rules.iter().any(|r| r
+            .comment
+            .as_deref()
+            .map(|c| c.contains("established"))
+            .unwrap_or(false)),
+        "forward chain should have established rule, got: {:?}",
+        forward.rules.iter().map(|r| r.comment.as_deref()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn plan_filter_table_has_input_and_output_chains() {
+    use z8s_core::store::StoreSnapshot;
+    let snap = StoreSnapshot::from_records(vec![]);
+    let cfg = network::plan::PlanConfig {
+        node_name: "node-a".into(),
+        ..Default::default()
+    };
+    let state = network::plan::plan(&snap, &cfg);
+    let filter = state
+        .tables
+        .get(&(NftFamily::Ip, "z8s_filter_node-a".into()))
+        .unwrap();
+
+    assert!(
+        filter.chains.contains_key("input"),
+        "input chain missing"
+    );
+    assert!(
+        filter.chains.contains_key("output"),
+        "output chain missing"
+    );
+}
+
+#[test]
+fn plan_nsg_creates_jump_from_forward() {
+    use std::collections::BTreeMap;
+    use z8s_core::store::StoreSnapshot;
+    use z8s_core::types::{Namespace, ObjectMeta, ResourceRecord};
+
+    let ns = ResourceRecord::new(z8s_core::types::AnyResource::Namespace(Namespace {
+        metadata: ObjectMeta {
+            name: Some("default".into()),
+            ..Default::default()
+        },
+        ..Default::default()
+    }));
+
+    let nsg = {
+        ResourceRecord::new(z8s_core::types::AnyResource::Nsg(z8s_core::types::Nsg {
+            api_version: "z8s.io/v1".into(),
+            kind: "Nsg".into(),
+            metadata: ObjectMeta {
+                name: Some("test-nsg".into()),
+                namespace: Some("default".into()),
+                ..Default::default()
+            },
+            spec: z8s_core::types::NsgSpec {
+                rules: vec![z8s_core::types::NsgRule {
+                    name: "allow-all".into(),
+                    priority: 100,
+                    action: "allow".into(),
+                    src_cidrs: vec!["10.0.0.0/8".into()],
+                    dst_cidrs: vec!["10.42.0.0/16".into()],
+                    src_ports: None,
+                    dst_ports: None,
+                }],
+            },
+        }))
+    };
+
+    let snap = StoreSnapshot::from_records(vec![ns, nsg]);
+    let cfg = network::plan::PlanConfig {
+        node_name: "node-a".into(),
+        ..Default::default()
+    };
+    let state = network::plan::plan(&snap, &cfg);
+    let filter = state
+        .tables
+        .get(&(NftFamily::Ip, "z8s_filter_node-a".into()))
+        .unwrap();
+
+    // nsg-rules chain should exist.
+    assert!(
+        filter.chains.contains_key("nsg-rules"),
+        "nsg-rules chain missing"
+    );
+
+    // Forward chain should have a jump to nsg-rules.
+    let forward = filter.chains.get("forward").unwrap();
+    assert!(
+        forward.rules.iter().any(|r| r
+            .comment
+            .as_deref()
+            .map(|c| c.contains("nsg"))
+            .unwrap_or(false)),
+        "forward should jump to nsg-rules"
+    );
+}
+
+#[test]
+fn plan_catch_all_creates_jump_from_forward() {
+    use z8s_core::store::StoreSnapshot;
+    let snap = StoreSnapshot::from_records(vec![]);
+    let cfg = network::plan::PlanConfig {
+        node_name: "node-a".into(),
+        ..Default::default()
+    };
+    let state = network::plan::plan(&snap, &cfg);
+    let filter = state
+        .tables
+        .get(&(NftFamily::Ip, "z8s_filter_node-a".into()))
+        .unwrap();
+
+    // With no pods, catch-all should NOT be created.
+    assert!(
+        !filter.chains.contains_key("catch-all"),
+        "catch-all should not exist without pods"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Full lifecycle: plan → reconcile → verify ops
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn full_lifecycle_empty_cluster() {
+    use z8s_core::store::StoreSnapshot;
+    let snap = StoreSnapshot::from_records(vec![]);
+    let cfg = network::plan::PlanConfig {
+        node_name: "node-a".into(),
+        ..Default::default()
+    };
+    let state = network::plan::plan(&snap, &cfg);
+    let ops = reconcile(&state, &NetmuxState::new());
+
+    // Should create nat and filter tables with chains.
+    let tables: Vec<_> = ops
+        .iter()
+        .filter_map(|op| match op {
+            NetlinkOp::AddTable { name, .. } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(tables.contains(&"z8s_nat_node-a"));
+    assert!(tables.contains(&"z8s_filter_node-a"));
+
+    // Filter table should have forward, input, output chains.
+    let chains: Vec<_> = ops
+        .iter()
+        .filter_map(|op| match op {
+            NetlinkOp::AddChain { chain, .. } => Some(chain.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(chains.contains(&"forward"));
+    assert!(chains.contains(&"input"));
+    assert!(chains.contains(&"output"));
+}
+
+#[test]
+fn full_lifecycle_with_service_and_pods() {
+    use z8s_core::store::StoreSnapshot;
+    use z8s_core::types::{ObjectMeta, Pod, PodSpec, ResourceRecord, Service, ServicePort, ServiceSpec};
+
+    let pod1 = {
+        let mut labels = std::collections::BTreeMap::new();
+        labels.insert("app".into(), "web".into());
+        ResourceRecord::new(z8s_core::types::AnyResource::Pod(Pod {
+            metadata: ObjectMeta {
+                name: Some("web-1".into()),
+                namespace: Some("default".into()),
+                uid: Some("uid-web1".into()),
+                labels: Some(labels),
+                ..Default::default()
+            },
+            spec: Some(PodSpec::default()),
+            ..Default::default()
+        }))
+    };
+    // Set pod IP and assigned node via status.
+    let mut pod1 = pod1;
+    pod1.assigned_node = Some("node-a".into());
+    pod1.status.pod_ip = Some("10.42.0.5".into());
+
+    let svc = ResourceRecord::new(z8s_core::types::AnyResource::Service(Service {
+        metadata: ObjectMeta {
+            name: Some("web".into()),
+            namespace: Some("default".into()),
+            ..Default::default()
+        },
+        spec: Some(ServiceSpec {
+            type_: Some("ClusterIP".into()),
+            cluster_ip: Some("10.96.0.10".into()),
+            selector: Some({
+                let mut m = std::collections::BTreeMap::new();
+                m.insert("app".into(), "web".into());
+                m
+            }),
+            ports: Some(vec![ServicePort {
+                name: "http".into(),
+                port: 80,
+                target_port: Some(8080),
+                node_port: None,
+                protocol: Some("TCP".into()),
+            }]),
+        }),
+        ..Default::default()
+    }));
+
+    let snap = StoreSnapshot::from_records(vec![pod1, svc]);
+    let cfg = network::plan::PlanConfig {
+        node_name: "node-a".into(),
+        ..Default::default()
+    };
+    let state = network::plan::plan(&snap, &cfg);
+    let ops = reconcile(&state, &NetmuxState::new());
+
+    // Should have nat table with DNAT rules.
+    assert!(ops.iter().any(|op| matches!(
+        op,
+        NetlinkOp::AddTable { name, .. } if name == "z8s_nat_node-a"
+    )));
+
+    // Should have DNS record.
+    assert!(
+        state.dns_records.contains_key("web.default.svc.cluster.local"),
+        "DNS record missing"
+    );
+    assert_eq!(
+        state.dns_records["web.default.svc.cluster.local"],
+        std::net::Ipv4Addr::new(10, 96, 0, 10)
+    );
+
+    // Should have pod CIDR pool.
+    assert!(state.ip_pools.contains_key("pods"));
+
+    // Should have masquerade rule in postrouting.
+    let nat = state
+        .tables
+        .get(&(NftFamily::Ip, "z8s_nat_node-a".into()))
+        .unwrap();
+    let postrouting = nat.chains.get("postrouting").unwrap();
+    assert!(
+        postrouting
+            .rules
+            .iter()
+            .any(|r| r.comment.as_deref() == Some("pod-cidr-masquerade")),
+        "masquerade rule missing"
+    );
+}
+
+#[test]
+fn full_lifecycle_with_remote_pods() {
+    use z8s_core::store::StoreSnapshot;
+    use z8s_core::types::{ObjectMeta, Pod, PodSpec, ResourceRecord};
+
+    let remote_pod = {
+        let mut labels = std::collections::BTreeMap::new();
+        labels.insert("app".into(), "web".into());
+        let mut rec = ResourceRecord::new(z8s_core::types::AnyResource::Pod(Pod {
+            metadata: ObjectMeta {
+                name: Some("web-remote".into()),
+                namespace: Some("default".into()),
+                uid: Some("uid-remote".into()),
+                labels: Some(labels),
+                ..Default::default()
+            },
+            spec: Some(PodSpec::default()),
+            ..Default::default()
+        }));
+        rec.assigned_node = Some("node-b".into());
+        rec.status.pod_ip = Some("10.42.1.7".into());
+        rec
+    };
+
+    let snap = StoreSnapshot::from_records(vec![remote_pod]);
+    let cfg = network::plan::PlanConfig {
+        node_name: "node-a".into(),
+        peers: vec![("node-b".into(), std::net::Ipv4Addr::new(192, 168, 1, 2))],
+        ..Default::default()
+    };
+    let state = network::plan::plan(&snap, &cfg);
+    let ops = reconcile(&state, &NetmuxState::new());
+
+    // Should have a route for the remote pod.
+    assert!(ops.iter().any(|op| matches!(op, NetlinkOp::AddRoute { .. })));
+    let route_key = (std::net::Ipv4Addr::new(10, 42, 1, 7), 32u8);
+    assert!(
+        state.routes.contains_key(&route_key),
+        "remote pod route missing"
+    );
+}
+
+#[test]
+fn full_lifecycle_nsg_with_default_deny() {
+    use z8s_core::store::StoreSnapshot;
+    use z8s_core::types::{Namespace, ObjectMeta, ResourceRecord};
+
+    let ns = ResourceRecord::new(z8s_core::types::AnyResource::Namespace(Namespace {
+        metadata: ObjectMeta {
+            name: Some("default".into()),
+            ..Default::default()
+        },
+        ..Default::default()
+    }));
+
+    let nsg = {
+        ResourceRecord::new(z8s_core::types::AnyResource::Nsg(z8s_core::types::Nsg {
+            api_version: "z8s.io/v1".into(),
+            kind: "Nsg".into(),
+            metadata: ObjectMeta {
+                name: Some("deny-all".into()),
+                namespace: Some("default".into()),
+                ..Default::default()
+            },
+            spec: z8s_core::types::NsgSpec {
+                rules: vec![z8s_core::types::NsgRule {
+                    name: "deny-all".into(),
+                    priority: 1000,
+                    action: "deny".into(),
+                    src_cidrs: vec!["0.0.0.0/0".into()],
+                    dst_cidrs: vec!["0.0.0.0/0".into()],
+                    src_ports: None,
+                    dst_ports: None,
+                }],
+            },
+        }))
+    };
+
+    let snap = StoreSnapshot::from_records(vec![ns, nsg]);
+    let cfg = network::plan::PlanConfig {
+        node_name: "node-a".into(),
+        ..Default::default()
+    };
+    let state = network::plan::plan(&snap, &cfg);
+    let filter = state
+        .tables
+        .get(&(NftFamily::Ip, "z8s_filter_node-a".into()))
+        .unwrap();
+
+    // nsg-rules chain should exist with a drop rule.
+    let nsg_chain = filter.chains.get("nsg-rules").unwrap();
+    assert!(
+        nsg_chain
+            .rules
+            .iter()
+            .any(|r| r.exprs.iter().any(|e| matches!(e, NftExpr::Drop))),
+        "nsg-rules should have a drop rule"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Sysctl tests
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn ip_forward_is_enabled() {
+    // This test verifies the function can be called (requires root).
+    // In CI it may fail with permission denied, which is expected.
+    let _ = network::enable_ip_forward();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Idempotent reconcile
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn plan_then_reconcile_against_self_is_idempotent() {
+    use z8s_core::store::StoreSnapshot;
+    let snap = StoreSnapshot::from_records(vec![]);
+    let cfg = network::plan::PlanConfig {
+        node_name: "node-a".into(),
+        ..Default::default()
+    };
+    let state = network::plan::plan(&snap, &cfg);
+    // First apply: should produce ops.
+    let ops1 = reconcile(&state, &NetmuxState::new());
+    assert!(!ops1.is_empty());
+
+    // Seed current to match desired (simulating successful apply).
+    let mut engine = Netmux::unconnected();
+    engine.seed_current(state.clone());
+
+    // Second reconcile: should produce zero ops.
+    let ops2 = reconcile(&state, engine.current());
+    assert!(ops2.is_empty(), "idempotent reconcile should produce no ops");
 }

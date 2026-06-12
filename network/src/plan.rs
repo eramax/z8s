@@ -96,7 +96,8 @@ pub fn plan(snap: &StoreSnapshot, cfg: &PlanConfig) -> NetmuxState {
     plan_masquerade(cfg, &mut nat);
     plan_nsgs(snap, &mut filter);
     plan_vnets(snap, &mut state, &mut filter);
-    plan_network_policies(snap, &pods, &mut state);
+    plan_network_policies(snap, &pods, &mut state, &filter.name);
+    plan_catch_all(&pods, cfg, &mut filter);
     plan_remote_routes(&pods, cfg, &mut state);
     plan_dns(snap, cfg, &mut state);
 
@@ -147,15 +148,36 @@ fn base_nat_table(cfg: &PlanConfig) -> NftTable {
         ))
 }
 
-/// The node filter table with its forward hook chain.
+/// The node filter table with forward, input, and output hook chains.
+/// The forward chain starts with an established/related rule for stateful
+/// firewalling, so return traffic from outbound connections is accepted
+/// without needing explicit per-service rules.
 fn base_filter_table(cfg: &PlanConfig) -> NftTable {
-    NftTable::new(cfg.filter_table(), NftFamily::Ip).with_chain(NftChain::base(
-        "forward",
-        NftChainKind::Filter,
-        NftHook::Forward,
-        0,
-        NftPolicy::Accept,
-    ))
+    NftTable::new(cfg.filter_table(), NftFamily::Ip)
+        .with_chain(
+            NftChain::base(
+                "forward",
+                NftChainKind::Filter,
+                NftHook::Forward,
+                0,
+                NftPolicy::Accept,
+            )
+            .with_rule(established_related_rule()),
+        )
+        .with_chain(NftChain::base(
+            "input",
+            NftChainKind::Filter,
+            NftHook::Input,
+            0,
+            NftPolicy::Accept,
+        ))
+        .with_chain(NftChain::base(
+            "output",
+            NftChainKind::Filter,
+            NftHook::Output,
+            0,
+            NftPolicy::Accept,
+        ))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -264,14 +286,13 @@ fn plan_masquerade(cfg: &PlanConfig, nat: &mut NftTable) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// NSG — allow/deny in the forward chain
+// NSG — allow/deny in a dedicated nsg-rules chain
 // ═══════════════════════════════════════════════════════════════════════════
 
 fn plan_nsgs(snap: &StoreSnapshot, filter: &mut NftTable) {
     let mut nsgs = records_of_kind(snap, "Nsg");
     nsgs.sort_by_key(|r| r.name().to_string());
 
-    let mut any = false;
     let mut rules: Vec<(i32, NftRule)> = Vec::new();
     for rec in nsgs {
         let AnyResource::Nsg(nsg) = &rec.spec else {
@@ -283,7 +304,6 @@ fn plan_nsgs(snap: &StoreSnapshot, filter: &mut NftTable) {
                 "deny" => false,
                 _ => continue,
             };
-            any = true;
             for s in &r.src_cidrs {
                 for d in &r.dst_cidrs {
                     let src = Ipv4Cidr::parse(s);
@@ -295,16 +315,19 @@ fn plan_nsgs(snap: &StoreSnapshot, filter: &mut NftTable) {
             }
         }
     }
-    rules.sort_by_key(|(p, _)| *p);
-    for (_, rule) in rules {
-        push_rule(filter, "forward", rule);
+    // Only create the nsg-rules chain if there are actual rules.
+    if rules.is_empty() {
+        return;
     }
-    // Whitelist semantics: once any NSG exists, drop everything not allowed.
-    if any {
-        push_rule(
-            filter,
-            "forward",
-            NftRule::drop().with_comment("nsg-default-deny"),
+    // Create the nsg-rules chain and populate it.
+    let mut nsg_chain = NftChain::regular("nsg-rules", NftChainKind::Filter);
+    rules.sort_by_key(|(p, _)| *p);
+    nsg_chain.rules = rules.into_iter().map(|(_, r)| r).collect();
+    filter.chains.insert("nsg-rules".into(), nsg_chain);
+    // Add a jump from the forward chain to nsg-rules (after established).
+    if let Some(forward) = filter.chains.get_mut("forward") {
+        forward.rules.push(
+            NftRule::jump("nsg-rules").with_comment("jump-to-nsg"),
         );
     }
 }
@@ -337,10 +360,15 @@ fn plan_vnets(snap: &StoreSnapshot, state: &mut NetmuxState, filter: &mut NftTab
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// NetworkPolicy — pod-selector IP sets
+// NetworkPolicy — pod-selector IP sets + set-matching rules
 // ═══════════════════════════════════════════════════════════════════════════
 
-fn plan_network_policies(snap: &StoreSnapshot, pods: &[&ResourceRecord], state: &mut NetmuxState) {
+fn plan_network_policies(
+    snap: &StoreSnapshot,
+    pods: &[&ResourceRecord],
+    state: &mut NetmuxState,
+    _filter_table_name: &str,
+) {
     let nat_filter_key = state
         .tables
         .keys()
@@ -357,13 +385,66 @@ fn plan_network_policies(snap: &StoreSnapshot, pods: &[&ResourceRecord], state: 
         let name = np.metadata.name.as_deref().unwrap_or("policy");
         let selector = spec.pod_selector.clone().unwrap_or_default();
 
-        let mut set = NftSet::ipv4(format!("np_{}_{}", sanitize(ns), sanitize(name)));
+        let set_name = format!("np_{}_{}", sanitize(ns), sanitize(name));
+        let mut set = NftSet::ipv4(&set_name);
         for (ip, _) in resolve_backends(pods, ns, &selector) {
             set = set.with_ipv4(ip);
         }
+        // Add the set to the filter table.
         if let Some(t) = state.tables.get_mut(&key) {
             t.sets.insert(set.name.clone(), set);
         }
+        // Add a set-matching rule in the nsg-rules chain: if source IP is in
+        // the set, accept the packet. This implements ingress NetworkPolicy.
+        if let Some(t) = state.tables.get_mut(&key)
+            && let Some(nsg_chain) = t.chains.get_mut("nsg-rules")
+        {
+            let lookup_rule = NftRule::from_exprs(vec![
+                NftExpr::Meta {
+                    kind: META_L4PROTO,
+                    op: CMP_EQ,
+                    value: PROTO_TCP as u32,
+                },
+                NftExpr::Cmp {
+                    sreg: 1,
+                    op: CMP_EQ,
+                    data: vec![PROTO_TCP],
+                },
+                NftExpr::Lookup {
+                    set: set_name.clone(),
+                    sreg: 1,
+                },
+                NftExpr::Accept,
+            ])
+            .with_comment(format!("np-{name}-ingress"));
+            nsg_chain.rules.push(lookup_rule);
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Catch-all — accept pod-to-pod traffic
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Add a catch-all chain that accepts traffic destined to the pod CIDR.
+/// This is appended after the nsg-rules jump so that pods can communicate
+/// with each other even without explicit NSG rules.
+fn plan_catch_all(pods: &[&ResourceRecord], cfg: &PlanConfig, filter: &mut NftTable) {
+    // Only add if there are pods (meaning pod CIDR traffic exists).
+    if pods.is_empty() {
+        return;
+    }
+    // Create the catch-all chain with a single rule: accept if dst is pod CIDR.
+    let mut exprs = match_cidr(16, &cfg.pod_cidr);
+    exprs.push(NftExpr::Accept);
+    let catch_all = NftChain::regular("catch-all", NftChainKind::Filter)
+        .with_rule(NftRule::from_exprs(exprs).with_comment("pod-cidr-accept"));
+    filter.chains.insert("catch-all".into(), catch_all);
+    // Jump from forward to catch-all (after nsg-rules).
+    if let Some(forward) = filter.chains.get_mut("forward") {
+        forward.rules.push(
+            NftRule::jump("catch-all").with_comment("jump-to-catch-all"),
+        );
     }
 }
 

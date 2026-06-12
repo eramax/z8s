@@ -123,6 +123,42 @@ impl Netmux {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Sysctl helpers — IP forwarding, reverse path filtering, etc.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Enable IPv4 forwarding. Required for pods to reach the internet and
+/// for pod-to-pod routing across nodes. Writes to `/proc/sys/net/ipv4/ip_forward`.
+pub fn enable_ip_forward() -> anyhow::Result<()> {
+    std::fs::write("/proc/sys/net/ipv4/ip_forward", b"1\n")
+        .context("failed to enable ip_forward")
+}
+
+/// Enable reverse path filtering on all interfaces. Prevents IP spoofing
+/// by verifying that incoming packets arrive on the interface that would
+/// be used for routing to their source address.
+pub fn enable_rp_filter() -> anyhow::Result<()> {
+    for param in &[
+        "net/ipv4/conf/all/rp_filter",
+        "net/ipv4/conf/default/rp_filter",
+    ] {
+        let path = format!("/proc/sys/{}", param);
+        if let Err(e) = std::fs::write(&path, b"1\n") {
+            tracing::warn!("failed to set {}: {}", path, e);
+        }
+    }
+    Ok(())
+}
+
+/// Harden sysctl settings for a node. Called during network init.
+pub fn harden_sysctl() -> anyhow::Result<()> {
+    enable_ip_forward()?;
+    enable_rp_filter()?;
+    Ok(())
+}
+
+use anyhow::Context;
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Tests — re-export sanity
 // ═══════════════════════════════════════════════════════════════════════════
 

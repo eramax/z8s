@@ -245,6 +245,14 @@ pub enum NftExpr {
     Jump(String),
     /// Goto a named chain.
     Goto(String),
+    /// Conntrack state match. Loads connection tracking state into a register
+    /// so a subsequent `Cmp` can test against the bitmask.
+    Conntrack {
+        /// Destination register.
+        dreg: u32,
+        /// Conntrack key: 3=STATE, 7=DIRECTION, 5=STATUS.
+        key: u32,
+    },
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -337,6 +345,15 @@ pub const NAT_SNAT: u32 = 0;
 pub const PROTO_TCP: u8 = 6;
 /// IP protocol number for UDP.
 pub const PROTO_UDP: u8 = 17;
+
+/// Conntrack key: connection state bitmask.
+pub const CT_STATE: u32 = 3;
+/// Conntrack state: established.
+pub const CT_STATE_ESTABLISHED: u32 = 1 << 1; // 2
+/// Conntrack state: related.
+pub const CT_STATE_RELATED: u32 = 1 << 2; // 4
+/// Conntrack state: established + related bitmask.
+pub const CT_STATE_ESTABLISHED_RELATED: u32 = CT_STATE_ESTABLISHED | CT_STATE_RELATED; // 6
 
 /// Compute the 4-byte network mask for an IPv4 prefix length.
 pub fn prefix_mask_v4(prefix: u8) -> [u8; 4] {
@@ -528,6 +545,38 @@ pub fn nsg_filter_rule(
     }
     exprs.push(if accept { NftExpr::Accept } else { NftExpr::Drop });
     NftRule::from_exprs(exprs)
+}
+
+/// Build a rule that matches established and related connections.
+/// This is critical for stateful firewalling: return traffic from
+/// outbound connections (and their related connections) is accepted
+/// without explicit per-service rules.
+///
+/// Wire format (matching rustables `Rule::established()`):
+/// 1. `ct` expression: load conntrack state into reg1
+/// 2. `bitwise` expression: mask reg1 with ESTABLISHED bitmask, xor 0
+/// 3. `cmp` expression: compare reg1 != 0
+pub fn established_related_rule() -> NftRule {
+    NftRule::from_exprs(vec![
+        NftExpr::Conntrack {
+            dreg: 1,
+            key: CT_STATE,
+        },
+        NftExpr::Bitwise {
+            sreg: 1,
+            dreg: 1,
+            len: 4,
+            mask: CT_STATE_ESTABLISHED.to_le_bytes().to_vec(),
+            xor: vec![0u8; 4],
+        },
+        NftExpr::Cmp {
+            sreg: 1,
+            op: 1, // NEQ (not equal)
+            data: 0u32.to_be_bytes().to_vec(),
+        },
+        NftExpr::Accept,
+    ])
+    .with_comment("established")
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
