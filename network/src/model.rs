@@ -347,7 +347,7 @@ pub const PROTO_TCP: u8 = 6;
 pub const PROTO_UDP: u8 = 17;
 
 /// Conntrack key: connection state bitmask.
-pub const CT_STATE: u32 = 3;
+pub const CT_STATE: u32 = 0; // NFT_CT_STATE
 /// Conntrack state: established.
 pub const CT_STATE_ESTABLISHED: u32 = 1 << 1; // 2
 /// Conntrack state: related.
@@ -944,6 +944,7 @@ pub enum NetlinkOp {
     AddRule { family: NftFamily, table: String, chain: String, rule: NftRule },
     DelRule { family: NftFamily, table: String, chain: String, handle: u64 },
     AddSet { family: NftFamily, table: String, set: NftSet },
+    AddSetElements { family: NftFamily, table: String, set_name: String, elements: Vec<Vec<u8>> },
     DelSet { family: NftFamily, table: String, name: String },
     SetFlush { family: NftFamily, table: String, name: String },
     AddCounter { family: NftFamily, table: String, counter: NftCounter },

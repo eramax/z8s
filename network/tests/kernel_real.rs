@@ -183,7 +183,7 @@ fn kernel_established_rule() {
     let listing = nft(&["-n", "list", "table", "ip", "z8s_test_estab"]);
     println!("established listing:\n{}", listing);
     assert!(listing.contains("ct"), "ct expression missing");
-    assert!(listing.contains("established"), "established comment missing");
+    assert!(listing.contains("state"), "ct state missing");
 
     // Cleanup.
     let empty = NetmuxState::new();

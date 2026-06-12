@@ -52,6 +52,7 @@ const NFT_MSG_NEWRULE: u16 = 6;
 const NFT_MSG_DELRULE: u16 = 8;
 const NFT_MSG_NEWSET: u16 = 9;
 const NFT_MSG_DELSET: u16 = 11;
+const NFT_MSG_NEWSETELEM: u16 = 12;
 const NFT_MSG_NEWOBJ: u16 = 18;
 const NFT_MSG_DELOBJ: u16 = 20;
 
@@ -78,6 +79,7 @@ const NFTA_SET_KEY_LEN: u16 = 5;
 const NFTA_SET_DATA_LEN: u16 = 7;
 const NFTA_SET_ELEMENTS: u16 = 13;
 const NFTA_SET_ELEM_KEY: u16 = 1;
+const NFTA_SET_ID: u16 = 10;
 const NFTA_OBJ_TABLE: u16 = 1;
 const NFTA_OBJ_NAME: u16 = 2;
 const NFTA_OBJ_TYPE: u16 = 3;
@@ -175,7 +177,7 @@ pub fn nlmsg_flags_for(op: &NetlinkOp) -> u16 {
     let base = NLM_F_REQUEST | NLM_F_ACK;
     match op {
         NetlinkOp::AddTable { .. } => base | NLM_F_CREATE,
-        NetlinkOp::AddChain { .. } | NetlinkOp::AddSet { .. } | NetlinkOp::AddCounter { .. } => {
+        NetlinkOp::AddChain { .. } | NetlinkOp::AddSet { .. } | NetlinkOp::AddSetElements { .. } | NetlinkOp::AddCounter { .. } => {
             base | NLM_F_CREATE
         }
         NetlinkOp::AddRule { .. } => base | NLM_F_CREATE | NLM_F_APPEND,
@@ -501,29 +503,32 @@ pub fn encode_op(op: &NetlinkOp) -> (u16, Vec<u8>) {
             let mut b = NlaBuf::new();
             b.put_str(NFTA_SET_TABLE, table);
             b.put_str(NFTA_SET_NAME, &set.name);
-            // Set flags: anonymous (created inline), constant (pre-populated elements).
-            let mut flags = NFT_SET_ANONYMOUS;
-            if !set.elements.is_empty() {
-                flags |= NFT_SET_CONSTANT;
-            }
-            b.put_u32(NFTA_SET_FLAGS, flags);
+            b.put_u32(NFTA_SET_FLAGS, 0);
             b.put_u32(NFTA_SET_KEY_TYPE, type_name_to_u32(&set.key_type));
             b.put_u32(NFTA_SET_KEY_LEN, set.key_len);
+            b.put_u32(NFTA_SET_ID, 1);
             if set.data_len > 0 {
                 b.put_u32(NFTA_SET_DATA_LEN, set.data_len);
             }
-            if !set.elements.is_empty() {
-                b.put_nested(NFTA_SET_ELEMENTS, |list| {
-                    for el in &set.elements {
-                        list.put_nested(NFTA_LIST_ELEM, |item| {
-                            item.put_nested(NFTA_SET_ELEM_KEY, |key| {
-                                key.put_slice(NFTA_DATA_VALUE, el);
-                            });
-                        });
-                    }
-                });
-            }
+            // Elements are handled as separate NEWSETELEM ops in send_batch.
             (NFT_MSG_NEWSET, build_message(*family, b.finish()))
+        }
+        NetlinkOp::AddSetElements { family, table, set_name, elements } => {
+            // NFT_MSG_NEWSETELEM uses NFTA_SET_ELEM_LIST_* attributes (not NFTA_SET_*)
+            let mut b = NlaBuf::new();
+            b.put_str(1, table);   // NFTA_SET_ELEM_LIST_TABLE
+            b.put_str(2, set_name); // NFTA_SET_ELEM_LIST_SET
+            b.put_u32(4, 1);       // NFTA_SET_ELEM_LIST_SET_ID
+            b.put_nested(3, |list| { // NFTA_SET_ELEM_LIST_ELEMENTS
+                for el in elements {
+                    list.put_nested(NFTA_LIST_ELEM, |item| {
+                        item.put_nested(NFTA_SET_ELEM_KEY, |key| {
+                            key.put_slice(NFTA_DATA_VALUE, el);
+                        });
+                    });
+                }
+            });
+            (NFT_MSG_NEWSETELEM, build_message(*family, b.finish()))
         }
         NetlinkOp::DelSet { family, table, name } => {
             let mut b = NlaBuf::new();
@@ -817,6 +822,7 @@ pub fn send_batch(ops: &[NetlinkOp]) -> std::io::Result<()> {
             NetlinkOp::AddTable { .. }
             | NetlinkOp::AddChain { .. }
             | NetlinkOp::AddSet { .. }
+            | NetlinkOp::AddSetElements { .. }
             | NetlinkOp::AddCounter { .. } => NLM_F_REQUEST | NLM_F_CREATE | NLM_F_ACK,
             NetlinkOp::AddRule { .. } => NLM_F_REQUEST | NLM_F_CREATE | NLM_F_APPEND | NLM_F_ACK,
             NetlinkOp::DelTable { .. }

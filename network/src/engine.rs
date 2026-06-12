@@ -61,7 +61,7 @@ impl ReconcileReport {
                 NetlinkOp::AddTable { .. } | NetlinkOp::DelTable { .. } => r.tables += 1,
                 NetlinkOp::AddChain { .. } | NetlinkOp::DelChain { .. } => r.chains += 1,
                 NetlinkOp::AddRule { .. } | NetlinkOp::DelRule { .. } => r.rules += 1,
-                NetlinkOp::AddSet { .. } | NetlinkOp::DelSet { .. } | NetlinkOp::SetFlush { .. } => r.sets += 1,
+                NetlinkOp::AddSet { .. } | NetlinkOp::AddSetElements { .. } | NetlinkOp::DelSet { .. } | NetlinkOp::SetFlush { .. } => r.sets += 1,
                 NetlinkOp::AddCounter { .. } | NetlinkOp::DelCounter { .. } => r.counters += 1,
                 NetlinkOp::AddRoute { .. } | NetlinkOp::DelRoute { .. } => r.routes += 1,
             }
@@ -216,6 +216,14 @@ fn push_table_init(ops: &mut Vec<NetlinkOp>, table: &NftTable) {
             table: table.name.clone(),
             set: set.clone(),
         });
+        if !set.elements.is_empty() {
+            ops.push(NetlinkOp::AddSetElements {
+                family: table.family,
+                table: table.name.clone(),
+                set_name: set.name.clone(),
+                elements: set.elements.clone(),
+            });
+        }
     }
     // Chains are created after the table exists. Each chain is created
     // independently; rules are added after their chain is created.
@@ -264,11 +272,21 @@ fn push_table_diff(ops: &mut Vec<NetlinkOp>, want: &NftTable, cur: &NftTable) {
     // Sets
     for (name, want_set) in &want.sets {
         match cur.sets.get(name) {
-            None => ops.push(NetlinkOp::AddSet {
-                family: want.family,
-                table: want.name.clone(),
-                set: want_set.clone(),
-            }),
+            None => {
+                ops.push(NetlinkOp::AddSet {
+                    family: want.family,
+                    table: want.name.clone(),
+                    set: want_set.clone(),
+                });
+                if !want_set.elements.is_empty() {
+                    ops.push(NetlinkOp::AddSetElements {
+                        family: want.family,
+                        table: want.name.clone(),
+                        set_name: want_set.name.clone(),
+                        elements: want_set.elements.clone(),
+                    });
+                }
+            }
             Some(cur_set) if want_set.elements != cur_set.elements => {
                 // Replace set wholesale when elements differ
                 ops.push(NetlinkOp::DelSet {
@@ -281,6 +299,14 @@ fn push_table_diff(ops: &mut Vec<NetlinkOp>, want: &NftTable, cur: &NftTable) {
                     table: want.name.clone(),
                     set: want_set.clone(),
                 });
+                if !want_set.elements.is_empty() {
+                    ops.push(NetlinkOp::AddSetElements {
+                        family: want.family,
+                        table: want.name.clone(),
+                        set_name: want_set.name.clone(),
+                        elements: want_set.elements.clone(),
+                    });
+                }
             }
             _ => {}
         }
@@ -569,6 +595,7 @@ impl Netmux {
                     t.sets.insert(set.name.clone(), set.clone());
                 }
             }
+            NetlinkOp::AddSetElements { .. } => { /* element state tracked via SetFlush/ReSet */ }
             NetlinkOp::DelSet { family, table, name } => {
                 if let Some(t) = self.current.tables.get_mut(&(*family, table.clone())) {
                     t.sets.remove(name);
