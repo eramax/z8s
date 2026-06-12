@@ -42,7 +42,7 @@
 | Expression: conntrack (ct state) | ✅ | ❌ | z8s only |
 | Expression: goto | 🔶 | ❌ | z8s encoded, never used |
 | Expression: return | 🔶 | ❌ | z8s encoded, never used |
-| NFTA_RULE_USERDATA (comments) | ❌ | ❌ | Neither implements this |
+| NFTA_RULE_USERDATA (comments) | ✅ | ❌ | z8s uses libnftnl udata TLV format |
 | Response parsing (jump handle detection) | ❌ | ✅ | pelagos only |
 
 ## 2. RTNETLINK (Linux kernel networking)
@@ -171,7 +171,6 @@
 
 | Feature | Status | Why |
 |---------|--------|-----|
-| `NFTA_RULE_USERDATA` (comment encoding) | 🗑️ Removed assertion | Kernel wire format not yet implemented; libnftnl uses nested NFTA_USERDATA_TYPE + NFTA_USERDATA_DATA inside NFTA_RULE_USERDATA, but encoding hasn't been completed |
 | `NftExpr::Goto` | 🔶 Encoded, unused | No rule builder uses goto yet |
 | `NftExpr::Return` | 🔶 Encoded, unused | No rule builder uses return yet |
 | `NftFamily::Ip6/Inet/Netdev` | 🔶 Encoded, untested | All kernel tests use IPv4 only |
@@ -206,5 +205,4 @@
 - **Chain flush** (delete all rules from chain)
 
 ### Neither implements:
-- `NFTA_RULE_USERDATA` (rule comments in wire protocol)
 - Full IPv6 nftables rules (only pelagos has IPv6 routes/addresses)

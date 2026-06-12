@@ -159,8 +159,13 @@ fn kernel_apply_and_cleanup() {
         "expected drop verdict in nsg, got: {}",
         nsg_listing
     );
-    // Note: NFTA_RULE_USERDATA comment encoding not yet implemented;
-    // skip checking for the comment in the kernel output.
+    // And the comment we attached (nft -a shows userdata/annotations).
+    let nsg_listing_a = nft(&["-a", "-n", "list", "table", "ip", "nsg_pod-abc"]);
+    assert!(
+        nsg_listing_a.contains("deny-all"),
+        "expected deny-all comment in nsg rule, got: {}",
+        nsg_listing_a
+    );
 
     // ── Clean up: reconcile against empty state ───────────────────
     let empty = NetmuxState::new();

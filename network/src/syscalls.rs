@@ -71,6 +71,7 @@ const NFTA_RULE_TABLE: u16 = 1;
 const NFTA_RULE_CHAIN: u16 = 2;
 const NFTA_RULE_HANDLE: u16 = 3;
 const NFTA_RULE_EXPRESSIONS: u16 = 4;
+const NFTA_RULE_USERDATA: u16 = 7;
 const NFTA_SET_TABLE: u16 = 1;
 const NFTA_SET_NAME: u16 = 2;
 const NFTA_SET_FLAGS: u16 = 3;
@@ -493,6 +494,16 @@ pub fn encode_op(op: &NetlinkOp) -> (u16, Vec<u8>) {
             });
             if let Some(h) = rule.handle {
                 b.put_u64(NFTA_RULE_HANDLE, h);
+            }
+            if let Some(ref comment) = rule.comment {
+                // libnftnl udata TLV format: {type: u8, len: u8, value[len]}
+                // NFTNL_UDATA_RULE_COMMENT = 0, value includes NUL terminator.
+                let mut ud = Vec::with_capacity(2 + comment.len() + 1);
+                ud.push(0u8); // type = NFTNL_UDATA_RULE_COMMENT
+                ud.push((comment.len() + 1) as u8); // len includes NUL
+                ud.extend_from_slice(comment.as_bytes());
+                ud.push(0u8); // NUL terminator
+                b.put_slice(NFTA_RULE_USERDATA, &ud);
             }
             (NFT_MSG_NEWRULE, build_message(*family, b.finish()))
         }
