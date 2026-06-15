@@ -226,6 +226,80 @@ const OCI_DEFAULT_CAPS: &[&str] = &[
     "CAP_AUDIT_WRITE",
 ];
 
+/// Default masked paths — hide sensitive host info from containers.
+pub const DEFAULT_MASKED_PATHS: &[&str] = &[
+    "/proc/acpi",
+    "/proc/asound",
+    "/proc/core",
+    "/proc/dev",
+    "/proc/dma",
+    "/proc/fb",
+    "/proc/irq",
+    "/proc/kallsyms",
+    "/proc/kcore",
+    "/proc/keys",
+    "/proc/key-users",
+    "/proc/kmsg",
+    "/proc/latency_stats",
+    "/proc/sched_debug",
+    "/proc/scsi",
+    "/proc/timer_list",
+    "/proc/timer_stats",
+    "/sys/firmware",
+    "/sys/kernel/mm",
+];
+
+/// Default readonly paths — /sys inside container should be read-only.
+pub const DEFAULT_READONLY_PATHS: &[&str] = &[
+    "/proc/bus",
+    "/proc/fs",
+    "/proc/irq",
+    "/proc/sys",
+    "/proc/sysrq-trigger",
+];
+
+/// Apply masked paths: mount /dev/null over sensitive /proc and /sys files.
+pub fn apply_masked_paths(rootfs_path: &str, extra: &[String]) {
+    let root = Path::new(rootfs_path);
+    let extras: Vec<&str> = extra.iter().map(|s| s.as_str()).collect();
+    let all = DEFAULT_MASKED_PATHS.iter().copied().chain(extras.iter().copied());
+    for mask_path in all {
+        let target = root.join(mask_path.trim_start_matches('/'));
+        if !target.exists() {
+            if let Some(parent) = target.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            // Create the path so we can bind-mount /dev/null over it
+            if target.is_dir() {
+                let _ = std::fs::remove_dir_all(&target);
+            }
+            let _ = std::fs::write(&target, []);
+        }
+        sys::mount(Some("/dev/null"), target.to_str().unwrap_or(""), None, MountFlags::BIND, None).ok();
+    }
+}
+
+/// Apply readonly paths: remount specific paths read-only.
+pub fn apply_readonly_paths(rootfs_path: &str, extra: &[String]) {
+    let root = Path::new(rootfs_path);
+    let extras: Vec<&str> = extra.iter().map(|s| s.as_str()).collect();
+    let all = DEFAULT_READONLY_PATHS.iter().copied().chain(extras.iter().copied());
+    for ro_path in all {
+        let target = root.join(ro_path.trim_start_matches('/'));
+        if target.exists() {
+            let flags = MountFlags::BIND | MountFlags::RDONLY;
+            sys::mount(
+                Some(target.to_str().unwrap()),
+                target.to_str().unwrap(),
+                None,
+                MountFlags::BIND,
+                None,
+            ).ok();
+            rustix::mount::mount_remount(&target, flags, "").ok();
+        }
+    }
+}
+
 /// Drop excess capabilities from all 5 cap sets.
 /// Retains OCI defaults plus any caps listed in `extra_caps`.
 pub fn drop_capabilities(privileged: bool, extra_caps: &[String]) {

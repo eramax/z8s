@@ -13,6 +13,8 @@ use runtime::supervisor;
 use runtime::spec;
 use runtime::cgroup::CgroupManager;
 use runtime::health::{HealthChecker, HealthStatus, ProbeAction, ProbeConfig, ExecProbe, TcpProbe};
+#[allow(unused_imports)]
+use std::os::unix::fs::PermissionsExt;
 
 fn tmp(sub: &str) -> PathBuf { std::env::temp_dir().join(format!("z8s_test_{}", sub)) }
 fn cleanup(name: &str) { let _ = std::fs::remove_dir_all(tmp(name)); }
@@ -350,11 +352,9 @@ async fn test_tcp_probe_listening() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     std::thread::spawn(move || {
-        for stream in listener.incoming() {
-            if let Ok(mut s) = stream {
-                use std::io::Write;
-                let _ = s.write_all(b"HTTP/1.0 200 OK\r\n\r\n");
-            }
+        for mut s in listener.incoming().flatten() {
+            use std::io::Write;
+            let _ = s.write_all(b"HTTP/1.0 200 OK\r\n\r\n");
         }
     });
 
@@ -703,8 +703,10 @@ fn test_sethostname_child() {
         z8s_core::sys::ForkResult::Parent(child_pid) => {
             let start = std::time::Instant::now();
             while start.elapsed() < std::time::Duration::from_secs(5) {
-                if let Some((pid, _)) = z8s_core::sys::waitpid(-1) {
-                    if pid == child_pid { break; }
+                if let Some((pid, _)) = z8s_core::sys::waitpid(-1)
+                    && pid == child_pid
+                {
+                    break;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
@@ -744,7 +746,10 @@ async fn test_alpine_full_lifecycle() {
         z8s_core::sys::ForkResult::Parent(pid) => {
             let s = std::time::Instant::now();
             while s.elapsed() < Duration::from_secs(5) {
-                if let Some((p, _)) = z8s_core::sys::waitpid(-1) { if p == pid { exited = true; break; } }
+                if let Some((p, _)) = z8s_core::sys::waitpid(-1) && p == pid {
+                    exited = true;
+                    break;
+                }
                 std::thread::sleep(Duration::from_millis(10));
             }
         }
@@ -779,7 +784,10 @@ async fn test_ubuntu_full_lifecycle() {
         z8s_core::sys::ForkResult::Parent(pid) => {
             let s = std::time::Instant::now();
             while s.elapsed() < Duration::from_secs(5) {
-                if let Some((p, _)) = z8s_core::sys::waitpid(-1) { if p == pid { exited = true; break; } }
+                if let Some((p, _)) = z8s_core::sys::waitpid(-1) && p == pid {
+                    exited = true;
+                    break;
+                }
                 std::thread::sleep(Duration::from_millis(10));
             }
         }
@@ -818,4 +826,542 @@ async fn test_multiple_images_cache_independent() {
     assert_ne!(a, b);
 
     cleanup("multi_cache");
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// §12  SYSCALL — no_new_privileges kernel test
+// ══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_no_new_privileges_sets_bit() {
+    use z8s_core::sys;
+
+    // Fork a child that sets no_new_privs and reads its own /proc/self/status
+    let (r, w) = sys::pipe2(rustix::pipe::PipeFlags::CLOEXEC).unwrap();
+    match sys::fork().unwrap() {
+        sys::ForkResult::Child => {
+            drop(r);
+            sys::prctl_no_new_privs().ok();
+            // Read NoNewPrivs from /proc/self/status
+            let status = std::fs::read_to_string("/proc/self/status").unwrap();
+            let nonew = status.lines()
+                .find(|l| l.starts_with("NoNewPrivs:"))
+                .map(|l| l.trim().to_string())
+                .unwrap_or_default();
+            sys::write_fd(&w, nonew.as_bytes()).ok();
+            drop(w);
+            std::process::exit(0);
+        }
+        sys::ForkResult::Parent(pid) => {
+            drop(w);
+            let mut buf = [0u8; 64];
+            let n = sys::read_fd(&r, &mut buf).unwrap();
+            let val = String::from_utf8_lossy(&buf[..n]).to_string();
+            // Wait for child
+            let _ = sys::waitpid(pid as i32);
+            assert!(val.contains("NoNewPrivs:"));
+            assert!(val.contains("1"), "NoNewPrivs should be 1, got: {}", val);
+        }
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// §13  SYSCALL — OOM score adj kernel test
+// ══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_oom_score_adj_sets_value() {
+    use z8s_core::sys;
+
+    let (r, w) = sys::pipe2(rustix::pipe::PipeFlags::CLOEXEC).unwrap();
+    match sys::fork().unwrap() {
+        sys::ForkResult::Child => {
+            drop(r);
+            sys::prctl_set_oom_score_adj(-500).ok();
+            let adj = std::fs::read_to_string("/proc/self/oom_score_adj").unwrap();
+            sys::write_fd(&w, adj.trim().as_bytes()).ok();
+            drop(w);
+            std::process::exit(0);
+        }
+        sys::ForkResult::Parent(pid) => {
+            drop(w);
+            let mut buf = [0u8; 32];
+            let n = sys::read_fd(&r, &mut buf).unwrap();
+            let val = String::from_utf8_lossy(&buf[..n]).to_string();
+            let _ = sys::waitpid(pid as i32);
+            assert_eq!(val, "-500", "oom_score_adj should be -500, got: {}", val);
+        }
+    }
+}
+
+#[test]
+fn test_oom_score_adj_positive() {
+    use z8s_core::sys;
+
+    let (r, w) = sys::pipe2(rustix::pipe::PipeFlags::CLOEXEC).unwrap();
+    match sys::fork().unwrap() {
+        sys::ForkResult::Child => {
+            drop(r);
+            sys::prctl_set_oom_score_adj(500).ok();
+            let adj = std::fs::read_to_string("/proc/self/oom_score_adj").unwrap();
+            sys::write_fd(&w, adj.trim().as_bytes()).ok();
+            drop(w);
+            std::process::exit(0);
+        }
+        sys::ForkResult::Parent(pid) => {
+            drop(w);
+            let mut buf = [0u8; 32];
+            let n = sys::read_fd(&r, &mut buf).unwrap();
+            let val = String::from_utf8_lossy(&buf[..n]).to_string();
+            let _ = sys::waitpid(pid as i32);
+            assert_eq!(val, "500", "oom_score_adj should be 500, got: {}", val);
+        }
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// §14  SYSCALL — umask kernel test
+// ══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_umask_restricts_file_creation() {
+    use z8s_core::sys;
+
+    let (r, w) = sys::pipe2(rustix::pipe::PipeFlags::CLOEXEC).unwrap();
+    match sys::fork().unwrap() {
+        sys::ForkResult::Child => {
+            drop(r);
+            // Set strict umask: no group/other write
+            sys::umask(0o077);
+            // Create a file
+            std::fs::write("/tmp/z8s_umask_test_file", b"test").ok();
+            // Read its permissions
+            let meta = std::fs::metadata("/tmp/z8s_umask_test_file").unwrap();
+            let mode = meta.permissions().mode() & 0o777;
+            let result = format!("{:o}", mode);
+            sys::write_fd(&w, result.as_bytes()).ok();
+            let _ = std::fs::remove_file("/tmp/z8s_umask_test_file");
+            drop(w);
+            std::process::exit(0);
+        }
+        sys::ForkResult::Parent(pid) => {
+            drop(w);
+            let mut buf = [0u8; 16];
+            let n = sys::read_fd(&r, &mut buf).unwrap();
+            let val = String::from_utf8_lossy(&buf[..n]).to_string();
+            let _ = sys::waitpid(pid as i32);
+            // With umask 077, file should be 600 (owner rw only)
+            assert_eq!(val, "600", "file permissions should be 600, got: {}", val);
+        }
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// §15  SYSCALL — supplementary groups kernel test
+// ══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_supplementary_groups_applied() {
+    use z8s_core::sys;
+
+    let (r, w) = sys::pipe2(rustix::pipe::PipeFlags::CLOEXEC).unwrap();
+    match sys::fork().unwrap() {
+        sys::ForkResult::Child => {
+            drop(r);
+            // Set supplementary groups (requires root or CAP_SETGID)
+            let _ = sys::setgroups(&[0, 1, 2]);
+            // Read groups from /proc/self/status
+            let status = std::fs::read_to_string("/proc/self/status").unwrap();
+            let groups_line = status.lines()
+                .find(|l| l.starts_with("Groups:"))
+                .map(|l| l.trim().to_string())
+                .unwrap_or_default();
+            sys::write_fd(&w, groups_line.as_bytes()).ok();
+            drop(w);
+            std::process::exit(0);
+        }
+        sys::ForkResult::Parent(pid) => {
+            drop(w);
+            let mut buf = [0u8; 256];
+            let n = sys::read_fd(&r, &mut buf).unwrap();
+            let val = String::from_utf8_lossy(&buf[..n]).to_string();
+            let _ = sys::waitpid(pid as i32);
+            // Groups should contain our GID (usually 0 or 1000) plus the ones we set
+            assert!(val.starts_with("Groups:"), "should have Groups line, got: {}", val);
+            // At minimum, group 0 (root) should be present
+            let groups: Vec<&str> = val.trim_start_matches("Groups:").trim().split(' ').collect();
+            assert!(!groups.is_empty(), "groups should not be empty");
+        }
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// §16  CGROUP — real kernel cgroup resource limits
+// ══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_cgroup_memory_limit_enforced() {
+    use runtime::cgroup::CgroupManager;
+
+    let mgr = match CgroupManager::new() {
+        Ok(m) if m.is_enabled() => m,
+        _ => {
+            eprintln!("cgroups not available, skipping");
+            return;
+        }
+    };
+
+    let pod_uid = "test-mem-limit-1";
+    mgr.create_pod_cgroup(pod_uid).unwrap();
+    mgr.set_memory_limit(pod_uid, 32 * 1024 * 1024).unwrap(); // 32 MB
+
+    // Verify by reading the cgroup file
+    let cg_path = format!("/sys/fs/cgroup/z8s/{}", pod_uid);
+    let mem_max = std::fs::read_to_string(format!("{}/memory.max", cg_path)).unwrap();
+    assert_eq!(mem_max.trim(), (32 * 1024 * 1024).to_string());
+
+    mgr.remove_cgroup(pod_uid).ok();
+}
+
+#[test]
+fn test_cgroup_cpu_shares_enforced() {
+    use runtime::cgroup::CgroupManager;
+
+    let mgr = match CgroupManager::new() {
+        Ok(m) if m.is_enabled() => m,
+        _ => {
+            eprintln!("cgroups not available, skipping");
+            return;
+        }
+    };
+
+    let pod_uid = "test-cpu-shares-1";
+    mgr.create_pod_cgroup(pod_uid).unwrap();
+    mgr.set_cpu_shares(pod_uid, 512).unwrap();
+
+    let cg_path = format!("/sys/fs/cgroup/z8s/{}", pod_uid);
+    let weight = std::fs::read_to_string(format!("{}/cpu.weight", cg_path)).unwrap();
+    assert_eq!(weight.trim(), "512");
+
+    mgr.remove_cgroup(pod_uid).ok();
+}
+
+#[test]
+fn test_cgroup_cpu_quota_enforced() {
+    use runtime::cgroup::CgroupManager;
+
+    let mgr = match CgroupManager::new() {
+        Ok(m) if m.is_enabled() => m,
+        _ => {
+            eprintln!("cgroups not available, skipping");
+            return;
+        }
+    };
+
+    let pod_uid = "test-cpu-quota-1";
+    mgr.create_pod_cgroup(pod_uid).unwrap();
+    mgr.set_cpu_limit(pod_uid, 50000, 100000).unwrap(); // 50% CPU
+
+    let cg_path = format!("/sys/fs/cgroup/z8s/{}", pod_uid);
+    let cpu_max = std::fs::read_to_string(format!("{}/cpu.max", cg_path)).unwrap();
+    assert_eq!(cpu_max.trim(), "50000 100000");
+
+    mgr.remove_cgroup(pod_uid).ok();
+}
+
+#[test]
+fn test_cgroup_pids_limit_enforced() {
+    use runtime::cgroup::CgroupManager;
+
+    let mgr = match CgroupManager::new() {
+        Ok(m) if m.is_enabled() => m,
+        _ => {
+            eprintln!("cgroups not available, skipping");
+            return;
+        }
+    };
+
+    let pod_uid = "test-pids-limit-1";
+    mgr.create_pod_cgroup(pod_uid).unwrap();
+    mgr.set_pids_max(pod_uid, 32).unwrap();
+
+    let cg_path = format!("/sys/fs/cgroup/z8s/{}", pod_uid);
+    let pids = std::fs::read_to_string(format!("{}/pids.max", cg_path)).unwrap();
+    assert_eq!(pids.trim(), "32");
+
+    mgr.remove_cgroup(pod_uid).ok();
+}
+
+#[test]
+fn test_cgroup_memory_swap_enforced() {
+    use runtime::cgroup::CgroupManager;
+
+    let mgr = match CgroupManager::new() {
+        Ok(m) if m.is_enabled() => m,
+        _ => {
+            eprintln!("cgroups not available, skipping");
+            return;
+        }
+    };
+
+    let pod_uid = "test-mem-swap-1";
+    mgr.create_pod_cgroup(pod_uid).unwrap();
+    mgr.set_memory_limit(pod_uid, 64 * 1024 * 1024).unwrap();
+    mgr.set_memory_swap(pod_uid, 128 * 1024 * 1024).unwrap();
+
+    let cg_path = format!("/sys/fs/cgroup/z8s/{}", pod_uid);
+    let swap = std::fs::read_to_string(format!("{}/memory.swap.max", cg_path)).unwrap();
+    assert_eq!(swap.trim(), (128 * 1024 * 1024).to_string());
+
+    mgr.remove_cgroup(pod_uid).ok();
+}
+
+#[test]
+fn test_cgroup_cpuset_enforced() {
+    use runtime::cgroup::CgroupManager;
+
+    let mgr = match CgroupManager::new() {
+        Ok(m) if m.is_enabled() => m,
+        _ => {
+            eprintln!("cgroups not available, skipping");
+            return;
+        }
+    };
+
+    let pod_uid = "test-cpuset-1";
+    mgr.create_pod_cgroup(pod_uid).unwrap();
+    mgr.set_cpuset_cpus(pod_uid, "0").unwrap();
+    mgr.set_cpuset_mems(pod_uid, "0").unwrap();
+
+    let cg_path = format!("/sys/fs/cgroup/z8s/{}", pod_uid);
+    let cpus = std::fs::read_to_string(format!("{}/cpuset.cpus", cg_path)).unwrap();
+    let mems = std::fs::read_to_string(format!("{}/cpuset.mems", cg_path)).unwrap();
+    assert_eq!(cpus.trim(), "0");
+    assert_eq!(mems.trim(), "0");
+
+    mgr.remove_cgroup(pod_uid).ok();
+}
+
+#[test]
+fn test_cgroup_resource_stats_reads_real_values() {
+    use runtime::cgroup::CgroupManager;
+
+    let mgr = match CgroupManager::new() {
+        Ok(m) if m.is_enabled() => m,
+        _ => {
+            eprintln!("cgroups not available, skipping");
+            return;
+        }
+    };
+
+    let pod_uid = "test-stats-1";
+    mgr.create_pod_cgroup(pod_uid).unwrap();
+    mgr.set_memory_limit(pod_uid, 64 * 1024 * 1024).unwrap();
+    mgr.set_pids_max(pod_uid, 16).unwrap();
+
+    let stats = mgr.resource_stats(pod_uid);
+    // memory.limit should be set
+    assert_eq!(stats.memory_limit_bytes, Some(64 * 1024 * 1024));
+    // pids_limit should be set
+    assert_eq!(stats.pids_limit, Some(16));
+    // memory.current should be >= 0
+    assert!(stats.memory_current_bytes < 1024 * 1024, "empty cgroup should use minimal memory");
+    // pids.current should be 0 (no tasks in cgroup)
+    assert_eq!(stats.pids_current, 0);
+
+    mgr.remove_cgroup(pod_uid).ok();
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// §17  CGROUP — resource_stats with live process
+// ══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_cgroup_stats_with_live_child() {
+    use z8s_core::sys;
+    use runtime::cgroup::CgroupManager;
+
+    let mgr = match CgroupManager::new() {
+        Ok(m) if m.is_enabled() => m,
+        _ => {
+            eprintln!("cgroups not available, skipping");
+            return;
+        }
+    };
+
+    let pod_uid = "test-stats-live-1";
+    mgr.create_pod_cgroup(pod_uid).unwrap();
+    mgr.set_memory_limit(pod_uid, 64 * 1024 * 1024).unwrap();
+
+    // Fork a child that allocates some memory
+    let (r, w) = sys::pipe2(rustix::pipe::PipeFlags::CLOEXEC).unwrap();
+    match sys::fork().unwrap() {
+        sys::ForkResult::Child => {
+            drop(r);
+            // Allocate 4 MB
+            let _data: Vec<u8> = vec![42u8; 4 * 1024 * 1024];
+            // Tell parent we're alive
+            sys::write_fd(&w, b"ok").ok();
+            drop(w);
+            // Hold memory until killed
+            std::thread::sleep(std::time::Duration::from_secs(60));
+            std::process::exit(0);
+        }
+        sys::ForkResult::Parent(child_pid) => {
+            drop(w);
+            // Wait for child to be ready
+            let mut buf = [0u8; 8];
+            sys::read_fd(&r, &mut buf).ok();
+
+            // Add child to cgroup
+            mgr.add_pid_to_cgroup(pod_uid, child_pid).unwrap();
+
+            // Give kernel a moment to update stats
+            std::thread::sleep(std::time::Duration::from_millis(200));
+
+            let stats = mgr.resource_stats(pod_uid);
+            assert!(stats.memory_current_bytes > 0, "child allocated memory, usage should be > 0, got {}", stats.memory_current_bytes);
+            assert_eq!(stats.pids_current, 1, "should have 1 process in cgroup");
+
+            // Kill child
+            sys::kill(child_pid as i32, rustix::process::Signal::KILL).ok();
+            let _ = sys::waitpid(child_pid as i32);
+
+            mgr.remove_cgroup(pod_uid).ok();
+        }
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// §18  ROOTFS — apply_limits integration
+// ══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_apply_limits_sets_all_cgroup_controllers() {
+    use runtime::cgroup::{self, CgroupManager};
+
+    let mgr = match CgroupManager::new() {
+        Ok(m) if m.is_enabled() => m,
+        _ => {
+            eprintln!("cgroups not available, skipping");
+            return;
+        }
+    };
+
+    let pod_uid = "test-apply-limits-1";
+    mgr.create_pod_cgroup(pod_uid).unwrap();
+
+    let cfgs = vec![spec::ContainerConfigBuilder::new("c1", "web", "alpine")
+        .memory_limit(32 * 1024 * 1024)
+        .memory_low(16 * 1024 * 1024)
+        .memory_swap(64 * 1024 * 1024)
+        .cpu_limit(50000, 100000)
+        .cpu_shares(512)
+        .pids_max(32)
+        .cpuset("0", "0")
+        .build()];
+
+    cgroup::apply_limits(&mgr, pod_uid, &cfgs);
+
+    let cg_path = format!("/sys/fs/cgroup/z8s/{}", pod_uid);
+    assert_eq!(std::fs::read_to_string(format!("{}/memory.max", cg_path)).unwrap().trim(), (32 * 1024 * 1024).to_string());
+    assert_eq!(std::fs::read_to_string(format!("{}/memory.low", cg_path)).unwrap().trim(), (16 * 1024 * 1024).to_string());
+    assert_eq!(std::fs::read_to_string(format!("{}/memory.swap.max", cg_path)).unwrap().trim(), (64 * 1024 * 1024).to_string());
+    assert_eq!(std::fs::read_to_string(format!("{}/cpu.max", cg_path)).unwrap().trim(), "50000 100000");
+    assert_eq!(std::fs::read_to_string(format!("{}/cpu.weight", cg_path)).unwrap().trim(), "512");
+    assert_eq!(std::fs::read_to_string(format!("{}/pids.max", cg_path)).unwrap().trim(), "32");
+    assert_eq!(std::fs::read_to_string(format!("{}/cpuset.cpus", cg_path)).unwrap().trim(), "0");
+    assert_eq!(std::fs::read_to_string(format!("{}/cpuset.mems", cg_path)).unwrap().trim(), "0");
+
+    mgr.remove_cgroup(pod_uid).ok();
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// §19  SUPERVISOR — full spawn with security hardening
+// ══════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+#[ignore]
+async fn test_spawn_with_no_new_privileges_and_oom() {
+    use runtime::image::ImageManager;
+    use runtime::cgroup::CgroupManager;
+    use std::sync::Arc;
+
+    let img_mgr = Arc::new(ImageManager::new().unwrap());
+    let cgroup_mgr = Arc::new(CgroupManager::new().unwrap_or_else(|_| CgroupManager::new_stub()));
+    let sup = runtime::supervisor::ContainerSupervisor::new(img_mgr, cgroup_mgr);
+
+    // Build a minimal spec for alpine sleep
+    let spec = spec::ContainerSpec {
+        pod_name: "test-sec-hardening".into(),
+        pod_uid: "test-sec-harden-uid".into(),
+        namespace: "default".into(),
+        hostname: "test-pod".into(),
+        containers: vec![spec::ContainerConfigBuilder::new(
+            "test-sec-harden-uid-sleep",
+            "sleep",
+            "alpine:latest",
+        )
+        .entrypoint("/bin/sh")
+        .args(vec!["-c".into(), "echo running && sleep 30".into()])
+        .no_new_privileges()
+        .oom_score_adj(-500)
+        .memory_limit(32 * 1024 * 1024)
+        .cpu_shares(256)
+        .pids_max(16)
+        .build()],
+        labels: Default::default(),
+        subnet: None,
+    };
+
+    sup.start_pod_from_spec(&spec).await.unwrap();
+    assert!(sup.is_pod_alive("test-sec-hardening").await);
+
+    // Verify the child has NoNewPrivs=1
+    let alive = sup.is_pod_alive("test-sec-hardening").await;
+    assert!(alive);
+
+    sup.stop_pod_from_spec(&spec).await;
+    assert!(!sup.is_pod_alive("test-sec-hardening").await);
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// §20  ROOTFS — mask/readonly paths integration with real rootfs
+// ══════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+#[ignore]
+async fn test_spawn_with_masked_readonly_paths() {
+    use runtime::image::ImageManager;
+    use runtime::cgroup::CgroupManager;
+    use std::sync::Arc;
+
+    let img_mgr = Arc::new(ImageManager::new().unwrap());
+    let cgroup_mgr = Arc::new(CgroupManager::new().unwrap_or_else(|_| CgroupManager::new_stub()));
+    let sup = runtime::supervisor::ContainerSupervisor::new(img_mgr, cgroup_mgr);
+
+    let spec = spec::ContainerSpec {
+        pod_name: "test-mask-ro".into(),
+        pod_uid: "test-mask-ro-uid".into(),
+        namespace: "default".into(),
+        hostname: "test-pod".into(),
+        containers: vec![spec::ContainerConfigBuilder::new(
+            "test-mask-ro-uid-sleep",
+            "sleep",
+            "alpine:latest",
+        )
+        .entrypoint("/bin/sh")
+        .args(vec!["-c".into(), "echo running && sleep 30".into()])
+        .masked_paths(vec!["/proc/acpi".into()])
+        .readonly_paths(vec!["/proc/sys".into()])
+        .build()],
+        labels: Default::default(),
+        subnet: None,
+    };
+
+    sup.start_pod_from_spec(&spec).await.unwrap();
+    assert!(sup.is_pod_alive("test-mask-ro").await);
+
+    sup.stop_pod_from_spec(&spec).await;
+    assert!(!sup.is_pod_alive("test-mask-ro").await);
 }

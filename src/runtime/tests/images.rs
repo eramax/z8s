@@ -426,8 +426,10 @@ fn exec_code(rootfs: &str, cmd: &[&str]) -> i32 {
         z8s_core::sys::ForkResult::Parent(pid) => {
             let start = std::time::Instant::now();
             while start.elapsed() < Duration::from_secs(5) {
-                if let Some((p, code)) = z8s_core::sys::waitpid(-1) {
-                    if p == pid { return code; }
+                if let Some((p, code)) = z8s_core::sys::waitpid(-1)
+                    && p == pid
+                {
+                    return code;
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }

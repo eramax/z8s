@@ -78,6 +78,7 @@ pub trait RuntimeProvider: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cgroup::CgroupManager;
 
     // ── spec.rs — ContainerConfigBuilder ──────────────────────────────────
 
@@ -410,6 +411,188 @@ mod tests {
             rustix::fs::Mode::empty(),
         );
         assert!(result.is_err());
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // spec.rs — new builder fields
+    // ══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn builder_new_security_fields() {
+        let cfg = spec::ContainerConfigBuilder::new("c-1", "web", "alpine")
+            .no_new_privileges()
+            .oom_score_adj(-500)
+            .supplementary_groups(vec![100, 200, 300])
+            .umask(0o027)
+            .masked_paths(vec!["/proc/kcore".into()])
+            .readonly_paths(vec!["/sys/fs".into()])
+            .build();
+
+        assert!(cfg.no_new_privileges);
+        assert_eq!(cfg.oom_score_adj, Some(-500));
+        assert_eq!(cfg.supplementary_groups, vec![100, 200, 300]);
+        assert_eq!(cfg.umask, Some(0o027));
+        assert_eq!(cfg.masked_paths, vec!["/proc/kcore"]);
+        assert_eq!(cfg.readonly_paths, vec!["/sys/fs"]);
+    }
+
+    #[test]
+    fn builder_new_resource_fields() {
+        let cfg = spec::ContainerConfigBuilder::new("c-1", "web", "alpine")
+            .memory_limit(256 * 1024 * 1024)
+            .memory_swap(512 * 1024 * 1024)
+            .cpu_shares(512)
+            .cpuset("0-3", "0-1")
+            .pids_max(64)
+            .build();
+
+        assert_eq!(cfg.memory_limit_bytes, Some(256 * 1024 * 1024));
+        assert_eq!(cfg.memory_swap_bytes, Some(512 * 1024 * 1024));
+        assert_eq!(cfg.cpu_shares, Some(512));
+        assert_eq!(cfg.cpuset_cpus, Some("0-3".into()));
+        assert_eq!(cfg.cpuset_mems, Some("0-1".into()));
+        assert_eq!(cfg.pids_max, Some(64));
+    }
+
+    #[test]
+    fn builder_defaults_new_fields() {
+        let cfg = spec::ContainerConfigBuilder::new("c-1", "web", "alpine").build();
+        assert!(!cfg.no_new_privileges);
+        assert!(cfg.oom_score_adj.is_none());
+        assert!(cfg.supplementary_groups.is_empty());
+        assert!(cfg.umask.is_none());
+        assert!(cfg.masked_paths.is_empty());
+        assert!(cfg.readonly_paths.is_empty());
+        assert!(cfg.memory_swap_bytes.is_none());
+        assert!(cfg.cpu_shares.is_none());
+        assert!(cfg.cpuset_cpus.is_none());
+        assert!(cfg.cpuset_mems.is_none());
+        assert!(cfg.pids_max.is_none());
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // rootfs.rs — masked/readonly paths
+    // ══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn default_masked_paths_not_empty() {
+        assert!(!rootfs::DEFAULT_MASKED_PATHS.is_empty());
+        assert!(rootfs::DEFAULT_MASKED_PATHS.contains(&"/proc/kcore"));
+        assert!(rootfs::DEFAULT_MASKED_PATHS.contains(&"/sys/firmware"));
+    }
+
+    #[test]
+    fn default_readonly_paths_not_empty() {
+        assert!(!rootfs::DEFAULT_READONLY_PATHS.is_empty());
+        assert!(rootfs::DEFAULT_READONLY_PATHS.contains(&"/proc/sys"));
+    }
+
+    #[test]
+    fn apply_masked_paths_creates_mounts() {
+        let dir = std::env::temp_dir().join("z8s_test_masked");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Create a sensitive path to mask
+        std::fs::create_dir_all(dir.join("proc")).unwrap();
+        std::fs::write(dir.join("proc/kcore"), "host kernel").unwrap();
+
+        rootfs::apply_masked_paths(dir.to_str().unwrap(), &[]);
+
+        // After masking, the file content should be empty (overlaid with /dev/null)
+        let content = std::fs::read(dir.join("proc/kcore")).unwrap();
+        assert!(content.is_empty(), "masked path should be empty after bind-mount /dev/null");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn apply_masked_paths_with_extra() {
+        let dir = std::env::temp_dir().join("z8s_test_masked_extra");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("custom")).unwrap();
+        std::fs::write(dir.join("custom/secret"), "sensitive").unwrap();
+
+        rootfs::apply_masked_paths(dir.to_str().unwrap(), &["/custom/secret".into()]);
+
+        let content = std::fs::read(dir.join("custom/secret")).unwrap();
+        assert!(content.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn apply_readonly_paths_remounts() {
+        let dir = std::env::temp_dir().join("z8s_test_ro");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("proc/sys")).unwrap();
+        std::fs::write(dir.join("proc/sys/kernel"), "host kernel params").unwrap();
+
+        rootfs::apply_readonly_paths(dir.to_str().unwrap(), &[]);
+
+        // Verify the file exists (remount succeeded or gracefully degraded)
+        assert!(dir.join("proc/sys/kernel").exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // cgroup.rs — resource_stats (unit test with stub)
+    // ══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn cgroup_stats_disabled_returns_default() {
+        let mgr = CgroupManager::new_stub();
+        let stats = mgr.resource_stats("nonexistent-pod");
+        assert_eq!(stats.memory_current_bytes, 0);
+        assert!(stats.memory_limit_bytes.is_none());
+        assert_eq!(stats.cpu_usage_usec, 0);
+        assert_eq!(stats.pids_current, 0);
+    }
+
+    #[test]
+    fn cgroup_manager_new_stub_is_disabled() {
+        let mgr = CgroupManager::new_stub();
+        assert!(mgr.create_pod_cgroup("test").is_ok());
+        // All ops are no-ops
+        mgr.set_memory_limit("test", 1024).ok();
+        mgr.set_cpu_limit("test", 50000, 100000).ok();
+        mgr.set_cpu_shares("test", 512).ok();
+        mgr.set_memory_swap("test", -1).ok();
+        mgr.set_pids_max("test", 64).ok();
+        mgr.set_cpuset_cpus("test", "0-3").ok();
+        mgr.set_cpuset_mems("test", "0-1").ok();
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // supervisor.rs — merge_env dedup
+    // ══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn merge_env_dedup() {
+        let dir = std::env::temp_dir().join("z8s_test_merge_dedup");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let config = image::SavedImageConfig {
+            entrypoint: Some(vec!["/bin/sh".into()]),
+            env: Some(vec!["A=1".into(), "B=2".into(), "C=3".into()]),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        std::fs::write(dir.join(image::OCI_CONFIG_FILE), json).unwrap();
+
+        // Spec has duplicate key — first wins
+        let spec_env = vec![("A".into(), "spec".into()), ("A".into(), "dup".into())];
+        let merged = supervisor::merge_env(&spec_env, dir.to_str().unwrap());
+        let a_vals: Vec<_> = merged.iter().filter(|(k, _)| k == "A").collect();
+        assert_eq!(a_vals.len(), 1);
+        assert_eq!(a_vals[0].1, "spec");
+
+        // B and C come from OCI
+        assert!(merged.iter().any(|(k, v)| k == "B" && v == "2"));
+        assert!(merged.iter().any(|(k, v)| k == "C" && v == "3"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

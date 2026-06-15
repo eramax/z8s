@@ -35,13 +35,24 @@ pub struct ContainerConfig {
     pub volumes: Vec<ResolvedVolume>,
     pub memory_limit_bytes: Option<i64>,
     pub memory_low_bytes: Option<i64>,
+    pub memory_swap_bytes: Option<i64>,
     pub cpu_quota: Option<i64>,
     pub cpu_period: Option<i64>,
+    pub cpu_shares: Option<u64>,
+    pub cpuset_cpus: Option<String>,
+    pub cpuset_mems: Option<String>,
+    pub pids_max: Option<u64>,
     pub run_as_user: Option<u32>,
     pub run_as_group: Option<u32>,
+    pub supplementary_groups: Vec<u32>,
+    pub umask: Option<u32>,
     pub privileged: bool,
     pub cap_profile: Option<String>,
     pub extra_capabilities: Vec<String>,
+    pub no_new_privileges: bool,
+    pub oom_score_adj: Option<i32>,
+    pub masked_paths: Vec<String>,
+    pub readonly_paths: Vec<String>,
     pub isolated_net: bool,
     pub published_ports: HashMap<u16, u16>,
     pub probes: Vec<ProbeConfig>,
@@ -77,13 +88,24 @@ impl ContainerConfigBuilder {
                 volumes: Vec::new(),
                 memory_limit_bytes: None,
                 memory_low_bytes: None,
+                memory_swap_bytes: None,
                 cpu_quota: None,
                 cpu_period: None,
+                cpu_shares: None,
+                cpuset_cpus: None,
+                cpuset_mems: None,
+                pids_max: None,
                 run_as_user: None,
                 run_as_group: None,
+                supplementary_groups: Vec::new(),
+                umask: None,
                 privileged: false,
                 cap_profile: None,
                 extra_capabilities: Vec::new(),
+                no_new_privileges: false,
+                oom_score_adj: None,
+                masked_paths: Vec::new(),
+                readonly_paths: Vec::new(),
                 isolated_net: false,
                 published_ports: HashMap::new(),
                 probes: Vec::new(),
@@ -127,6 +149,11 @@ impl ContainerConfigBuilder {
         self
     }
 
+    pub fn memory_low(mut self, bytes: i64) -> Self {
+        self.config.memory_low_bytes = Some(bytes);
+        self
+    }
+
     pub fn cpu_limit(mut self, quota: i64, period: i64) -> Self {
         self.config.cpu_quota = Some(quota);
         self.config.cpu_period = Some(period);
@@ -156,6 +183,57 @@ impl ContainerConfigBuilder {
 
     pub fn native(mut self) -> Self {
         self.config.is_native = true;
+        self
+    }
+
+    pub fn memory_swap(mut self, bytes: i64) -> Self {
+        self.config.memory_swap_bytes = Some(bytes);
+        self
+    }
+
+    pub fn cpu_shares(mut self, shares: u64) -> Self {
+        self.config.cpu_shares = Some(shares);
+        self
+    }
+
+    pub fn cpuset(mut self, cpus: &str, mems: &str) -> Self {
+        if !cpus.is_empty() { self.config.cpuset_cpus = Some(cpus.to_string()); }
+        if !mems.is_empty() { self.config.cpuset_mems = Some(mems.to_string()); }
+        self
+    }
+
+    pub fn pids_max(mut self, max: u64) -> Self {
+        self.config.pids_max = Some(max);
+        self
+    }
+
+    pub fn supplementary_groups(mut self, gids: Vec<u32>) -> Self {
+        self.config.supplementary_groups = gids;
+        self
+    }
+
+    pub fn umask(mut self, mask: u32) -> Self {
+        self.config.umask = Some(mask);
+        self
+    }
+
+    pub fn no_new_privileges(mut self) -> Self {
+        self.config.no_new_privileges = true;
+        self
+    }
+
+    pub fn oom_score_adj(mut self, score: i32) -> Self {
+        self.config.oom_score_adj = Some(score);
+        self
+    }
+
+    pub fn masked_paths(mut self, paths: Vec<String>) -> Self {
+        self.config.masked_paths = paths;
+        self
+    }
+
+    pub fn readonly_paths(mut self, paths: Vec<String>) -> Self {
+        self.config.readonly_paths = paths;
         self
     }
 

@@ -361,9 +361,15 @@ impl ContainerSupervisor {
         let isolate_net = cfg.isolated_net;
         let run_as_user = cfg.run_as_user;
         let run_as_group = cfg.run_as_group;
+        let supplementary_groups = cfg.supplementary_groups.clone();
+        let umask_val = cfg.umask;
         let privileged = cfg.privileged;
         let extra_caps = cfg.extra_capabilities.clone();
         let cap_profile = cfg.cap_profile.clone();
+        let no_new_privileges = cfg.no_new_privileges;
+        let oom_score_adj = cfg.oom_score_adj;
+        let masked_paths = cfg.masked_paths.clone();
+        let readonly_paths = cfg.readonly_paths.clone();
         let is_native = cfg.is_native;
         let working_dir = cfg.working_dir.clone();
         let probes = cfg.probes.clone();
@@ -381,16 +387,22 @@ impl ContainerSupervisor {
                     self.spawn_root_ns_child(
                         &entrypoint, &args, &env, &rootfs_owned, hostname,
                         &volumes, isolate_net, run_as_user, run_as_group,
-                        privileged, &extra_caps, cap_profile.as_deref(), is_native,
-                        &working_dir, sync_w, ack_r, stdout_w, stderr_w,
+                        &supplementary_groups, umask_val,
+                        privileged, &extra_caps, cap_profile.as_deref(),
+                        no_new_privileges, oom_score_adj,
+                        &masked_paths, &readonly_paths,
+                        is_native, &working_dir, sync_w, ack_r, stdout_w, stderr_w,
                     );
                 } else {
                     // Rootless: user namespace + chroot
                     self.spawn_userns_child(
                         &entrypoint, &args, &env, &rootfs_owned, hostname,
                         &volumes, isolate_net, run_as_user, run_as_group,
-                        privileged, &extra_caps, cap_profile.as_deref(), is_native,
-                        &working_dir, sync_w, ack_r, stdout_w, stderr_w,
+                        &supplementary_groups, umask_val,
+                        privileged, &extra_caps, cap_profile.as_deref(),
+                        no_new_privileges, oom_score_adj,
+                        &masked_paths, &readonly_paths,
+                        is_native, &working_dir, sync_w, ack_r, stdout_w, stderr_w,
                     );
                 }
                 unreachable!("child should have exec'd");
@@ -456,7 +468,10 @@ impl ContainerSupervisor {
         entrypoint: &str, args: &[String], env: &[(String, String)],
         rootfs_path: &str, hostname: &str, volumes: &[ResolvedVolume],
         isolate_net: bool, run_as_user: Option<u32>, run_as_group: Option<u32>,
+        supplementary_groups: &[u32], umask_val: Option<u32>,
         privileged: bool, extra_caps: &[String], cap_profile: Option<&str>,
+        no_new_privileges: bool, oom_score_adj: Option<i32>,
+        masked_paths: &[String], readonly_paths: &[String],
         _is_native: bool, working_dir: &Option<String>,
         sync_w: OwnedFd, ack_r: OwnedFd,
         stdout_w: OwnedFd, stderr_w: OwnedFd,
@@ -482,7 +497,7 @@ impl ContainerSupervisor {
                     }
                 };
 
-                child_setup_privileges(run_as_group, run_as_user, working_dir, privileged, extra_caps, isolation, skip_landlock(privileged, cap_profile));
+                child_setup_privileges(run_as_group, run_as_user, supplementary_groups, umask_val, working_dir, privileged, extra_caps, no_new_privileges, oom_score_adj, masked_paths, readonly_paths, rootfs_path, isolation, skip_landlock(privileged, cap_profile));
                 let (exec_path, prog_args) = argv_for_isolation(entrypoint, args, rootfs_path, isolation);
                 execvpe_container(&exec_path, &prog_args, env, rootfs_path, isolation);
             }
@@ -503,7 +518,10 @@ impl ContainerSupervisor {
         entrypoint: &str, args: &[String], env: &[(String, String)],
         rootfs_path: &str, hostname: &str, volumes: &[ResolvedVolume],
         isolate_net: bool, run_as_user: Option<u32>, run_as_group: Option<u32>,
+        supplementary_groups: &[u32], umask_val: Option<u32>,
         privileged: bool, extra_caps: &[String], cap_profile: Option<&str>,
+        no_new_privileges: bool, oom_score_adj: Option<i32>,
+        masked_paths: &[String], readonly_paths: &[String],
         _is_native: bool, working_dir: &Option<String>,
         sync_w: OwnedFd, ack_r: OwnedFd,
         stdout_w: OwnedFd, stderr_w: OwnedFd,
@@ -517,7 +535,7 @@ impl ContainerSupervisor {
         };
 
         setup_child_pipes(stdout_w, stderr_w);
-        child_setup_privileges(run_as_group, run_as_user, working_dir, privileged, extra_caps, isolation, skip_landlock(privileged, cap_profile));
+        child_setup_privileges(run_as_group, run_as_user, supplementary_groups, umask_val, working_dir, privileged, extra_caps, no_new_privileges, oom_score_adj, masked_paths, readonly_paths, rootfs_path, isolation, skip_landlock(privileged, cap_profile));
         let (exec_path, prog_args) = argv_for_isolation(entrypoint, args, rootfs_path, isolation);
         execvpe_container(&exec_path, &prog_args, env, rootfs_path, isolation);
     }
@@ -802,15 +820,33 @@ fn setup_child_pipes(stdout_w: OwnedFd, stderr_w: OwnedFd) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn child_setup_privileges(
     run_as_group: Option<u32>,
     run_as_user: Option<u32>,
+    supplementary_groups: &[u32],
+    umask: Option<u32>,
     working_dir: &Option<String>,
     privileged: bool,
     extra_caps: &[String],
+    no_new_privileges: bool,
+    oom_score_adj: Option<i32>,
+    masked_paths: &[String],
+    readonly_paths: &[String],
+    rootfs_path: &str,
     isolation: RootfsIsolation,
     skip_landlock: bool,
 ) {
+    // Set umask first (affects file creation)
+    if let Some(mask) = umask {
+        z8s_core::sys::umask(mask);
+    }
+
+    // Supplementary groups (must be before setgid/setuid)
+    if !supplementary_groups.is_empty() {
+        z8s_core::sys::setgroups(supplementary_groups).ok();
+    }
+
     if let Some(gid) = run_as_group {
         z8s_core::sys::setgid(gid).ok();
     }
@@ -820,7 +856,23 @@ fn child_setup_privileges(
     if let Some(wd) = working_dir {
         sys::chdir(wd).ok();
     }
+
+    // Security hardening
+    if no_new_privileges {
+        z8s_core::sys::prctl_no_new_privs().ok();
+    }
+    if let Some(score) = oom_score_adj {
+        z8s_core::sys::prctl_set_oom_score_adj(score).ok();
+    }
+
     rootfs::drop_capabilities(privileged, extra_caps);
+
+    // Filesystem hardening
+    if isolation != RootfsIsolation::Degraded {
+        rootfs::apply_masked_paths(rootfs_path, masked_paths);
+        rootfs::apply_readonly_paths(rootfs_path, readonly_paths);
+    }
+
     if isolation != RootfsIsolation::Degraded && !skip_landlock {
         rootfs::apply_landlock();
     }

@@ -94,10 +94,8 @@ fn test_prepare_rootfs_creates_dirs() {
     if let Err(e) = &result {
         eprintln!("prepare_rootfs failed: {:?}", e);
         // Debug: check what dirs were created
-        for entry in std::fs::read_dir(&rootfs_dir).unwrap() {
-            if let Ok(entry) = entry {
-                eprintln!("  created: {:?}", entry.file_name());
-            }
+        for entry in std::fs::read_dir(&rootfs_dir).unwrap().flatten() {
+            eprintln!("  created: {:?}", entry.file_name());
         }
     }
     result.unwrap();
@@ -189,11 +187,11 @@ async fn test_alpine_container_lifecycle() {
         z8s_core::sys::ForkResult::Parent(child_pid) => {
             let start = std::time::Instant::now();
             while start.elapsed() < std::time::Duration::from_secs(5) {
-                if let Some((pid, _exit_code)) = z8s_core::sys::waitpid(-1) {
-                    if pid == child_pid {
-                        child_exited = true;
-                        break;
-                    }
+                if let Some((pid, _exit_code)) = z8s_core::sys::waitpid(-1)
+                    && pid == child_pid
+                {
+                    child_exited = true;
+                    break;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
@@ -232,11 +230,11 @@ async fn test_ubuntu_container_lifecycle() {
         z8s_core::sys::ForkResult::Parent(child_pid) => {
             let start = std::time::Instant::now();
             while start.elapsed() < std::time::Duration::from_secs(5) {
-                if let Some((pid, _)) = z8s_core::sys::waitpid(-1) {
-                    if pid == child_pid {
-                        child_exited = true;
-                        break;
-                    }
+                if let Some((pid, _)) = z8s_core::sys::waitpid(-1)
+                    && pid == child_pid
+                {
+                    child_exited = true;
+                    break;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }

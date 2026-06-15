@@ -152,8 +152,7 @@ mod tests {
 
     #[test]
     fn status_terminal_states() {
-        let mut status = ResourceStatus::default();
-        status.phase = Phase::Succeeded;
+        let mut status = ResourceStatus { phase: Phase::Succeeded, ..Default::default() };
         assert!(status.is_terminal());
 
         status.phase = Phase::Failed;
