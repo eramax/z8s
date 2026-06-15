@@ -151,8 +151,6 @@ impl ContainerSupervisor {
             let Some(rc) = running.remove(container_id) else { return };
             if let Some(pid) = rc.instance.pid {
                 info!("Stopping container {} (PID {})", container_id, pid);
-                let pgid = -(pid as i32);
-                sys::kill(pgid, rustix::process::Signal::KILL).ok();
                 sys::kill(pid as i32, rustix::process::Signal::KILL).ok();
             }
             rc.instance.rootfs.clone()
@@ -212,6 +210,21 @@ impl ContainerSupervisor {
         self.restart_counts.lock().await.iter()
             .filter(|(k, _)| k.starts_with(&prefix))
             .map(|(k, &v)| (k.strip_prefix(&prefix).unwrap_or(k).to_string(), v))
+            .collect()
+    }
+
+    /// Get PID of a container by its full container_id.
+    pub async fn container_pid(&self, container_id: &str) -> Option<u32> {
+        self.running.lock().await.get(container_id)
+            .and_then(|rc| rc.instance.pid)
+    }
+
+    /// Get PIDs of all containers in a pod.
+    pub async fn pod_pids(&self, pod_name: &str) -> Vec<u32> {
+        let prefix = format!("{}-", pod_name);
+        self.running.lock().await.iter()
+            .filter(|(k, _)| k.starts_with(&prefix))
+            .filter_map(|(_, rc)| rc.instance.pid)
             .collect()
     }
 
@@ -476,40 +489,38 @@ impl ContainerSupervisor {
         sync_w: OwnedFd, ack_r: OwnedFd,
         stdout_w: OwnedFd, stderr_w: OwnedFd,
     ) {
-        if let Err(e) = rootfs::unshare_container_ns(isolate_net, hostname, true) {
+        // Unshare mount/uts/ipc/net namespaces (no PID ns — double-fork
+        // loses track of the grandchild PID from the parent).
+        if let Err(e) = rootfs::unshare_container_ns(isolate_net, hostname, false) {
             error!("z8s: namespace setup failed: {}", e);
             std::process::exit(1);
         }
 
-        // Fork grandchild into new PID namespace
-        match sys::fork() {
-            Ok(sys::ForkResult::Child) => {
-                // Grandchild: setup rootfs + exec
-                drop(sync_w);
-                drop(ack_r);
-                setup_child_pipes(stdout_w, stderr_w);
+        // Signal parent that namespace setup is complete
+        if let Err(e) = z8s_core::sys::write_fd(&sync_w, b"S") {
+            error!("z8s: failed to write sync byte: {}", e);
+            std::process::exit(1);
+        }
+        let mut ack = [0u8; 1];
+        let n = z8s_core::sys::read_fd(&ack_r, &mut ack).unwrap_or(0);
+        if n != 1 || ack[0] != b'A' {
+            error!("z8s: invalid ack from parent");
+            std::process::exit(1);
+        }
 
-                let isolation = match rootfs::setup_container_rootfs(rootfs_path, volumes) {
-                    Ok(i) => i,
-                    Err(e) => {
-                        error!("z8s: rootfs setup failed: {}", e);
-                        std::process::exit(1);
-                    }
-                };
+        setup_child_pipes(stdout_w, stderr_w);
 
-                child_setup_privileges(run_as_group, run_as_user, supplementary_groups, umask_val, working_dir, privileged, extra_caps, no_new_privileges, oom_score_adj, masked_paths, readonly_paths, rootfs_path, isolation, skip_landlock(privileged, cap_profile));
-                let (exec_path, prog_args) = argv_for_isolation(entrypoint, args, rootfs_path, isolation);
-                execvpe_container(&exec_path, &prog_args, env, rootfs_path, isolation);
-            }
-            Ok(sys::ForkResult::Parent(_grandchild_pid)) => {
-                // Intermediate child: write grandchild PID, exit
-                std::process::exit(0);
-            }
+        let isolation = match rootfs::setup_container_rootfs(rootfs_path, volumes) {
+            Ok(i) => i,
             Err(e) => {
-                error!("z8s: second fork failed: {}", e);
+                error!("z8s: rootfs setup failed: {}", e);
                 std::process::exit(1);
             }
-        }
+        };
+
+        child_setup_privileges(run_as_group, run_as_user, supplementary_groups, umask_val, working_dir, privileged, extra_caps, no_new_privileges, oom_score_adj, masked_paths, readonly_paths, rootfs_path, isolation, skip_landlock(privileged, cap_profile));
+        let (exec_path, prog_args) = argv_for_isolation(entrypoint, args, rootfs_path, isolation);
+        execvpe_container(&exec_path, &prog_args, env, rootfs_path, isolation);
     }
 
     #[allow(clippy::too_many_arguments)]
