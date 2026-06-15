@@ -215,35 +215,33 @@ pub fn write_setgroups(pid: i32, value: &str) -> Result<(), Errno> {
 
 /// PR_SET_NO_NEW_PRIVS — prevent exec from gaining privileges (seccomp requirement).
 pub fn prctl_no_new_privs() -> Result<(), Errno> {
-    // PR_SET_NO_NEW_PRIVS = 38, arg2 = 1
-    let ret = unsafe { libc::prctl(38, 1, 0, 0, 0) };
-    if ret == 0 { Ok(()) } else { Err(Errno::from_raw_os_error(ret)) }
+    rustix::thread::set_no_new_privs(true)
 }
 
 /// PR_SET_OOM_SCORE_ADJ — set OOM kill priority (-1000 to +1000).
 /// Lower values = less likely to be killed. Default is 0.
 pub fn prctl_set_oom_score_adj(score: i32) -> Result<(), Errno> {
-    // PR_SET_OOM_SCORE_ADJ = 436
-    let ret = unsafe { libc::prctl(436, score, 0, 0, 0) };
-    if ret == 0 { Ok(()) } else { Err(Errno::from_raw_os_error(ret)) }
+    std::fs::write("/proc/self/oom_score_adj", score.to_string())
+        .map_err(|e| Errno::from_io_error(&e).unwrap_or(Errno::NOTSUP))
 }
 
 /// Set the umask for the current process.
 pub fn umask(mask: u32) -> u32 {
-    unsafe { libc::umask(mask) }
+    rustix::process::umask(rustix::fs::Mode::from_bits(mask).unwrap_or(rustix::fs::Mode::empty())).bits()
 }
 
 /// Set process group ID (for job control).
 pub fn setpgid(pid: u32, pgid: u32) -> Result<(), Errno> {
-    let ret = unsafe { libc::setpgid(pid as i32, pgid as i32) };
-    if ret == 0 { Ok(()) } else { Err(Errno::from_raw_os_error(ret)) }
+    rustix::process::setpgid(
+        rustix::process::Pid::from_raw(pid as i32),
+        rustix::process::Pid::from_raw(pgid as i32),
+    )
 }
 
 /// Set supplementary groups for the current process.
 pub fn setgroups(gids: &[u32]) -> Result<(), Errno> {
-    let c_gids: Vec<libc::gid_t> = gids.iter().map(|&g| g as libc::gid_t).collect();
-    let ret = unsafe { libc::setgroups(c_gids.len(), c_gids.as_ptr()) };
-    if ret == 0 { Ok(()) } else { Err(Errno::from_raw_os_error(ret)) }
+    let gids: Vec<rustix::process::Gid> = gids.iter().map(|&g| rustix::process::Gid::from_raw(g)).collect();
+    rustix::thread::set_thread_groups(&gids)
 }
 
 // ── Process Reaping ───────────────────────────────────────────────────────
