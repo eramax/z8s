@@ -146,11 +146,7 @@ async fn test_oom_score_adj_is_set() {
     let pid = pids[0];
 
     let adj = read_proc_oom_score_adj(pid);
-    // oom_score_adj write may fail after pivot_root if /proc is remounted.
-    // The default is 0. If we see -500, our write worked. If not, at least
-    // verify the process exists and the field is readable.
-    eprintln!("oom_score_adj for pid {}: {}", pid, adj);
-    assert!(adj >= -1000 && adj <= 1000, "oom_score_adj should be in valid range, got: {}", adj);
+    assert_eq!(adj, -500, "oom_score_adj should be -500, got: {}", adj);
 
     sup.stop_pod_from_spec(&spec).await;
 }
@@ -206,10 +202,8 @@ async fn test_container_logs_captured() {
 
     let logs = sup.get_container_logs("e2e-sec-logs-1", "sleep").await;
     let combined = logs.join("\n");
-    eprintln!("logs: {:?}", combined);
-    // Logs may or may not be captured depending on pipe setup timing.
-    // At minimum, the container should be alive.
-    assert!(sup.is_pod_alive("e2e-sec-logs-1").await, "container should be alive");
+    assert!(!combined.is_empty(), "logs should not be empty, got: {:?}", combined);
+    assert!(combined.contains("running"), "logs should contain 'running', got: {:?}", combined);
 
     sup.stop_pod_from_spec(&spec).await;
 }
@@ -241,8 +235,11 @@ async fn test_env_vars_in_container() {
     sup.start_pod_from_spec(&spec).await.unwrap();
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
-    let pids = sup.pod_pids("e2e-sec-env-1").await;
-    assert!(!pids.is_empty(), "should have container PIDs");
+    let logs = sup.get_container_logs("e2e-sec-env-1", "sleep").await;
+    let combined = logs.join("\n");
+    assert!(!combined.is_empty(), "logs should not be empty");
+    assert!(combined.contains("MY_VAR=hello-z8s"),
+        "logs should contain 'MY_VAR=hello-z8s', got: {:?}", combined);
 
     sup.stop_pod_from_spec(&spec).await;
 }
@@ -299,14 +296,14 @@ async fn test_cgroup_stats_with_live_container() {
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
     let stats = cg.resource_stats("stats-1");
-    // memory.current may be 0 briefly after cgroup creation — kernel charges lazily.
-    // Verify the limit is set and pids are tracked.
     assert_eq!(stats.memory_limit_bytes, Some(32 * 1024 * 1024),
-        "memory.max should be set");
+        "memory.max should be 33554432, got: {:?}", stats.memory_limit_bytes);
+    assert!(stats.memory_current_bytes > 0,
+        "memory.current should be > 0 (container has been running 2s), got: {}", stats.memory_current_bytes);
     assert!(stats.pids_current >= 1,
         "pids.current should be >= 1, got: {}", stats.pids_current);
     assert_eq!(stats.pids_limit, Some(16),
-        "pids.max should be 16");
+        "pids.max should be 16, got: {:?}", stats.pids_limit);
 
     sup.stop_pod_from_spec(&spec).await;
 }
@@ -358,18 +355,24 @@ async fn test_full_security_audit() {
 
     // OOM score — must be in valid range
     let adj = read_proc_oom_score_adj(pid);
-    assert!(adj >= -1000 && adj <= 1000, "oom_score_adj must be in range, got: {}", adj);
+    assert_eq!(adj, -500, "oom_score_adj must be -500, got: {}", adj);
 
-    // ── cgroup checks (skip if unavailable) ──
+    // ── cgroup checks ──
     if cg.is_enabled() {
         let mem_max = read_cgroup_file("audit-1", "memory.max");
-        assert_eq!(mem_max, (32 * 1024 * 1024).to_string());
+        assert_eq!(mem_max, (32 * 1024 * 1024).to_string(),
+            "memory.max should be 33554432, got: {}", mem_max);
+
+        let cpu_w = read_cgroup_file("audit-1", "cpu.weight");
+        assert_eq!(cpu_w, "256", "cpu.weight should be 256, got: {}", cpu_w);
+
+        let pids_max = read_cgroup_file("audit-1", "pids.max");
+        assert_eq!(pids_max, "16", "pids.max should be 16, got: {}", pids_max);
 
         let stats = cg.resource_stats("audit-1");
-        assert!(stats.memory_limit_bytes.is_some(), "memory.max should be set");
         assert_eq!(stats.memory_limit_bytes, Some(32 * 1024 * 1024));
-        assert!(stats.pids_current >= 1, "pids.current should be >= 1");
         assert_eq!(stats.pids_limit, Some(16));
+        assert!(stats.pids_current >= 1, "pids.current should be >= 1, got: {}", stats.pids_current);
     }
 
     sup.stop_pod_from_spec(&spec).await;
